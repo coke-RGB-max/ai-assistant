@@ -658,17 +658,15 @@
     <div id="toast" class="toast"></div>
   </div>
 
-  <script>
-    const CONFIG = {
-      BACKEND_IP: "127.0.0.1",
-      WS_PORT: 8000,
-      TIMESTAMP_THRESHOLD_MS: 5 * 60 * 1000,
-      TYPEWRITER_SPEED: 28,
-      RECONNECT_DELAY: 3000,
-      DEFAULT_INTIMACY: 30
-    };
-    CONFIG.HTTP_BASE = `http://${CONFIG.BACKEND_IP}:${CONFIG.WS_PORT}`;
-    CONFIG.WS_URL = `ws://${CONFIG.BACKEND_IP}:${CONFIG.WS_PORT}/ws`;
+const CONFIG = {
+  BACKEND_URL: "https://ai-assistant-production-f41e.up.railway.app",
+  WS_URL: "wss://ai-assistant-production-f41e.up.railway.app/ws",
+  TIMESTAMP_THRESHOLD_MS: 5 * 60 * 1000,
+  TYPEWRITER_SPEED: 28,
+  RECONNECT_DELAY: 3000,
+  DEFAULT_INTIMACY: 30
+};
+CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
 
     const ROLES = [
       { id: "jingwen", name: "璟雯", emoji: "🌙", color: "#818cf8", description: "傲娇少女" },
