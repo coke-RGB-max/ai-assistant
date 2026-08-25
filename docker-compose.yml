@@ -1,0 +1,50 @@
+# FlexiChrono 全栈后端 Docker Compose 部署
+# 敏感配置全部从 .env 文件读取（不硬编码在此文件中，可安全上传 GitHub）
+# 用法:
+#   cp .env.example .env  # 首次：复制模板
+#   nano .env             # 填入真实 API Key
+#   docker compose build  # 构建镜像
+#   docker compose up -d  # 后台启动
+#   docker compose logs -f # 查看日志
+version: "3.8"
+
+services:
+  flexichrono:
+    build: .
+    container_name: flexichrono
+    restart: unless-stopped
+    ports:
+      - "8000:8000"   # 主后端（QQ Webhook + WebSocket + 管理API）
+      - "8001:8001"   # 记忆后端（向量检索，仅内部用）
+      - "8002:8002"   # 人格后端（LLM 对话，仅内部用）
+      - "8003:8003"   # 主动后端（定时消息，仅内部用）
+      - "8004:8004"   # 语音后端（ASR + TTS，仅内部用）
+    volumes:
+      # 数据持久化：SQLite 数据库 + userdb.json
+      - ./data:/data
+    # 从 .env 文件加载所有环境变量
+    env_file:
+      - .env
+    environment:
+      # Docker 容器内强制使用 /data 作为数据目录
+      DATA_DIR: /data
+      # 容器内各服务通过 localhost 通信
+      PERSONALITY_SERVER_URL: http://127.0.0.1:8002
+      VECTOR_SERVER_URL: http://127.0.0.1:8001
+      PROACTIVE_SERVER_URL: http://127.0.0.1:8003
+      VOICE_SERVER_URL: http://127.0.0.1:8004
+      MAIN_SERVER_URL: http://127.0.0.1:8000
+    # 允许容器访问宿主机的 NapCat（Linux 用 host-gateway，Mac/Win 内置 host.docker.internal）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
