@@ -21,7 +21,7 @@ VECTOR_SERVER_URL = os.getenv("VECTOR_SERVER_URL", "http://127.0.0.1:8001")
 PROACTIVE_SERVER_URL = os.getenv("PROACTIVE_SERVER_URL", "http://127.0.0.1:8003")
 VOICE_SERVER_URL = os.getenv("VOICE_SERVER_URL", "http://127.0.0.1:8004")
 INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN", "change_me_internal_secret_2026")  # 与 proactive_server.py 保持一致
-PORT = 8000
+PORT = int(os.getenv("MAIN_PORT", "8000"))
 # 数据目录：Docker 中挂载到 /data，本地默认脚本所在目录
 DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 # ---- NapCat QQ 配置 ----
@@ -891,6 +891,11 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False,
 @app.get("/")
 async def root():
     return {"status": "ok", "service": "FlexiChrono 主后端", "version": "4.0.2"}
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "service": "main_server", "version": "4.0.2", "port": str(PORT)}
+
 @app.get("/api/roles")
 async def get_roles():
     try:

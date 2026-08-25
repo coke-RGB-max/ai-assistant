@@ -41,7 +41,10 @@ KIMI_BASE_URL = os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
 KIMI_MODEL = os.getenv("KIMI_MODEL", "moonshot-v1-8k")
 KIMI_SEARCH_MODEL = os.getenv("KIMI_SEARCH_MODEL", "moonshot-v1-search")  # 支持联网搜索的模型
 
-PORT = int(os.getenv("PORT", "8002"))
+# 注意：不要使用通用的 PORT 环境变量！云端平台（Sealos/Render/Railway等）
+# 通常会注入 PORT=8080 作为外部访问端口，会导致人格后端错误监听 8080 而非 8002。
+# 各后端服务使用各自专用的环境变量，与 voice_server(VOICE_PORT)/proactive(PROACTIVE_PORT) 保持一致。
+PORT = int(os.getenv("PERSONALITY_PORT", "8002"))
 DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(DATA_DIR, "personality_sessions.db")
 RATE_LIMIT_PER_MINUTE = 30

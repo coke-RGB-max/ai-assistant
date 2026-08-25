@@ -29,7 +29,7 @@ from contextlib import asynccontextmanager
 
 # ===================== 配置区（合并两套全部配置 =====================
 HOST = "0.0.0.0"
-PORT = 8001
+PORT = int(os.getenv("VECTOR_PORT", "8001"))
 SUB_VECTOR_API_TOKEN = os.getenv("VECTOR_API_TOKEN", "change_me_strong_secret_key_123456")
 DOUBAO_API_KEY = os.getenv("DOUBAO_API_KEY", "")
 DOUBAO_EMBEDDING_URL = os.getenv("DOUBAO_EMBEDDING_URL", "https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal")
@@ -315,8 +315,8 @@ async def root() -> Dict[str, str]:
 
 
 @app.get("/health")
-async def health() -> Dict[str, str]:
-    return {"status": "ok", "service": "vector_server", "version": "2.0.0", "port": PORT}
+async def health() -> Dict[str, Any]:
+    return {"status": "ok", "service": "vector_server", "version": "2.0.0", "port": str(PORT)}
 
 # -------------------------- 【新版独有的全部代码：DeepSeek记忆分析 + /api/memory/* 接口全部保留】 --------------------------
 DEEPSEEK_SYSTEM_PROMPT = (

@@ -38,12 +38,13 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 load_dotenv(SCRIPT_DIR / ".env")
 
 # 服务定义：(名称, 脚本文件, 端口, 环境变量覆盖)
+# 显式注入各服务专用 PORT 环境变量，防止云端平台注入的 PORT=8080 劫持内部服务端口
 SERVICES = [
-    ("vector",      "vector_server.py",      8001, {}),
-    ("personality", "personality_server.py", 8002, {}),
-    ("proactive",   "proactive_server.py",   8003, {}),
-    ("voice",       "voice_server.py",       8004, {}),
-    ("main",        "main.py",               8000, {}),
+    ("vector",      "vector_server.py",      8001, {"VECTOR_PORT": "8001"}),
+    ("personality", "personality_server.py", 8002, {"PERSONALITY_PORT": "8002"}),
+    ("proactive",   "proactive_server.py",   8003, {"PROACTIVE_PORT": "8003"}),
+    ("voice",       "voice_server.py",       8004, {"VOICE_PORT": "8004"}),
+    ("main",        "main.py",               8000, {"MAIN_PORT": "8000"}),
 ]
 
 DATA_DIR = os.getenv("DATA_DIR", str(SCRIPT_DIR))

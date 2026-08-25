@@ -687,7 +687,7 @@ class TriggerCheckRequest(BaseModel):
 # ---------- 接口 ----------
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "proactive_server", "version": "10.0.0", "port": PORT}
+    return {"status": "ok", "service": "proactive_server", "version": "10.0.0", "port": str(PORT)}
 
 
 @app.post("/api/activity/report")

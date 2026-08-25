@@ -285,7 +285,7 @@ class VoiceChatResponse(BaseModel):
 @app.get("/health")
 async def health():
     return {
-        "status": "ok", "service": "voice_server", "version": "1.0.0", "port": PORT,
+        "status": "ok", "service": "voice_server", "version": "1.0.0", "port": str(PORT),
         "asr_configured": bool(ASR_API_KEY),
         "tts_engine": TTS_ENGINE,
         "personality_url": PERSONALITY_SERVER_URL,

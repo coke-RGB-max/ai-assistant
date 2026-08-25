@@ -1,0 +1,1758 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>FlexiChrono AI陪伴</title>
+  <style>
+    :root {
+      --bg: #f0f2f5;
+      --bg-2: #e8ecf1;
+      --panel: #ffffff;
+      --panel-2: #f7f8fa;
+      --border: #e2e6ec;
+      --border-soft: #edf0f4;
+      --text: #1e293b;
+      --text-soft: #475569;
+      --muted: #94a3b8;
+      --primary: #6366f1;
+      --primary-strong: #4f46e5;
+      --primary-soft: #eef2ff;
+      --user-bubble: #6366f1;
+      --ai-bubble: #ffffff;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --shadow: 0 8px 30px rgba(0, 0, 0, 0.08);
+      --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.12);
+      --radius: 16px;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Microsoft YaHei", sans-serif;
+    }
+    body { min-height: 100dvh; }
+    button, input { font: inherit; }
+    button {
+      cursor: pointer;
+      border: none;
+      border-radius: 10px;
+      transition: all 0.15s ease;
+    }
+    button:active { transform: scale(0.98); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    input {
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      outline: none;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+    input:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+    }
+    .hidden { display: none !important; }
+
+    /* ===== 认证页 ===== */
+    .auth-view {
+      min-height: 100dvh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: linear-gradient(135deg, #eef2ff 0%, #f0f2f5 50%, #faf5ff 100%);
+    }
+    .auth-card {
+      width: min(100%, 400px);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 32px;
+      box-shadow: var(--shadow-lg);
+    }
+    .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
+    .brand-mark {
+      width: 46px; height: 46px; border-radius: 14px;
+      display: grid; place-items: center; font-size: 22px;
+      background: linear-gradient(135deg, #818cf8, #6366f1);
+      color: #fff;
+    }
+    .brand h1 { font-size: 20px; margin: 0 0 2px; }
+    .brand p { margin: 0; color: var(--muted); font-size: 13px; }
+    .field { margin-bottom: 16px; }
+    .field label { display: block; margin-bottom: 6px; color: var(--text-soft); font-size: 13px; font-weight: 500; }
+    .hint { margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .hint.error { color: var(--danger); }
+    .hint.success { color: var(--success); }
+    .primary-btn {
+      width: 100%;
+      padding: 12px 16px;
+      background: var(--primary);
+      color: #fff;
+      font-weight: 600;
+      font-size: 14px;
+    }
+    .primary-btn:hover { background: var(--primary-strong); }
+    .auth-footer { margin-top: 16px; text-align: center; color: var(--muted); font-size: 13px; }
+    .link-btn { background: transparent; color: var(--primary); padding: 6px 8px; font-size: 13px; }
+    .link-btn:hover { color: var(--primary-strong); text-decoration: underline; }
+
+    /* ===== 主聊天布局 ===== */
+    .main-view { min-height: 100dvh; }
+    .app-shell { min-height: 100dvh; display: grid; grid-template-columns: 280px 1fr; }
+    .sidebar {
+      border-right: 1px solid var(--border);
+      background: var(--panel);
+      display: flex;
+      flex-direction: column;
+      min-height: 100dvh;
+    }
+    .user-card {
+      display: flex; align-items: center; gap: 10px;
+      padding: 16px; border-bottom: 1px solid var(--border-soft);
+    }
+    .avatar {
+      width: 40px; height: 40px; border-radius: 12px;
+      display: grid; place-items: center; color: #fff; font-weight: 700;
+      flex-shrink: 0; background: linear-gradient(135deg, #818cf8, #6366f1);
+      font-size: 15px;
+    }
+    .avatar.ai-avatar { font-size: 18px; }
+    .user-meta { min-width: 0; flex: 1; }
+    .user-meta strong { display: block; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .user-meta span { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .icon-btn {
+      width: 36px; height: 36px; border-radius: 10px;
+      background: var(--panel-2); color: var(--text-soft);
+      border: 1px solid var(--border-soft);
+      display: inline-grid; place-items: center; flex-shrink: 0; font-size: 14px;
+    }
+    .icon-btn:hover { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
+
+    .conn-card { padding: 10px 16px; border-bottom: 1px solid var(--border-soft); font-size: 12px; }
+    .conn-row { display: flex; align-items: center; gap: 7px; color: var(--text-soft); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
+    .dot.orange { background: var(--warning); }
+    .dot.gray { background: #cbd5e1; }
+
+    .sidebar-actions { padding: 12px; }
+    .sidebar-actions button {
+      width: 100%; padding: 10px; background: var(--panel-2);
+      border: 1px solid var(--border); color: var(--text-soft); font-size: 13px;
+    }
+    .sidebar-actions button:hover { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
+
+    .conv-section { padding: 4px 10px 12px; overflow-y: auto; min-height: 0; flex: 1; }
+    .conv-section h3 { font-size: 11px; color: var(--muted); margin: 8px 6px 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+    .conv-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+    .conv-item {
+      display: flex; align-items: center; gap: 10px; width: 100%;
+      padding: 10px; background: transparent; border: 1px solid transparent;
+      color: var(--text-soft); text-align: left; border-radius: 12px;
+    }
+    .conv-item:hover { background: var(--panel-2); color: var(--text); }
+    .conv-item.active {
+      background: var(--primary-soft); border-color: rgba(99,102,241,0.2); color: var(--primary-strong);
+    }
+    .conv-info { min-width: 0; flex: 1; }
+    .conv-name { display: block; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .conv-preview { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .qq-bind-card {
+      margin: 8px 12px 12px; padding: 10px 12px; border-radius: 12px;
+      background: var(--panel-2); border: 1px solid var(--border-soft);
+      display: flex; align-items: center; gap: 8px; font-size: 12px;
+    }
+    .qq-bind-card.bound { background: #ecfdf5; border-color: #a7f3d0; }
+    .qq-bind-card .qq-icon { font-size: 16px; }
+    .qq-bind-card .qq-text { flex: 1; color: var(--text-soft); }
+    .qq-bind-card.bound .qq-text { color: #065f46; }
+    .qq-bind-card button {
+      padding: 5px 10px; font-size: 11px; background: var(--primary); color: #fff;
+    }
+    .qq-bind-card.bound button { background: #fff; color: var(--danger); border: 1px solid #fca5a5; }
+
+    /* ===== 聊天区 ===== */
+    .chat-area {
+      min-width: 0; min-height: 100dvh; display: flex; flex-direction: column;
+      background: var(--bg);
+    }
+    .chat-header {
+      height: 60px; padding: 0 18px; display: flex; align-items: center; gap: 12px;
+      border-bottom: 1px solid var(--border); background: var(--panel);
+      position: sticky; top: 0; z-index: 5;
+    }
+    .chat-target { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
+    .target-name { font-weight: 600; font-size: 15px; }
+    .target-status { font-size: 12px; color: var(--muted); margin-top: 1px; }
+    .header-right { display: flex; align-items: center; gap: 8px; }
+    .ghost-btn {
+      padding: 8px 14px; background: transparent; color: var(--text-soft);
+      border: 1px solid var(--border); font-size: 13px;
+    }
+    .ghost-btn:hover { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
+
+    .messages { flex: 1; overflow-y: auto; padding: 20px 16px 12px; display: flex; flex-direction: column; gap: 12px; }
+    .time-divider { text-align: center; margin: 6px 0; }
+    .time-divider span {
+      display: inline-block; padding: 4px 12px; border-radius: 999px;
+      background: var(--panel); color: var(--muted); font-size: 11px;
+      border: 1px solid var(--border-soft);
+    }
+    .message { display: flex; gap: 8px; align-items: flex-end; max-width: min(78%, 600px); }
+    .message.user { align-self: flex-end; flex-direction: row-reverse; }
+    .message.ai { align-self: flex-start; }
+    .bubble {
+      padding: 11px 14px; border-radius: 16px; line-height: 1.65; font-size: 14.5px;
+      word-break: break-word; white-space: pre-wrap;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    }
+    .message.ai .bubble {
+      background: var(--ai-bubble); border: 1px solid var(--border);
+      border-top-left-radius: 5px; color: var(--text);
+    }
+    .message.user .bubble {
+      background: var(--user-bubble); border-top-right-radius: 5px; color: #fff;
+    }
+    .typing-indicator { display: inline-flex; gap: 4px; align-items: center; padding: 14px 16px; }
+    .typing-indicator i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: blink 1.25s infinite ease-in-out; }
+    .typing-indicator i:nth-child(2) { animation-delay: 0.18s; }
+    .typing-indicator i:nth-child(3) { animation-delay: 0.36s; }
+    @keyframes blink {
+      0%, 80%, 100% { opacity: 0.35; transform: translateY(0); }
+      40% { opacity: 1; transform: translateY(-2px); }
+    }
+
+    .composer {
+      padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
+      border-top: 1px solid var(--border); background: var(--panel);
+      display: flex; align-items: center; gap: 10px;
+    }
+    #message-input { flex: 1; padding: 13px 16px; border-radius: 14px; min-width: 0; }
+    .send-btn {
+      padding: 13px 22px; border-radius: 14px;
+      background: var(--primary); color: #fff; font-weight: 600;
+    }
+    .send-btn:hover { background: var(--primary-strong); }
+    /* 语音按钮 */
+    .voice-btn {
+      width: 44px; height: 44px; border-radius: 14px; font-size: 18px;
+      flex-shrink: 0; display: grid; place-items: center;
+      background: var(--panel-2); border: 1px solid var(--border);
+      color: var(--text-soft); transition: all 0.15s ease;
+    }
+    .voice-btn:hover { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
+    .voice-btn.recording {
+      background: var(--danger); color: #fff; border-color: var(--danger);
+      animation: pulse-red 1.2s infinite;
+    }
+    @keyframes pulse-red {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.4); }
+      50% { box-shadow: 0 0 0 8px rgba(239,68,68,0); }
+    }
+    /* 录音遮罩 */
+    .recording-overlay {
+      position: fixed; inset: 0; z-index: 150;
+      background: rgba(0,0,0,0.45); display: grid; place-items: center;
+    }
+    .recording-box {
+      background: var(--panel); border-radius: 20px; padding: 32px 40px;
+      text-align: center; box-shadow: var(--shadow-lg);
+    }
+    .recording-wave {
+      display: flex; gap: 6px; align-items: center; justify-content: center;
+      height: 50px; margin-bottom: 16px;
+    }
+    .recording-wave span {
+      width: 6px; border-radius: 3px; background: var(--danger);
+      animation: wave 1s ease-in-out infinite;
+    }
+    .recording-wave span:nth-child(1) { height: 20px; animation-delay: 0s; }
+    .recording-wave span:nth-child(2) { height: 35px; animation-delay: 0.1s; }
+    .recording-wave span:nth-child(3) { height: 50px; animation-delay: 0.2s; }
+    .recording-wave span:nth-child(4) { height: 35px; animation-delay: 0.3s; }
+    .recording-wave span:nth-child(5) { height: 20px; animation-delay: 0.4s; }
+    @keyframes wave {
+      0%, 100% { transform: scaleY(0.5); }
+      50% { transform: scaleY(1); }
+    }
+    .recording-box p { margin: 0 0 8px; color: var(--text-soft); font-size: 14px; }
+    .recording-timer { font-size: 28px; font-weight: 700; color: var(--danger); font-variant-numeric: tabular-nums; }
+    /* 语音消息气泡 */
+    .voice-msg {
+      display: flex; align-items: center; gap: 8px; cursor: pointer;
+      padding: 10px 14px; min-width: 120px;
+    }
+    .voice-msg .voice-icon { font-size: 20px; }
+    .voice-msg .voice-duration { font-size: 12px; color: var(--muted); margin-left: auto; }
+    .voice-msg.playing .voice-icon { animation: pulse-red 1s infinite; }
+    .voice-msg .voice-wave-bar {
+      display: flex; gap: 2px; align-items: center;
+    }
+    .voice-msg .voice-wave-bar i {
+      width: 3px; border-radius: 2px; background: currentColor; opacity: 0.6;
+    }
+
+    /* ===== 弹窗 ===== */
+    .modal-mask {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 100;
+      display: grid; place-items: center; padding: 20px;
+    }
+    .modal-card {
+      width: min(100%, 440px); background: var(--panel);
+      border: 1px solid var(--border); border-radius: 18px; padding: 24px;
+      box-shadow: var(--shadow-lg);
+    }
+    .modal-card h2 { margin: 0 0 6px; font-size: 18px; }
+    .modal-card p { margin: 0 0 16px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+    .checkbox-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin: 10px 0 16px; }
+    .check-card {
+      display: flex; align-items: center; gap: 8px; padding: 10px; border-radius: 10px;
+      border: 1px solid var(--border); background: var(--panel-2); cursor: pointer;
+      font-size: 13px; color: var(--text-soft);
+    }
+    .check-card input { width: auto; }
+    .check-card:has(input:checked) { border-color: var(--primary); color: var(--primary-strong); background: var(--primary-soft); }
+
+    /* ===== 管理员后台 ===== */
+    .admin-panel { min-height: 100dvh; background: var(--bg); padding: 24px; }
+    .admin-header {
+      width: min(100%, 1000px); margin: 0 auto 20px;
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    }
+    .admin-header h2 { margin: 0; font-size: 20px; }
+    .admin-content {
+      width: min(100%, 1000px); margin: 0 auto;
+      display: grid; grid-template-columns: 320px 1fr; gap: 18px; align-items: start;
+    }
+    .admin-card {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 16px; padding: 20px; box-shadow: var(--shadow);
+    }
+    .admin-card h3 { margin: 0 0 14px; font-size: 15px; }
+    .user-row {
+      padding: 14px; border: 1px solid var(--border-soft); border-radius: 12px;
+      background: var(--panel-2); margin-bottom: 10px;
+    }
+    .user-row-head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px; margin-bottom: 12px; flex-wrap: wrap;
+    }
+    .user-row-head strong { font-size: 14px; }
+    .user-row-head .uinfo { font-size: 12px; color: var(--muted); }
+    .qq-badge {
+      display: inline-block; padding: 2px 8px; border-radius: 999px;
+      font-size: 11px; background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0;
+    }
+    .qq-badge.none { background: #f1f5f9; color: var(--muted); border-color: var(--border); }
+
+    .psych-role-block { margin-bottom: 12px; }
+    .psych-role-title {
+      font-size: 13px; font-weight: 600; color: var(--text-soft);
+      padding: 6px 0; margin-bottom: 6px; display: flex; align-items: center; gap: 6px;
+    }
+    .psych-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px;
+    }
+    .psych-field { display: flex; flex-direction: column; gap: 4px; }
+    .psych-field label {
+      font-size: 11px; color: var(--muted); display: flex; justify-content: space-between;
+    }
+    .psych-field input { padding: 8px 10px; font-size: 13px; }
+    .save-psych-btn {
+      margin-top: 8px; padding: 8px 16px; font-size: 13px;
+      background: var(--primary); color: #fff;
+    }
+    .save-psych-btn:hover { background: var(--primary-strong); }
+
+    /* ===== Toast ===== */
+    .toast {
+      position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(20px);
+      background: var(--text); color: #fff; padding: 10px 18px; border-radius: 999px;
+      font-size: 13px; z-index: 200; opacity: 0; transition: all 0.25s ease;
+      box-shadow: var(--shadow-lg); pointer-events: none;
+    }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    .toast.error { background: var(--danger); }
+    .toast.success { background: var(--success); }
+
+    #sidebar-toggle { display: none; }
+    @media (max-width: 860px) {
+      .app-shell { grid-template-columns: 1fr; }
+      .sidebar {
+        position: fixed; left: 0; top: 0; bottom: 0; width: min(84vw, 300px); z-index: 50;
+        transform: translateX(-105%); transition: transform 0.25s ease; box-shadow: var(--shadow-lg);
+      }
+      .sidebar.open { transform: translateX(0); }
+      #sidebar-toggle { display: inline-grid; }
+      .admin-content { grid-template-columns: 1fr; }
+      .message { max-width: 88%; }
+    }
+    @media (max-width: 480px) {
+      .auth-card { padding: 24px; }
+      .chat-header { padding: 0 12px; height: 56px; }
+      .messages { padding: 14px 10px 8px; }
+      .send-btn { padding: 13px 16px; }
+      .bubble { font-size: 14px; }
+      .admin-panel { padding: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <!-- 用户登录 -->
+    <section id="auth-view" class="auth-view">
+      <div class="auth-card">
+        <div class="brand">
+          <div class="brand-mark">🌙</div>
+          <div>
+            <h1>FlexiChrono</h1>
+            <p>AI 陪伴聊天</p>
+          </div>
+        </div>
+        <form id="login-form">
+          <div class="field">
+            <label for="login-username">用户名</label>
+            <input id="login-username" type="text" autocomplete="username" placeholder="请输入用户名" />
+          </div>
+          <div class="field">
+            <label for="login-password">密码</label>
+            <input id="login-password" type="password" autocomplete="current-password" placeholder="请输入密码" />
+            <div id="login-hint" class="hint">账号由管理员创建，如需开通请联系管理员。</div>
+          </div>
+          <button id="login-btn" class="primary-btn" type="submit">登录</button>
+        </form>
+        <div class="auth-footer">
+          <button id="goto-admin-login" class="link-btn" type="button">管理员登录</button>
+          <button id="goto-forgot-password" class="link-btn" type="button">忘记密码</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 管理员登录 -->
+    <section id="admin-login-view" class="auth-view hidden">
+      <div class="auth-card">
+        <div class="brand">
+          <div class="brand-mark">🛡️</div>
+          <div>
+            <h1>管理员登录</h1>
+            <p>管理账号与用户数据</p>
+          </div>
+        </div>
+        <form id="admin-login-form">
+          <div class="field">
+            <label for="admin-username">管理员账号</label>
+            <input id="admin-username" type="text" autocomplete="username" placeholder="请输入管理员账号" />
+          </div>
+          <div class="field">
+            <label for="admin-password">管理员密码</label>
+            <input id="admin-password" type="password" autocomplete="current-password" placeholder="请输入管理员密码" />
+            <div id="admin-login-hint" class="hint"></div>
+          </div>
+          <button id="admin-login-btn" class="primary-btn" type="submit">进入后台</button>
+        </form>
+        <div class="auth-footer">
+          <button id="back-to-user-login" class="link-btn" type="button">返回用户登录</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 忘记密码 -->
+    <section id="forgot-password-view" class="auth-view hidden">
+      <div class="auth-card">
+        <div class="brand">
+          <div class="brand-mark">🔑</div>
+          <div>
+            <h1>重置密码</h1>
+            <p>输入用户名以重置密码</p>
+          </div>
+        </div>
+        <form id="forgot-password-form">
+          <div class="field">
+            <label for="forgot-username">用户名</label>
+            <input id="forgot-username" type="text" autocomplete="username" placeholder="请输入用户名" />
+            <div id="forgot-hint" class="hint"></div>
+          </div>
+          <div class="modal-actions">
+            <button id="forgot-cancel-btn" class="ghost-btn" type="button">取消</button>
+            <button id="forgot-confirm-btn" class="primary-btn" type="submit" style="width:auto;padding:10px 22px;">确定</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- 主聊天界面 -->
+    <section id="main-view" class="main-view hidden">
+      <div class="app-shell">
+        <aside id="sidebar" class="sidebar">
+          <div class="user-card">
+            <div id="user-avatar" class="avatar"></div>
+            <div class="user-meta">
+              <strong id="user-nickname">用户</strong>
+              <span id="user-role-text">普通用户</span>
+            </div>
+            <button id="edit-nickname-btn" class="icon-btn" type="button" title="修改昵称">✎</button>
+            <button id="logout-btn" class="icon-btn" type="button" title="退出登录">⏻</button>
+          </div>
+          <div class="conn-card">
+            <div class="conn-row">
+              <span id="ws-dot" class="dot orange"></span>
+              <span id="ws-status-text">正在连接...</span>
+            </div>
+          </div>
+          <div id="qq-bind-card" class="qq-bind-card">
+            <span class="qq-icon">💬</span>
+            <span class="qq-text" id="qq-bind-text">绑定QQ号</span>
+            <button id="qq-bind-btn" type="button">绑定</button>
+          </div>
+          <div class="sidebar-actions">
+            <button id="create-group-btn" type="button">＋ 创建群聊</button>
+          </div>
+          <div class="conv-section">
+            <h3>单聊</h3>
+            <ul id="single-list" class="conv-list"></ul>
+            <h3 style="margin-top:14px;">群聊</h3>
+            <ul id="group-list" class="conv-list"></ul>
+          </div>
+        </aside>
+        <main class="chat-area">
+          <header class="chat-header">
+            <button id="sidebar-toggle" class="icon-btn" type="button">☰</button>
+            <div class="chat-target">
+              <div id="target-avatar" class="avatar ai-avatar">🌙</div>
+              <div>
+                <div id="target-name" class="target-name">璟雯</div>
+                <div id="target-status" class="target-status">在线</div>
+              </div>
+            </div>
+            <div class="header-right">
+              <button id="header-admin-btn" class="ghost-btn hidden" type="button">管理后台</button>
+            </div>
+          </header>
+          <div id="messages" class="messages"></div>
+          <footer class="composer">
+            <button id="voice-btn" class="icon-btn voice-btn" type="button" title="按住说话">🎤</button>
+            <input id="message-input" type="text" placeholder="说点什么..." autocomplete="off" />
+            <button id="send-btn" class="send-btn" type="button">发送</button>
+          </footer>
+          <div id="recording-overlay" class="recording-overlay hidden">
+            <div class="recording-box">
+              <div class="recording-wave"><span></span><span></span><span></span><span></span><span></span></div>
+              <p id="recording-hint">正在录音...松开发送，取消上滑</p>
+              <div id="recording-timer" class="recording-timer">0:00</div>
+            </div>
+          </div>
+        </main>
+      </div>
+    </section>
+
+    <!-- 管理员后台 -->
+    <section id="admin-panel" class="admin-panel hidden">
+      <header class="admin-header">
+        <button id="admin-back-btn" class="ghost-btn" type="button">← 返回聊天</button>
+        <h2>管理员后台</h2>
+        <button id="admin-logout-btn" class="ghost-btn" type="button">退出</button>
+      </header>
+      <div class="admin-content">
+        <div class="admin-card">
+          <h3>新建账号</h3>
+          <form id="create-user-form">
+            <div class="field">
+              <label for="new-username">用户名</label>
+              <input id="new-username" type="text" placeholder="用于登录" />
+            </div>
+            <div class="field">
+              <label for="new-nickname">昵称</label>
+              <input id="new-nickname" type="text" placeholder="展示名称" />
+            </div>
+            <div class="field">
+              <label for="new-password">密码</label>
+              <input id="new-password" type="password" placeholder="至少 6 位" />
+              <div id="new-password-hint" class="hint"></div>
+            </div>
+            <button id="create-user-btn" class="primary-btn" type="submit">创建账号</button>
+          </form>
+        </div>
+        <div class="admin-card">
+          <h3>全部用户 · 实时心理数据</h3>
+          <div id="users-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 昵称弹窗 -->
+    <div id="nickname-modal" class="modal-mask hidden">
+      <div class="modal-card">
+        <h2 id="nickname-title">设置昵称</h2>
+        <p>昵称会显示在聊天界面中。</p>
+        <div class="field">
+          <input id="nickname-input" type="text" maxlength="20" placeholder="请输入昵称" />
+          <div id="nickname-hint" class="hint"></div>
+        </div>
+        <div class="modal-actions">
+          <button id="nickname-cancel-btn" class="ghost-btn hidden" type="button">取消</button>
+          <button id="nickname-save-btn" class="primary-btn" type="button" style="width:auto;padding:10px 22px;">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- QQ绑定弹窗 -->
+    <div id="qq-modal" class="modal-mask hidden">
+      <div class="modal-card">
+        <h2>绑定 QQ 号</h2>
+        <p>绑定后，你通过 QQ 与角色的聊天记录和亲密度将自动合并到当前账号。</p>
+        <div class="field">
+          <label for="qq-number-input">QQ 号</label>
+          <input id="qq-number-input" type="text" placeholder="请输入你的QQ号" maxlength="12" />
+          <div id="qq-hint" class="hint"></div>
+        </div>
+        <div class="modal-actions">
+          <button id="qq-cancel-btn" class="ghost-btn" type="button">取消</button>
+          <button id="qq-confirm-btn" class="primary-btn" type="button" style="width:auto;padding:10px 22px;">绑定</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 群聊弹窗 -->
+    <div id="group-modal" class="modal-mask hidden">
+      <div class="modal-card">
+        <h2>创建群聊</h2>
+        <p>选择多个 AI 角色加入同一个群聊。</p>
+        <form id="group-form">
+          <div class="field">
+            <label for="group-name-input">群聊名称</label>
+            <input id="group-name-input" type="text" maxlength="20" placeholder="例如：今晚一起聊天" />
+          </div>
+          <div id="group-role-checkboxes" class="checkbox-grid"></div>
+          <div id="group-hint" class="hint">请至少选择 2 个角色。</div>
+          <div class="modal-actions">
+            <button id="group-cancel-btn" class="ghost-btn" type="button">取消</button>
+            <button id="group-create-btn" class="primary-btn" type="submit" style="width:auto;padding:10px 22px;">创建</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- 重置密码确认弹窗 -->
+    <div id="reset-confirm-modal" class="modal-mask hidden">
+      <div class="modal-card">
+        <h2>确认重置密码</h2>
+        <p>重置密码会使所有聊天数据全部丢失，是否重置？</p>
+        <p style="color:var(--danger);">重置后密码将变为 123456。</p>
+        <div class="modal-actions">
+          <button id="reset-modal-cancel-btn" class="ghost-btn" type="button">取消</button>
+          <button id="reset-modal-confirm-btn" class="primary-btn" type="button" style="width:auto;padding:10px 22px;">确认重置</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+  </div>
+
+  <script>
+    const CONFIG = {
+      BACKEND_IP: "127.0.0.1",
+      WS_PORT: 8000,
+      TIMESTAMP_THRESHOLD_MS: 5 * 60 * 1000,
+      TYPEWRITER_SPEED: 28,
+      RECONNECT_DELAY: 3000,
+      DEFAULT_INTIMACY: 30
+    };
+    CONFIG.HTTP_BASE = `http://${CONFIG.BACKEND_IP}:${CONFIG.WS_PORT}`;
+    CONFIG.WS_URL = `ws://${CONFIG.BACKEND_IP}:${CONFIG.WS_PORT}/ws`;
+
+    const ROLES = [
+      { id: "jingwen", name: "璟雯", emoji: "🌙", color: "#818cf8", description: "傲娇少女" },
+      { id: "qinghe", name: "清禾", emoji: "🌿", color: "#34d399", description: "温柔学姐" },
+      { id: "yechen", name: "夜宸", emoji: "✨", color: "#f472b6", description: "冷静少年" }
+    ];
+
+    // 心理状态字段定义（管理员编辑用）
+    const PSYCH_FIELDS = [
+      { key: "intimacy", label: "亲密度", min: 0, max: 100 },
+      { key: "trust", label: "信任感", min: 0, max: 100 },
+      { key: "security", label: "安全感", min: 0, max: 100 },
+      { key: "attachment", label: "依恋度", min: 0, max: 100 },
+      { key: "jealousy", label: "醋意", min: 0, max: 100 },
+      { key: "fatigue", label: "疲劳度", min: 0, max: 100 },
+      { key: "mood", label: "心情", min: 0, max: 100 }
+    ];
+
+    let currentUser = null;
+    let currentConversationId = null;
+    let conversationsByUser = {};
+    let ws = null;
+    let reconnectTimer = null;
+    let wsAuthFailed = false;
+    let nicknameForced = false;
+    let isTyping = false;
+    let resetTargetUsername = null;
+    // 语音录音相关
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let recordingStream = null;
+    let isRecording = false;
+    let recordingStartTime = 0;
+    let recordingTimerInterval = null;
+    let recordingCancelled = false;
+    let currentAudio = null;  // 当前播放的语音
+
+    const $ = (s) => document.querySelector(s);
+    const $$ = (s) => Array.from(document.querySelectorAll(s));
+    const delay = (ms) => new Promise(r => setTimeout(r, ms));
+
+    function escapeHtml(text) {
+      return String(text ?? "").replace(/[&<>"']/g, ch => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[ch]));
+    }
+
+    function showToast(message, type = "default") {
+      const toast = $("#toast");
+      toast.textContent = message;
+      toast.className = `toast show ${type}`;
+      clearTimeout(showToast._timer);
+      showToast._timer = setTimeout(() => { toast.className = "toast"; }, 2600);
+    }
+
+    function setButtonLoading(btn, loading, text = "处理中...") {
+      if (!btn) return;
+      if (loading) {
+        btn.dataset.orig = btn.textContent;
+        btn.textContent = text;
+        btn.disabled = true;
+      } else {
+        btn.textContent = btn.dataset.orig || btn.textContent;
+        btn.disabled = false;
+      }
+    }
+
+    function formatChatTime(ts) {
+      const d = new Date(ts);
+      const h = d.getHours();
+      const period = h < 6 ? "凌晨" : h < 12 ? "上午" : h < 18 ? "下午" : "晚上";
+      return `${period} ${String(h).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+    }
+
+    const getRole = (id) => ROLES.find(r => r.id === id) || ROLES[0];
+
+    function ensureConversations(username) {
+      if (!conversationsByUser[username]) {
+        conversationsByUser[username] = {};
+        ROLES.forEach(role => {
+          const id = `single-${role.id}`;
+          conversationsByUser[username][id] = {
+            id, type: "single", name: role.name, roleId: role.id, roleIds: [role.id],
+            messages: [], lastMessageAt: null, intimacy: CONFIG.DEFAULT_INTIMACY
+          };
+        });
+      }
+      return conversationsByUser[username];
+    }
+
+    const getCurrentConversations = () => currentUser ? ensureConversations(currentUser.username) : {};
+    const getCurrentConversation = () => getCurrentConversations()[currentConversationId];
+    const createMessage = (role, content) => ({
+      id: `msg-${Date.now()}-${Math.random().toString(16).slice(2)}`, role, content, timestamp: Date.now()
+    });
+
+    // ===== 登录 =====
+    async function handleLogin(e, adminMode) {
+      e.preventDefault();
+      const username = $(adminMode ? "#admin-username" : "#login-username").value.trim();
+      const password = $(adminMode ? "#admin-password" : "#login-password").value;
+      const hint = $(adminMode ? "#admin-login-hint" : "#login-hint");
+      const btn = $(adminMode ? "#admin-login-btn" : "#login-btn");
+      hint.className = "hint";
+      if (!username || !password) {
+        hint.textContent = "请输入用户名和密码";
+        hint.className = "hint error";
+        return;
+      }
+      setButtonLoading(btn, true, "登录中...");
+      try {
+        const resp = await fetch(`${CONFIG.HTTP_BASE}${adminMode ? "/api/admin/login" : "/api/login"}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password })
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          hint.textContent = data.error || data.detail || "登录失败";
+          hint.className = "hint error";
+          setButtonLoading(btn, false);
+          return;
+        }
+        currentUser = {
+          username: data.username || username,
+          nickname: data.nickname || username,
+          role: data.is_admin ? "admin" : (adminMode ? "admin" : "user"),
+          token: data.token,
+          intimacy: data.intimacy || {},
+          qqBound: data.qq_bound || false
+        };
+        finishLogin(adminMode);
+        connectWebSocket(data.token);
+      } catch (err) {
+        hint.textContent = "无法连接后端，请确认服务已启动";
+        hint.className = "hint error";
+      }
+      setButtonLoading(btn, false);
+    }
+
+    function finishLogin(goAdmin) {
+      $("#auth-view").classList.add("hidden");
+      $("#admin-login-view").classList.add("hidden");
+      $("#forgot-password-view").classList.add("hidden");
+      $("#main-view").classList.remove("hidden");
+      $("#admin-panel").classList.add("hidden");
+      $("#header-admin-btn").classList.toggle("hidden", currentUser.role !== "admin");
+      renderUserCard();
+      renderQQBindStatus();
+      ensureConversations(currentUser.username);
+      switchConversation(`single-${ROLES[0].id}`);
+      if (!currentUser.nickname || currentUser.nickname === currentUser.username) {
+        openNicknameModal(true);
+      }
+    }
+
+    function renderUserCard() {
+      $("#user-nickname").textContent = currentUser.nickname;
+      $("#user-role-text").textContent = currentUser.role === "admin" ? "管理员" : "普通用户";
+      $("#user-avatar").textContent = (currentUser.nickname || currentUser.username).slice(0, 1).toUpperCase();
+    }
+
+    // ===== WebSocket =====
+    function connectWebSocket(token) {
+      try {
+        ws = new WebSocket(CONFIG.WS_URL);
+      } catch (e) {
+        updateConnectionStatus(false);
+        return;
+      }
+      ws.onopen = () => ws.send(JSON.stringify({ action: "auth", token }));
+      ws.onmessage = (event) => {
+        try { handleServerMessage(JSON.parse(event.data)); } catch (e) { console.warn(e); }
+      };
+      ws.onclose = () => {
+        updateConnectionStatus(false);
+        if (!wsAuthFailed) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = setTimeout(() => connectWebSocket(token), CONFIG.RECONNECT_DELAY);
+        }
+      };
+      ws.onerror = () => updateConnectionStatus(false);
+    }
+
+    function updateConnectionStatus(connected) {
+      $("#ws-dot").className = connected ? "dot" : "dot orange";
+      $("#ws-status-text").textContent = connected ? "已连接" : "正在重连...";
+    }
+
+    function sendWS(payload) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(payload));
+        return true;
+      }
+      return false;
+    }
+
+    function handleServerMessage(msg) {
+      const conv = getCurrentConversation();
+      if (msg.type === "auth_ok") {
+        updateConnectionStatus(true);
+        wsAuthFailed = false;
+        if (msg.nickname) currentUser.nickname = msg.nickname;
+        if (msg.qq_bound !== undefined) {
+          currentUser.qqBound = msg.qq_bound;
+          renderQQBindStatus();
+        }
+        showToast("已连接", "success");
+      } else if (msg.type === "reply") {
+        removeTypingIndicator();
+        if (conv) appendAIMessage(conv, msg.content, msg.role_ids?.[0]);
+        if (msg.intimacy) {
+          Object.entries(msg.intimacy).forEach(([rid, score]) => {
+            updateIntimacyData(rid, score);
+          });
+        }
+      } else if (msg.type === "voice_reply") {
+        removeTypingIndicator();
+        if (conv) {
+          appendAIMessage(conv, msg.content, msg.role_ids?.[0]);
+          // 如果有语音，在文本气泡后追加语音气泡
+          if (msg.audio) {
+            appendVoiceMessage(conv, msg.audio, msg.audio_format || "mp3", false, msg.role_ids?.[0]);
+          }
+        }
+        if (msg.intimacy) {
+          Object.entries(msg.intimacy).forEach(([rid, score]) => {
+            updateIntimacyData(rid, score);
+          });
+        }
+      } else if (msg.type === "nickname_updated") {
+        currentUser.nickname = msg.nickname;
+        renderUserCard();
+        showToast("昵称已更新", "success");
+      } else if (msg.type === "proactive") {
+        removeTypingIndicator();
+        if (conv) appendAIMessage(conv, msg.content, msg.role_id);
+      } else if (msg.type === "error") {
+        removeTypingIndicator();
+        showToast(msg.message || "发生错误", "error");
+        if (msg.message === "认证失败") wsAuthFailed = true;
+      }
+    }
+
+    // ===== 会话列表 =====
+    function renderConversationList() {
+      const convs = getCurrentConversations();
+      const singleList = $("#single-list");
+      const groupList = $("#group-list");
+      singleList.innerHTML = "";
+      groupList.innerHTML = "";
+      Object.values(convs).forEach(conv => {
+        const li = document.createElement("li");
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = `conv-item ${conv.id === currentConversationId ? "active" : ""}`;
+        const av = document.createElement("div");
+        av.className = "avatar";
+        av.style.cssText = "width:32px;height:32px;border-radius:10px;font-size:14px;";
+        if (conv.type === "group") {
+          av.textContent = "👥";
+        } else {
+          const role = getRole(conv.roleId);
+          av.textContent = role.emoji;
+          av.style.background = `linear-gradient(135deg, ${role.color}88, ${role.color})`;
+        }
+        const info = document.createElement("div");
+        info.className = "conv-info";
+        const name = document.createElement("span");
+        name.className = "conv-name";
+        name.textContent = conv.name;
+        const preview = document.createElement("span");
+        preview.className = "conv-preview";
+        const last = conv.messages.filter(m => m.role !== "time").slice(-1)[0];
+        preview.textContent = last ? last.content : "暂无消息";
+        info.appendChild(name);
+        info.appendChild(preview);
+        btn.appendChild(av);
+        btn.appendChild(info);
+        btn.addEventListener("click", () => {
+          switchConversation(conv.id);
+          $("#sidebar").classList.remove("open");
+        });
+        li.appendChild(btn);
+        (conv.type === "group" ? groupList : singleList).appendChild(li);
+      });
+    }
+
+    function switchConversation(convId) {
+      const convs = getCurrentConversations();
+      if (!convs[convId]) return;
+      currentConversationId = convId;
+      renderConversationList();
+      renderChatHeader();
+      renderMessages();
+    }
+
+    function renderChatHeader() {
+      const conv = getCurrentConversation();
+      if (!conv) return;
+      const av = $("#target-avatar");
+      $("#target-name").textContent = conv.name;
+      if (conv.type === "group") {
+        av.textContent = "👥";
+        av.style.background = "";
+        $("#target-status").textContent = `${conv.roleIds.length} 位角色`;
+      } else {
+        const role = getRole(conv.roleId);
+        av.textContent = role.emoji;
+        av.style.background = `linear-gradient(135deg, ${role.color}88, ${role.color})`;
+        $("#target-status").textContent = role.description;
+      }
+    }
+
+    function updateIntimacyData(roleId, score) {
+      const convs = getCurrentConversations();
+      Object.values(convs).forEach(conv => {
+        if (conv.type === "single" && conv.roleId === roleId) {
+          conv.intimacy = Math.max(0, Math.min(100, Number(score) || conv.intimacy));
+        }
+      });
+      if (currentUser) {
+        currentUser.intimacy[roleId] = Math.max(0, Math.min(100, Number(score) || currentUser.intimacy[roleId] || CONFIG.DEFAULT_INTIMACY));
+      }
+    }
+
+    // ===== 消息渲染 =====
+    function renderMessages() {
+      const box = $("#messages");
+      box.innerHTML = "";
+      const conv = getCurrentConversation();
+      if (!conv) return;
+      conv.messages.forEach(m => appendMessageToDOM(m, conv, false));
+      scrollToBottom();
+    }
+
+    function appendMessageToDOM(msg, conv, scroll = true) {
+      const box = $("#messages");
+      if (msg.role === "time") {
+        const div = document.createElement("div");
+        div.className = "time-divider";
+        const span = document.createElement("span");
+        span.textContent = msg.content;
+        div.appendChild(span);
+        box.appendChild(div);
+      } else {
+        const row = document.createElement("div");
+        row.className = `message ${msg.role === "user" ? "user" : "ai"}`;
+        if (msg.role !== "user") {
+          const av = document.createElement("div");
+          av.className = "avatar ai-avatar";
+          av.style.cssText = "width:32px;height:32px;border-radius:10px;";
+          if (conv.type === "group") {
+            av.textContent = "👥";
+          } else {
+            const role = getRole(conv.roleId);
+            av.textContent = role.emoji;
+            av.style.background = `linear-gradient(135deg, ${role.color}88, ${role.color})`;
+          }
+          row.appendChild(av);
+        }
+        const bubble = document.createElement("div");
+        bubble.className = "bubble";
+        bubble.textContent = msg.content || "";
+        row.appendChild(bubble);
+        box.appendChild(row);
+        msg._element = bubble;
+      }
+      if (scroll) scrollToBottom();
+    }
+
+    async function appendAIMessage(conv, content, roleId) {
+      const aiMsg = createMessage("ai", content);
+      conv.messages.push(aiMsg);
+      appendMessageToDOM(aiMsg, conv);
+      renderConversationList();
+      await typeWriter(aiMsg._element, content);
+    }
+
+    function scrollToBottom() {
+      $("#messages").scrollTop = $("#messages").scrollHeight;
+    }
+
+    function addTypingIndicator() {
+      removeTypingIndicator();
+      const row = document.createElement("div");
+      row.className = "message ai";
+      row.id = "typing-row";
+      const av = document.createElement("div");
+      av.className = "avatar ai-avatar";
+      av.style.cssText = "width:32px;height:32px;border-radius:10px;";
+      const conv = getCurrentConversation();
+      if (conv?.type === "group") { av.textContent = "👥"; }
+      else { const r = getRole(conv?.roleId); av.textContent = r.emoji; av.style.background = `linear-gradient(135deg, ${r.color}88, ${r.color})`; }
+      const bubble = document.createElement("div");
+      bubble.className = "bubble typing-indicator";
+      bubble.innerHTML = "<i></i><i></i><i></i>";
+      row.appendChild(av);
+      row.appendChild(bubble);
+      $("#messages").appendChild(row);
+      scrollToBottom();
+    }
+
+    function removeTypingIndicator() {
+      const el = $("#typing-row");
+      if (el) el.remove();
+    }
+
+    function maybeAddTimeDivider(conv) {
+      const now = Date.now();
+      if (!conv.lastMessageAt || now - conv.lastMessageAt > CONFIG.TIMESTAMP_THRESHOLD_MS) {
+        const t = createMessage("time", formatChatTime(now));
+        conv.messages.push(t);
+        appendMessageToDOM(t, conv);
+      }
+      conv.lastMessageAt = now;
+    }
+
+    async function handleSend() {
+      const input = $("#message-input");
+      const content = input.value.trim();
+      if (!content || isTyping) return;
+      const conv = getCurrentConversation();
+      if (!conv) return;
+      maybeAddTimeDivider(conv);
+      const userMsg = createMessage("user", content);
+      conv.messages.push(userMsg);
+      appendMessageToDOM(userMsg, conv);
+      renderConversationList();
+      input.value = "";
+      if (sendWS({ action: "chat", message: content, role_ids: conv.roleIds || [conv.roleId] })) {
+        addTypingIndicator();
+        return;
+      }
+      showToast("未连接到服务器", "error");
+    }
+
+    // ===== 语音录音 =====
+    async function startRecording() {
+      if (isRecording || isTyping) return;
+      try {
+        recordingStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (e) {
+        showToast("无法访问麦克风，请检查浏览器权限", "error");
+        return;
+      }
+      let mimeType = "";
+      if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
+        mimeType = "audio/webm;codecs=opus";
+      } else if (MediaRecorder.isTypeSupported("audio/webm")) {
+        mimeType = "audio/webm";
+      }
+      try {
+        mediaRecorder = mimeType ? new MediaRecorder(recordingStream, { mimeType }) : new MediaRecorder(recordingStream);
+      } catch (e) {
+        showToast("当前浏览器不支持录音", "error");
+        cleanupRecordingStream();
+        return;
+      }
+      audioChunks = [];
+      recordingCancelled = false;
+      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
+      mediaRecorder.onstop = handleRecordingStop;
+      mediaRecorder.start();
+      isRecording = true;
+      recordingStartTime = Date.now();
+      $("#voice-btn").classList.add("recording");
+      $("#recording-overlay").classList.remove("hidden");
+      updateRecordingTimer();
+      recordingTimerInterval = setInterval(updateRecordingTimer, 200);
+      setTimeout(() => { if (isRecording) stopRecording(false); }, 60000);
+    }
+
+    function stopRecording(cancelled) {
+      if (!isRecording) return;
+      recordingCancelled = cancelled;
+      isRecording = false;
+      clearInterval(recordingTimerInterval);
+      $("#voice-btn").classList.remove("recording");
+      $("#recording-overlay").classList.add("hidden");
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+      }
+      cleanupRecordingStream();
+    }
+
+    function cleanupRecordingStream() {
+      if (recordingStream) {
+        recordingStream.getTracks().forEach(t => t.stop());
+        recordingStream = null;
+      }
+    }
+
+    function updateRecordingTimer() {
+      const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+      const m = Math.floor(elapsed / 60);
+      const s = String(elapsed % 60).padStart(2, "0");
+      const timerEl = $("#recording-timer");
+      if (timerEl) timerEl.textContent = `${m}:${s}`;
+    }
+
+    async function handleRecordingStop() {
+      const duration = (Date.now() - recordingStartTime) / 1000;
+      if (recordingCancelled || duration < 0.5) {
+        audioChunks = [];
+        if (duration < 0.5 && !recordingCancelled) showToast("录音时间太短", "error");
+        return;
+      }
+      const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || "audio/webm" });
+      audioChunks = [];
+      let fmt = "webm";
+      if (blob.type.includes("wav")) fmt = "wav";
+      else if (blob.type.includes("ogg")) fmt = "ogg";
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const base64 = reader.result.split(",")[1];
+        const conv = getCurrentConversation();
+        if (!conv) return;
+        maybeAddTimeDivider(conv);
+        const voiceMsg = createMessage("user", `[语音 ${duration.toFixed(1)}秒]`);
+        voiceMsg.isVoice = true;
+        voiceMsg.voiceDuration = duration;
+        conv.messages.push(voiceMsg);
+        appendMessageToDOM(voiceMsg, conv);
+        renderConversationList();
+        addTypingIndicator();
+        if (!sendWS({
+          action: "voice_chat",
+          audio: base64,
+          audio_format: fmt,
+          role_ids: conv.roleIds || [conv.roleId]
+        })) {
+          removeTypingIndicator();
+          showToast("未连接到服务器", "error");
+        }
+      };
+      reader.readAsDataURL(blob);
+    }
+
+    function appendVoiceMessage(conv, audioBase64, audioFormat, isUser, roleId) {
+      const box = $("#messages");
+      const wrap = document.createElement("div");
+      wrap.className = `message ${isUser ? "user" : "ai"}`;
+      if (!isUser && roleId) {
+        const role = getRole(roleId);
+        const av = document.createElement("div");
+        av.className = "avatar ai-avatar";
+        av.textContent = role.emoji;
+        av.style.background = `linear-gradient(135deg, ${role.color}88, ${role.color})`;
+        wrap.appendChild(av);
+      }
+      const bubble = document.createElement("div");
+      bubble.className = "bubble voice-msg";
+      const icon = document.createElement("span");
+      icon.className = "voice-icon";
+      icon.textContent = "🔊";
+      const wave = document.createElement("span");
+      wave.className = "voice-wave-bar";
+      for (let i = 0; i < 5; i++) {
+        const bar = document.createElement("i");
+        bar.style.height = `${8 + Math.random() * 14}px`;
+        wave.appendChild(bar);
+      }
+      const dur = document.createElement("span");
+      dur.className = "voice-duration";
+      dur.textContent = "点击播放";
+      bubble.appendChild(icon);
+      bubble.appendChild(wave);
+      bubble.appendChild(dur);
+      bubble.addEventListener("click", () => playVoice(bubble, audioBase64, audioFormat, dur));
+      wrap.appendChild(bubble);
+      box.appendChild(wrap);
+      scrollToBottom();
+    }
+
+    function playVoice(bubbleEl, audioBase64, audioFormat, durEl) {
+      if (currentAudio) {
+        currentAudio.pause();
+        currentAudio = null;
+        document.querySelectorAll(".voice-msg.playing").forEach(el => el.classList.remove("playing"));
+      }
+      const mime = audioFormat === "mp3" ? "audio/mpeg" : `audio/${audioFormat}`;
+      const byteChars = atob(audioBase64);
+      const byteNumbers = new Array(byteChars.length);
+      for (let i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
+      const blob = new Blob([new Uint8Array(byteNumbers)], { type: mime });
+      const url = URL.createObjectURL(blob);
+      currentAudio = new Audio(url);
+      bubbleEl.classList.add("playing");
+      currentAudio.onended = () => {
+        bubbleEl.classList.remove("playing");
+        URL.revokeObjectURL(url);
+        currentAudio = null;
+        if (durEl) durEl.textContent = "点击播放";
+      };
+      currentAudio.ontimeupdate = () => {
+        if (durEl && currentAudio && isFinite(currentAudio.duration)) {
+          const remain = currentAudio.duration - currentAudio.currentTime;
+          durEl.textContent = `${remain.toFixed(1)}s`;
+        }
+      };
+      currentAudio.play().catch(e => {
+        showToast("语音播放失败", "error");
+        bubbleEl.classList.remove("playing");
+        URL.revokeObjectURL(url);
+      });
+    }
+
+    async function typeWriter(el, text, speed = CONFIG.TYPEWRITER_SPEED) {
+      isTyping = true;
+      el.textContent = "";
+      for (let i = 0; i < text.length; i++) {
+        el.textContent += text[i];
+        scrollToBottom();
+        await delay(speed);
+      }
+      isTyping = false;
+    }
+
+    // ===== 昵称 =====
+    function openNicknameModal(forced) {
+      nicknameForced = forced;
+      $("#nickname-input").value = currentUser?.nickname || "";
+      $("#nickname-hint").textContent = forced ? "首次登录请设置昵称" : "1 到 20 个字符";
+      $("#nickname-hint").className = "hint";
+      $("#nickname-cancel-btn").classList.toggle("hidden", forced);
+      $("#nickname-title").textContent = forced ? "设置昵称" : "修改昵称";
+      $("#nickname-modal").classList.remove("hidden");
+      setTimeout(() => $("#nickname-input").focus(), 50);
+    }
+
+    async function saveNickname() {
+      const nickname = $("#nickname-input").value.trim();
+      const hint = $("#nickname-hint");
+      if (nickname.length < 1 || nickname.length > 20) {
+        hint.textContent = "昵称长度需在 1 到 20 字之间";
+        hint.className = "hint error";
+        return;
+      }
+      try {
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/user/nickname`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${currentUser.token}` },
+          body: JSON.stringify({ nickname })
+        });
+        if (!resp.ok) throw new Error();
+        const data = await resp.json();
+        currentUser.nickname = data.nickname;
+      } catch (e) {
+        showToast("保存失败", "error");
+        return;
+      }
+      renderUserCard();
+      $("#nickname-modal").classList.add("hidden");
+      showToast("昵称已保存", "success");
+    }
+
+    // ===== QQ 绑定 =====
+    function renderQQBindStatus() {
+      const card = $("#qq-bind-card");
+      const text = $("#qq-bind-text");
+      const btn = $("#qq-bind-btn");
+      if (!currentUser) return;
+      if (currentUser.qqBound) {
+        card.classList.add("bound");
+        text.textContent = "QQ 已绑定";
+        btn.textContent = "解绑";
+      } else {
+        card.classList.remove("bound");
+        text.textContent = "绑定 QQ 号";
+        btn.textContent = "绑定";
+      }
+    }
+
+    function openQQModal() {
+      if (currentUser.qqBound) {
+        // 解绑确认
+        if (confirm("确定要解绑 QQ 吗？解绑后 QQ 消息将使用临时身份。")) {
+          unbindQQ();
+        }
+        return;
+      }
+      $("#qq-number-input").value = "";
+      $("#qq-hint").className = "hint";
+      $("#qq-hint").textContent = "";
+      $("#qq-modal").classList.remove("hidden");
+      setTimeout(() => $("#qq-number-input").focus(), 50);
+    }
+
+    async function confirmBindQQ() {
+      const qq = $("#qq-number-input").value.trim();
+      const hint = $("#qq-hint");
+      if (!/^\d{5,12}$/.test(qq)) {
+        hint.textContent = "请输入正确的 QQ 号";
+        hint.className = "hint error";
+        return;
+      }
+      const btn = $("#qq-confirm-btn");
+      setButtonLoading(btn, true, "绑定中...");
+      try {
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/user/bind-qq`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${currentUser.token}` },
+          body: JSON.stringify({ qq_number: qq })
+        });
+        const data = await resp.json();
+        if (!resp.ok || !data.success) {
+          hint.textContent = data.error || "绑定失败";
+          hint.className = "hint error";
+          setButtonLoading(btn, false);
+          return;
+        }
+        currentUser.qqBound = true;
+        renderQQBindStatus();
+        $("#qq-modal").classList.add("hidden");
+        const m = data.migrated || {};
+        showToast(`绑定成功${m.memories ? `，迁移${m.memories}条记忆` : ""}`, "success");
+      } catch (e) {
+        hint.textContent = "网络错误，请稍后重试";
+        hint.className = "hint error";
+      }
+      setButtonLoading(btn, false);
+    }
+
+    async function unbindQQ() {
+      try {
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/user/unbind-qq`, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${currentUser.token}` }
+        });
+        const data = await resp.json();
+        if (data.success) {
+          currentUser.qqBound = false;
+          renderQQBindStatus();
+          showToast("已解绑", "success");
+        }
+      } catch (e) {
+        showToast("解绑失败", "error");
+      }
+    }
+
+    // ===== 群聊 =====
+    function openGroupModal() {
+      const box = $("#group-role-checkboxes");
+      box.innerHTML = "";
+      ROLES.forEach(role => {
+        const label = document.createElement("label");
+        label.className = "check-card";
+        label.innerHTML = `<input type="checkbox" value="${role.id}" /> <span>${role.emoji} ${role.name}</span>`;
+        box.appendChild(label);
+      });
+      $("#group-name-input").value = "";
+      $("#group-hint").className = "hint";
+      $("#group-hint").textContent = "请至少选择 2 个角色。";
+      $("#group-modal").classList.remove("hidden");
+    }
+
+    function createGroup(e) {
+      e.preventDefault();
+      const name = $("#group-name-input").value.trim();
+      const selected = $$("#group-role-checkboxes input:checked").map(i => i.value);
+      const hint = $("#group-hint");
+      if (!name) { hint.textContent = "请输入群聊名称"; hint.className = "hint error"; return; }
+      if (selected.length < 2) { hint.textContent = "请至少选择 2 个角色"; hint.className = "hint error"; return; }
+      const id = `group-${Date.now()}`;
+      ensureConversations(currentUser.username)[id] = {
+        id, type: "group", name, roleId: selected[0], roleIds: selected,
+        messages: [], lastMessageAt: null, intimacy: CONFIG.DEFAULT_INTIMACY
+      };
+      $("#group-modal").classList.add("hidden");
+      switchConversation(id);
+      showToast("群聊已创建", "success");
+    }
+
+    // ===== 忘记密码 =====
+    function openForgotPassword() {
+      $("#auth-view").classList.add("hidden");
+      $("#admin-login-view").classList.add("hidden");
+      $("#forgot-password-view").classList.remove("hidden");
+      $("#forgot-username").value = "";
+      $("#forgot-hint").textContent = "";
+    }
+
+    function handleForgotSubmit(e) {
+      e.preventDefault();
+      const username = $("#forgot-username").value.trim();
+      const hint = $("#forgot-hint");
+      if (!username) { hint.textContent = "请输入用户名"; hint.className = "hint error"; return; }
+      resetTargetUsername = username;
+      $("#reset-confirm-modal").classList.remove("hidden");
+    }
+
+    async function confirmResetPassword() {
+      const username = resetTargetUsername;
+      if (!username) return;
+      const btn = $("#reset-modal-confirm-btn");
+      setButtonLoading(btn, true, "重置中...");
+      try {
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/reset-password`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, new_password: "123456" })
+        });
+        if (!resp.ok) throw new Error();
+        showToast("密码已重置为 123456", "success");
+      } catch (e) {
+        showToast("重置失败，请确认服务已启动", "error");
+        setButtonLoading(btn, false);
+        return;
+      }
+      setButtonLoading(btn, false);
+      $("#reset-confirm-modal").classList.add("hidden");
+      $("#forgot-password-view").classList.add("hidden");
+      $("#auth-view").classList.remove("hidden");
+      $("#login-username").value = username;
+      $("#login-password").value = "";
+      $("#login-hint").className = "hint success";
+      $("#login-hint").textContent = "密码已重置为 123456，请使用新密码登录。";
+    }
+
+    // ===== 管理员后台 =====
+    function renderAdminPanel() {
+      loadUsers();
+    }
+
+    async function loadUsers() {
+      try {
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/users`, {
+          headers: { Authorization: `Bearer ${currentUser.token}` }
+        });
+        if (!resp.ok) throw new Error();
+        const data = await resp.json();
+        renderUsersList(data.users || []);
+      } catch (e) {
+        showToast("无法加载用户列表", "error");
+        renderUsersList([]);
+      }
+    }
+
+    function renderUsersList(users) {
+      const box = $("#users-list");
+      box.innerHTML = "";
+      if (!users.length) {
+        box.innerHTML = '<div class="hint">暂无用户</div>';
+        return;
+      }
+      users.forEach(user => {
+        const row = document.createElement("div");
+        row.className = "user-row";
+        const head = document.createElement("div");
+        head.className = "user-row-head";
+        const qqBadge = user.qq
+          ? `<span class="qq-badge">QQ: ${escapeHtml(user.qq)}</span>`
+          : `<span class="qq-badge none">未绑定QQ</span>`;
+        head.innerHTML = `<div><strong>${escapeHtml(user.nickname)}</strong> <span class="uinfo">@${escapeHtml(user.username)} · ${user.is_admin ? "管理员" : "普通用户"}</span></div>${qqBadge}`;
+        row.appendChild(head);
+
+        // 心理状态编辑区（异步加载）
+        const psychArea = document.createElement("div");
+        psychArea.className = "psych-area";
+        psychArea.innerHTML = '<div class="hint">加载中...</div>';
+        row.appendChild(psychArea);
+
+        box.appendChild(row);
+        loadUserPsych(user.username, psychArea);
+      });
+    }
+
+    async function loadUserPsych(username, container) {
+      try {
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/users/${encodeURIComponent(username)}/psych`, {
+          headers: { Authorization: `Bearer ${currentUser.token}` }
+        });
+        if (!resp.ok) throw new Error();
+        const data = await resp.json();
+        renderPsychEditor(username, data.states || {}, container);
+      } catch (e) {
+        container.innerHTML = '<div class="hint error">加载失败</div>';
+      }
+    }
+
+    function renderPsychEditor(username, states, container) {
+      container.innerHTML = "";
+      ROLES.forEach(role => {
+        const st = states[role.id] || {};
+        const block = document.createElement("div");
+        block.className = "psych-role-block";
+        const title = document.createElement("div");
+        title.className = "psych-role-title";
+        title.textContent = `${role.emoji} ${role.name}`;
+        block.appendChild(title);
+
+        const grid = document.createElement("div");
+        grid.className = "psych-grid";
+        PSYCH_FIELDS.forEach(field => {
+          const wrap = document.createElement("div");
+          wrap.className = "psych-field";
+          const val = st[field.key] ?? (field.key === "intimacy" ? CONFIG.DEFAULT_INTIMACY : 0);
+          wrap.innerHTML = `
+            <label><span>${field.label}</span><span class="val-display">${Math.round(val)}</span></label>
+            <input type="number" min="${field.min}" max="${field.max}" step="1" value="${Math.round(val)}" data-field="${field.key}" />
+          `;
+          const input = wrap.querySelector("input");
+          const display = wrap.querySelector(".val-display");
+          input.addEventListener("input", () => {
+            let v = parseInt(input.value) || 0;
+            v = Math.max(field.min, Math.min(field.max, v));
+            display.textContent = v;
+          });
+          grid.appendChild(wrap);
+        });
+        block.appendChild(grid);
+
+        const saveBtn = document.createElement("button");
+        saveBtn.className = "save-psych-btn";
+        saveBtn.type = "button";
+        saveBtn.textContent = "保存";
+        saveBtn.addEventListener("click", async () => {
+          const payload = { role_id: role.id };
+          grid.querySelectorAll("input").forEach(input => {
+            payload[input.dataset.field] = parseInt(input.value) || 0;
+          });
+          setButtonLoading(saveBtn, true, "保存中...");
+          try {
+            const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/users/${encodeURIComponent(username)}/psych`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${currentUser.token}`
+              },
+              body: JSON.stringify(payload)
+            });
+            const data = await resp.json();
+            if (!resp.ok || !data.success) {
+              showToast(data.error || "保存失败", "error");
+            } else {
+              showToast(`${role.name} 数据已保存`, "success");
+            }
+          } catch (e) {
+            showToast("网络错误", "error");
+          }
+          setButtonLoading(saveBtn, false);
+        });
+        block.appendChild(saveBtn);
+        container.appendChild(block);
+      });
+    }
+
+    async function handleCreateUser(e) {
+      e.preventDefault();
+      const username = $("#new-username").value.trim();
+      const nickname = $("#new-nickname").value.trim() || username;
+      const password = $("#new-password").value;
+      const pHint = $("#new-password-hint");
+      pHint.textContent = "";
+      pHint.className = "hint";
+      if (!username) { pHint.textContent = "请输入用户名"; pHint.className = "hint error"; return; }
+      if (password.length < 6) { pHint.textContent = "密码至少 6 位"; pHint.className = "hint error"; return; }
+      const btn = $("#create-user-btn");
+      setButtonLoading(btn, true, "创建中...");
+      try {
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/users`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentUser.token}` },
+          body: JSON.stringify({ username, nickname, password })
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || "创建失败");
+        showToast("账号已创建", "success");
+        $("#create-user-form").reset();
+        loadUsers();
+      } catch (err) {
+        showToast(err.message || "创建失败", "error");
+      }
+      setButtonLoading(btn, false);
+    }
+
+    // ===== 退出 =====
+    function logout() {
+      if (ws) { ws.onclose = null; ws.close(); }
+      ws = null;
+      currentUser = null;
+      currentConversationId = null;
+      clearTimeout(reconnectTimer);
+      $("#main-view").classList.add("hidden");
+      $("#admin-panel").classList.add("hidden");
+      $("#auth-view").classList.remove("hidden");
+      $("#messages").innerHTML = "";
+    }
+
+    // ===== 事件绑定 =====
+    function bindEvents() {
+      $("#login-form").addEventListener("submit", e => handleLogin(e, false));
+      $("#admin-login-form").addEventListener("submit", e => handleLogin(e, true));
+      $("#goto-admin-login").addEventListener("click", () => {
+        $("#auth-view").classList.add("hidden");
+        $("#admin-login-view").classList.remove("hidden");
+      });
+      $("#back-to-user-login").addEventListener("click", () => {
+        $("#admin-login-view").classList.add("hidden");
+        $("#auth-view").classList.remove("hidden");
+      });
+      $("#goto-forgot-password").addEventListener("click", openForgotPassword);
+      $("#forgot-cancel-btn").addEventListener("click", () => {
+        $("#forgot-password-view").classList.add("hidden");
+        $("#auth-view").classList.remove("hidden");
+      });
+      $("#forgot-password-form").addEventListener("submit", handleForgotSubmit);
+      $("#reset-modal-cancel-btn").addEventListener("click", () => $("#reset-confirm-modal").classList.add("hidden"));
+      $("#reset-modal-confirm-btn").addEventListener("click", confirmResetPassword);
+
+      $("#logout-btn").addEventListener("click", logout);
+      $("#admin-logout-btn").addEventListener("click", logout);
+      $("#admin-back-btn").addEventListener("click", () => {
+        $("#admin-panel").classList.add("hidden");
+        $("#main-view").classList.remove("hidden");
+      });
+      $("#header-admin-btn").addEventListener("click", () => {
+        $("#main-view").classList.add("hidden");
+        $("#admin-panel").classList.remove("hidden");
+        renderAdminPanel();
+      });
+
+      $("#send-btn").addEventListener("click", handleSend);
+      $("#message-input").addEventListener("keydown", e => {
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
+      });
+
+      // 语音按钮：点击开始/停止录音
+      const voiceBtn = $("#voice-btn");
+      voiceBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        if (isRecording) { stopRecording(false); } else { startRecording(); }
+      });
+      $("#recording-overlay").addEventListener("click", (e) => {
+        if (e.target.id === "recording-overlay") stopRecording(true);
+      });
+      let touchStartY = 0;
+      voiceBtn.addEventListener("touchstart", (e) => {
+        e.preventDefault();
+        touchStartY = e.touches[0].clientY;
+        if (!isRecording) startRecording();
+      }, { passive: false });
+      voiceBtn.addEventListener("touchend", (e) => {
+        e.preventDefault();
+        if (isRecording) stopRecording(false);
+      });
+      voiceBtn.addEventListener("touchmove", (e) => {
+        if (!isRecording) return;
+        const hint = $("#recording-hint");
+        if (e.touches[0].clientY < touchStartY - 60) {
+          if (hint) hint.textContent = "松开手指，取消发送";
+        } else {
+          if (hint) hint.textContent = "正在录音...松开发送，上滑取消";
+        }
+      }, { passive: true });
+
+      $("#create-group-btn").addEventListener("click", openGroupModal);
+      $("#group-form").addEventListener("submit", createGroup);
+      $("#group-cancel-btn").addEventListener("click", () => $("#group-modal").classList.add("hidden"));
+
+      $("#edit-nickname-btn").addEventListener("click", () => openNicknameModal(false));
+      $("#nickname-save-btn").addEventListener("click", saveNickname);
+      $("#nickname-cancel-btn").addEventListener("click", () => $("#nickname-modal").classList.add("hidden"));
+
+      $("#qq-bind-btn").addEventListener("click", openQQModal);
+      $("#qq-cancel-btn").addEventListener("click", () => $("#qq-modal").classList.add("hidden"));
+      $("#qq-confirm-btn").addEventListener("click", confirmBindQQ);
+
+      $("#create-user-form").addEventListener("submit", handleCreateUser);
+
+      $("#sidebar-toggle").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
+
+      // 点击遮罩关闭弹窗
+      document.querySelectorAll(".modal-mask").forEach(mask => {
+        mask.addEventListener("click", e => {
+          if (e.target === mask) mask.classList.add("hidden");
+        });
+      });
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      bindEvents();
+    });
+  </script>
+</body>
+</html>
