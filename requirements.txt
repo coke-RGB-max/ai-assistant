@@ -1,0 +1,17 @@
+# FlexiChrono 全栈后端 Python 依赖
+# Web 框架
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# HTTP 客户端（内部服务间调用 + 外部API）
+httpx>=0.25.0
+
+# 数据校验
+pydantic>=2.0.0
+
+# 语音合成（edge-tts 微软免费TTS）
+edge-tts>=6.1.0
+
+# 异步HTTP（edge-tts 依赖，显式声明确保版本兼容）
+aiohttp>=3.9.0
