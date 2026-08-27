@@ -111,13 +111,48 @@ TIME_CONTEXT_MAP = {
 
 def get_time_context(override_hour: Optional[int] = None) -> Dict:
     """获取当前时间段上下文。override_hour 用于测试或前端强制指定。"""
-    hour = override_hour if override_hour is not None else datetime.datetime.now().hour
+    return story_local_time_context(override_hour)
+
+# === HDSI-PORT: 增强版故事时钟（融合HDSI time.ts设计） ===
+def story_local_time_context(override_hour: Optional[int] = None, timezone_str: str = "Asia/Shanghai") -> Dict:
+    """
+    增强版时间上下文：时区感知、星期、日照预期、时段。
+    融合HDSI time.ts的storyLocalTimeContext设计。
+    """
+    try:
+        import zoneinfo
+        tz = zoneinfo.ZoneInfo(timezone_str)
+        now = datetime.datetime.now(tz)
+    except Exception:
+        tz = datetime.timezone(datetime.timedelta(hours=8))
+        now = datetime.datetime.now(tz)
+    hour = override_hour if override_hour is not None else now.hour
+    # 时段判断（与HDSI一致：5-12 morning, 12-18 afternoon, 18-22 evening, 22-5 night）
+    if 5 <= hour < 12:
+        period = "morning"; period_zh = "上午"; daylight = "通常是白天，有阳光"
+    elif 12 <= hour < 18:
+        period = "afternoon"; period_zh = "下午"; daylight = "通常是白天，有阳光"
+    elif 18 <= hour < 22:
+        period = "evening"; period_zh = "傍晚/晚上"; daylight = "天色渐暗，向夜晚过渡"
+    else:
+        period = "night"; period_zh = "夜间"; daylight = "通常是天黑的，除非设定另有说明"
+    weekday_map = {0:"周一",1:"周二",2:"周三",3:"周四",4:"周五",5:"周六",6:"周日"}
+    weekday = weekday_map.get(now.weekday(), "")
+    # 兼容旧的TIME_CONTEXT_MAP
+    old_cfg = TIME_CONTEXT_MAP.get("dawn", TIME_CONTEXT_MAP["morning"])
     for key, cfg in TIME_CONTEXT_MAP.items():
         lo, hi = cfg["hour_range"]
         if lo <= hour < hi:
-            return {"period": key, "hour": hour, **cfg}
-    # 兜底
-    return {"period": "midnight", "hour": hour, **TIME_CONTEXT_MAP["midnight"]}
+            old_cfg = cfg; break
+    return {
+        "period": period, "period_zh": period_zh, "hour": hour,
+        "weekday": weekday, "date": now.strftime("%Y-%m-%d"),
+        "time": now.strftime("%H:%M:%S"), "timezone": timezone_str,
+        "daylight_expectation": daylight,
+        "mood_bias": old_cfg.get("mood_bias", 0),
+        "style": old_cfg.get("style", "日常"),
+        "phrases": old_cfg.get("phrases", []),
+    }
 
 # ============================================================
 # v10.0: 天气/季节感知
@@ -212,7 +247,33 @@ def safe_json_parse(text: str, model: Optional[type] = None) -> Optional[Dict]:
     text = re.sub(r'```\s*$', '', text.strip())
     start = text.find('{'); end = text.rfind('}')
     if start == -1 or end == -1 or end <= start: return None
-    json_str = re.sub(r',\s*([}\]])', r'\1', text[start:end+1])
+    raw = text[start:end+1]
+    # 状态机修复尾随逗号，跳过字符串内部内容
+    fixed = []
+    in_string = False
+    escape = False
+    for i, ch in enumerate(raw):
+        if in_string:
+            fixed.append(ch)
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            fixed.append(ch)
+            continue
+        if ch == ',':
+            j = i + 1
+            while j < len(raw) and raw[j] in ' \t\n\r':
+                j += 1
+            if j < len(raw) and raw[j] in '}]':
+                continue
+        fixed.append(ch)
+    json_str = ''.join(fixed)
     try:
         data = json.loads(json_str)
     except json.JSONDecodeError:
@@ -394,8 +455,15 @@ def init_db():
             role_id TEXT NOT NULL, memory_type TEXT NOT NULL, content TEXT NOT NULL,
             importance INTEGER DEFAULT 50, created_at REAL NOT NULL,
             tags TEXT DEFAULT '[]', last_recalled REAL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS session_intents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+            role_id TEXT NOT NULL, type TEXT NOT NULL, summary TEXT NOT NULL,
+            not_before REAL NOT NULL, status TEXT DEFAULT 'pending',
+            payload TEXT DEFAULT '{}', created_at REAL NOT NULL, updated_at REAL NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_mem_session ON session_memories(session_id);
         CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(last_active);
+        CREATE INDEX IF NOT EXISTS idx_intents_session ON session_intents(session_id, role_id, status);
+        CREATE INDEX IF NOT EXISTS idx_intents_notbefore ON session_intents(not_before);
     """)
     conn.commit(); conn.close()
     logger.info(f"SQLite初始化: {DB_PATH}")
@@ -408,7 +476,9 @@ def create_session():
         "positive_streak":{},"current_turn":0,"user_profile":{},"long_term_memories":[],
         # v10.0 新增
         "milestones":{},"growth_state":{},"emotion_history":[],
-        "compressed_memories":[],"associative_tags":{},"nickname_evolution":{}}
+        "compressed_memories":[],"associative_tags":{},"nickname_evolution":{},
+        # HDSI-PORT: 氛围偏移追踪
+        "alter_system":{}}
     conn = _get_db()
     conn.execute("INSERT INTO sessions VALUES (?,?,?,?)", (sid, json.dumps(default), now, now))
     conn.commit(); conn.close()
@@ -1717,6 +1787,164 @@ class QualityChecker:
         return {"passed": score >= 60, "score": score, "issues": issues}
 
 # ============================================================
+# HDSI-PORT: AlterSystem 情绪偏移追踪系统（移植自HDSI alter.ts）
+# ============================================================
+class AlterSystem:
+    """
+    氛围偏移追踪：对话氛围会累积，同向增强、反向衰减，达到阈值触发侧模型生成氛围描述。
+    与瞬时心理状态(PsychologicalState)互补：Alter管氛围惯性，Psych管即时情绪数值。
+    """
+    DEFAULT_CONFIG = {
+        "enabled": True, "base_threshold": 10, "density_factor": 0.3,
+        "same_direction_boost": 0.05, "opposite_decay": 0.15,
+        "min_weight": 0.2, "max_intensity": 2.0,
+    }
+    HISTORY_LIMIT = 50
+
+    def __init__(self, state=None, config=None):
+        self.config = {**self.DEFAULT_CONFIG, **(config or {})}
+        s = state or {}
+        self.alter_value = float(s.get("alter_value", 0))
+        self.alter_weight = float(s.get("alter_weight", 0))
+        self.last_trigger_direction = int(s.get("last_trigger_direction", 0))
+        self.emotional_offset = s.get("emotional_offset")
+        self.history = s.get("history", [])[-self.HISTORY_LIMIT:]
+        self.last_updated_at = s.get("last_updated_at", "")
+
+    def to_dict(self):
+        return {
+            "alter_value": self.alter_value, "alter_weight": self.alter_weight,
+            "last_trigger_direction": self.last_trigger_direction,
+            "emotional_offset": self.emotional_offset,
+            "history": self.history[-self.HISTORY_LIMIT:],
+            "last_updated_at": self.last_updated_at,
+        }
+
+    def _calculate_threshold(self, now):
+        one_hour_ago = now - 3600
+        recent_turns = sum(1 for h in self.history if h.get("timestamp", 0) >= one_hour_ago)
+        density = min(recent_turns / 10, 1.0)
+        base = max(1, self.config["base_threshold"])
+        factor = max(0, min(1, self.config["density_factor"]))
+        return max(base * 0.5, base * (1 - density * factor))
+
+    def advance(self, alter, phase="user-message"):
+        now = time.time()
+        alter = max(-5, min(5, int(round(alter))))
+        self.alter_value = max(-1000, min(1000, self.alter_value + alter))
+        direction = 1 if alter > 0 else (-1 if alter < 0 else 0)
+        offset_expired = False
+        if self.emotional_offset and direction != 0:
+            same_dir = (direction == self.last_trigger_direction)
+            rate = self.config["same_direction_boost"] if same_dir else -self.config["opposite_decay"]
+            self.alter_weight = max(0, min(1, self.alter_weight + max(0, abs(alter)) * rate))
+            if self.alter_weight < self.config["min_weight"]:
+                self.emotional_offset = None; self.alter_weight = 0; offset_expired = True
+        turn_num = (self.history[-1]["turn"] + 1) if self.history else 1
+        self.history.append({"turn": turn_num, "phase": phase, "alter": alter,
+                             "alter_value": self.alter_value, "timestamp": now})
+        self.history = self.history[-self.HISTORY_LIMIT:]
+        self.last_updated_at = datetime.datetime.now().isoformat()
+        threshold = self._calculate_threshold(now)
+        return {"threshold": threshold, "offset_expired": offset_expired,
+                "threshold_reached": abs(self.alter_value) >= threshold}
+
+    def complete_analysis(self, description):
+        now = time.time()
+        trigger_value = self.alter_value
+        direction = 1 if trigger_value > 0 else -1
+        threshold = self._calculate_threshold(now)
+        intensity = min(abs(trigger_value) / max(1, threshold), self.config["max_intensity"])
+        self.alter_value = 0; self.alter_weight = 1.0
+        self.last_trigger_direction = direction
+        self.emotional_offset = {
+            "direction": "serious" if direction > 0 else "relaxed",
+            "description": description.strip()[:800],
+            "intensity": round(intensity, 2),
+            "generated_at": datetime.datetime.now().isoformat(),
+        }
+
+    def get_prompt_offset(self):
+        if not self.config["enabled"] or not self.emotional_offset:
+            return None
+        if self.alter_weight < self.config["min_weight"]:
+            return None
+        return {**self.emotional_offset, "weight": round(self.alter_weight, 2)}
+
+    def build_prompt_text(self):
+        offset = self.get_prompt_offset()
+        if not offset: return ""
+        direction_zh = "严肃/紧张" if offset["direction"] == "serious" else "轻松/随意"
+        return (f"【对话氛围】最近的对话氛围偏向{direction_zh}（强度{offset['intensity']:.1f}/2.0）。"
+                f"{offset['description']}这种氛围会轻微影响你的语气，但不要刻意表现出来。")
+
+# ============================================================
+# HDSI-PORT: IntentManager 意图系统（融合HDSI intent设计）
+# ============================================================
+class IntentManager:
+    """
+    意图管理：延迟回复、被打断草稿、提醒、主动联系动机。
+    融合HDSI的NarrativeIntent设计，适配你的session模型。
+    """
+    def __init__(self, session_id, role_id):
+        self.session_id = session_id
+        self.role_id = role_id
+
+    def _conn(self):
+        return _get_db()
+
+    def add(self, intent_type, summary, not_before, payload=None):
+        now = time.time()
+        conn = self._conn()
+        cur = conn.execute(
+            "INSERT INTO session_intents(session_id,role_id,type,summary,not_before,status,payload,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (self.session_id, self.role_id, intent_type, summary, not_before,
+             "pending", json.dumps(payload or {}, ensure_ascii=False), now, now))
+        conn.commit(); intent_id = cur.lastrowid; conn.close()
+        return intent_id
+
+    def get_due(self, now=None):
+        now = now or time.time()
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT * FROM session_intents WHERE session_id=? AND role_id=? AND status='pending' AND not_before<=? "
+            "ORDER BY not_before ASC",
+            (self.session_id, self.role_id, now)).fetchall()
+        conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            try: d["payload"] = json.loads(d.get("payload") or "{}")
+            except: d["payload"] = {}
+            result.append(d)
+        return result
+
+    def update_status(self, intent_id, status):
+        now = time.time()
+        conn = self._conn()
+        conn.execute("UPDATE session_intents SET status=?, updated_at=? WHERE id=?",
+                     (status, now, intent_id))
+        conn.commit(); conn.close()
+
+    def get_interrupted_drafts(self):
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT * FROM session_intents WHERE session_id=? AND role_id=? AND type='interrupted_draft' AND status='pending' "
+            "ORDER BY created_at DESC LIMIT 3",
+            (self.session_id, self.role_id)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def build_prompt_text(self):
+        drafts = self.get_interrupted_drafts()
+        if not drafts: return ""
+        lines = ["【未完成的念头】（这些是你刚才本来想说但被打断的话，只存在于你心里，不要直接发给对方）"]
+        for d in drafts[-2:]:
+            lines.append(f"  - {d['summary']}")
+        return "\n".join(lines)
+
+# ============================================================
 # PromptBuilder
 # ============================================================
 class PromptBuilder:
@@ -1985,12 +2213,12 @@ class EmotionBlender:
     """
     INERTIA_DECAY = 0.4  # 上一轮情绪保留40%的影响
     TRANSITION_STEPS = {
-        ("happy", "angry"): ["surprised", "annoyed", "angry"],
+        ("happy", "angry"): ["surprised", "worried", "angry"],
         ("happy", "sad"): ["surprised", "worried", "sad"],
-        ("calm", "angry"): ["annoyed", "angry"],
+        ("calm", "angry"): ["worried", "angry"],
         ("angry", "happy"): ["surprised", "calm", "happy"],
         ("sad", "happy"): ["surprised", "calm", "happy"],
-        ("jealous", "calm"): ["annoyed", "calm"],
+        ("jealous", "calm"): ["worried", "calm"],
     }
 
     def __init__(self, emotion_history=None):
@@ -2702,7 +2930,8 @@ class PersonalityEngine:
                  time_override=None, weather=None, scene_mode="normal",
                  gift=None, emotion_history=None, milestones=None,
                  growth_state=None, associative_memories=None,
-                 knowledge_search_result=None, user_profile=None):
+                 knowledge_search_result=None, user_profile=None,
+                 alter_state=None, session_id=None):
         self.mode = mode
         self.role_ids = role_ids[:3]
         self.intimacy_map = intimacy_map
@@ -2726,6 +2955,9 @@ class PersonalityEngine:
         self.knowledge_search_result = knowledge_search_result
         # v11.0: 用户画像
         self.user_profile = user_profile or {"likes":[],"dislikes":[],"traits":[],"events":[],"basic_info":{}}
+        # HDSI-PORT: 氛围偏移追踪状态
+        self.alter_state = alter_state
+        self.session_id = session_id
 
     async def generate(self, msg, mem_ctx, history, override=None, ov_int=50, use_llm=True, enable_mem=True):
         if self.mode == ChatMode.GROUP or len(self.role_ids) > 1:
@@ -2886,9 +3118,9 @@ class PersonalityEngine:
             topic_info = topic_initiator.pick_topic(new_intimacy)
         topic_text = topic_initiator.build(topic_info)
 
-        time_ctx = get_time_context(self.time_override)
-        time_text = (f"【时间感知】现在是{time_ctx['period']}（{time_ctx['hour']}点），"
-                     f"你的状态：{time_ctx['style']}。"
+        time_ctx = story_local_time_context(self.time_override)
+        time_text = (f"【时间感知】现在是{time_ctx['period_zh']}（{time_ctx['hour']}点，{time_ctx['weekday']}），"
+                     f"你的状态：{time_ctx['style']}。外面{time_ctx['daylight_expectation']}。"
                      f"这会影响你的语气——{random.choice(time_ctx['phrases'])}")
 
         weather_ctx = get_weather_context(self.weather)
@@ -2932,10 +3164,32 @@ class PersonalityEngine:
         is_annoyed = any(v >= 15 for v in psych.annoyance.values())
         behavior_text = PromptBuilder.behavior_hint(rid, emotion, conflict, just_repaired, is_annoyed)
 
+        # HDSI-PORT: AlterSystem 氛围偏移追踪
+        alter_system = AlterSystem(self.alter_state)
+        _alter_map = {"happy":-2,"excited":-2,"shy":-1,"calm":0,"neutral":0,
+                      "surprised":0,"worried":+1,"sad":+2,"angry":+3,"jealous":+2}
+        _alter_val = _alter_map.get(emotion.value, 0)
+        if intensity > 60: _alter_val = int(_alter_val * 1.5)
+        alter_result = alter_system.advance(_alter_val)
+        alter_text = alter_system.build_prompt_text()
+        # 阈值达到时，在debug中标记（侧模型氛围描述生成可在后台异步执行）
+        if alter_result["threshold_reached"] and not alter_system.emotional_offset:
+            # 先用简单规则生成氛围描述，避免额外LLM调用延迟
+            _dir = "严肃/紧张" if _alter_val > 0 else "轻松/随意"
+            alter_system.complete_analysis(f"最近对话氛围偏向{_dir}，角色的语气会随之微调。")
+            alter_text = alter_system.build_prompt_text()
+
+        # HDSI-PORT: IntentManager 被打断草稿注入
+        intent_text = ""
+        if self.session_id:
+            intent_mgr = IntentManager(self.session_id, rid)
+            intent_text = intent_mgr.build_prompt_text()
+
         extra_sections = [s for s in [
             time_text, weather_text, micro_narr_text, blend_hint,
             topic_text, callback_text, assoc_text, milestone_text,
             growth_text, scene_text, gift_text, knowledge_text,
+            alter_text, intent_text,
         ] if s]
 
         system_prompt = PromptBuilder.build(
@@ -2966,6 +3220,7 @@ class PersonalityEngine:
             "v10_milestone_state":milestone_tracker.to_dict(),
             "v10_growth_state":growth_arc.to_dict(),
             "v10_emotion_history":emotion_blender.get_history(),
+            "alter_system":alter_system.to_dict(),
             "_mem_sys":ms,"_memories":memories,
             "_mem_analyzer":MemoryAnalyzer() if enable_mem else None,
             "_rname":ROLES_DEFINITION[rid]["name"],"_pers":ROLES_DEFINITION[rid]["personality"]}
@@ -3124,11 +3379,9 @@ class GenerateResponse(BaseModel):
 # 限流依赖
 # ============================================================
 async def rate_limit_dependency(request: Request):
-    try:
-        body = await request.json()
-        key = body.get("session_id") or (request.client.host if request.client else "unknown")
-    except:
-        key = request.client.host if request.client else "unknown"
+    # 不读取body，用client.host + 路径作为限流key，避免消耗FastAPI路由的body
+    client_ip = request.client.host if request.client else "unknown"
+    key = f"{client_ip}:{request.url.path}"
     allowed, remaining = rate_limiter.check(key)
     if not allowed:
         raise HTTPException(status_code=429, detail=f"请求过于频繁，每分钟最多{RATE_LIMIT_PER_MINUTE}次")
@@ -3144,7 +3397,8 @@ async def health():
                         "mode_unified","behavior_tendency","role_relationship_matrix","llm_threshold","persona_cache",
                         "v10_time_context","v10_weather","v10_micro_narrative","v10_emotion_blend",
                         "v10_topic_initiator","v10_callback","v10_associative_memory","v10_milestones",
-                        "v10_growth_arc","v10_scene_mode","v10_virtual_gift","v10_knowledge_router"],
+                        "v10_growth_arc","v10_scene_mode","v10_virtual_gift","v10_knowledge_router",
+                        "hdsi_alter_system","hdsi_story_clock","hdsi_intent_manager"],
             "kimi_configured": bool(KIMI_API_KEY),
             "knowledge_router_enabled": KNOWLEDGE_ROUTER_ENABLED}
 
@@ -3229,6 +3483,8 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
                 emotion_history = session_data.get("emotion_history", [])
                 # v11.0: 加载用户画像
                 user_profile = session_data.get("user_profile", {"likes":[],"dislikes":[],"traits":[],"events":[],"basic_info":{}})
+                # HDSI-PORT: 加载氛围偏移状态
+                alter_state = session_data.get("alter_system", {})
             else:
                 request.session_id = create_session()
                 session_data = load_session(request.session_id)
@@ -3236,6 +3492,7 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
                 intim_map=request.intimacy_map; turn=1; ps={}
                 milestones={}; growth_state={}; emotion_history=[]
                 user_profile={"likes":[],"dislikes":[],"traits":[],"events":[],"basic_info":{}}
+                alter_state={}
         else:
             psych_in = {rid: s.model_dump() for rid, s in request.psychological_states.items()}
             event_hist = request.event_history
@@ -3247,6 +3504,7 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
             ps = request.positive_streak
             milestones={}; growth_state={}; emotion_history=[]
             user_profile={"likes":[],"dislikes":[],"traits":[],"events":[],"basic_info":{}}
+            alter_state={}
         timer.mark("session加载")
 
         events_in = [e.model_dump() for e in request.relationship_events]
@@ -3278,7 +3536,9 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
             emotion_history=rid_emotion_hist, milestones=rid_milestones,
             growth_state=rid_growth,
             knowledge_search_result=knowledge_search_result,
-            user_profile=user_profile if len(role_ids)==1 else None)
+            user_profile=user_profile if len(role_ids)==1 else None,
+            alter_state=alter_state if len(role_ids)==1 else None,
+            session_id=request.session_id if len(role_ids)==1 else None)
         system_prompt, debug = await engine.generate(
             msg=request.user_message, mem_ctx=request.memory_context, history=valid,
             override=request.override_emotion, ov_int=request.emotion_intensity,
@@ -3363,6 +3623,9 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
                 session_data.setdefault("emotion_history", {})[rid] = debug.get("v10_emotion_history", [])
                 # v11.0: 保存用户画像
                 session_data["user_profile"] = user_profile
+                # HDSI-PORT: 保存氛围偏移状态
+                if "alter_system" in debug:
+                    session_data["alter_system"] = debug["alter_system"]
                 if "intimacy" in debug:
                     intim_map[rid] = debug["intimacy"]
             session_data["intimacy_map"] = intim_map

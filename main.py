@@ -76,6 +76,8 @@ FFMPEG_AVAILABLE = False
 class UserDB:
     def __init__(self, filepath=None):
         self.filepath = filepath or os.path.join(DATA_DIR, "userdb.json")
+        import threading
+        self._lock = threading.Lock()
         self._ensure_file()
     def _ensure_file(self):
         if not os.path.exists(self.filepath):
@@ -90,11 +92,16 @@ class UserDB:
                     "qq_bindings": {}  # {qq_number: username}
                 }, f, ensure_ascii=False, indent=2)
     def _read(self):
-        with open(self.filepath, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with self._lock:
+            with open(self.filepath, "r", encoding="utf-8") as f:
+                return json.load(f)
     def _write(self, data):
-        with open(self.filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        with self._lock:
+            # 先写临时文件再原子替换，避免写入中途崩溃导致文件损坏
+            tmp = self.filepath + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.filepath)
     def authenticate(self, username, password):
         data = self._read()
         user = data["users"].get(username)
