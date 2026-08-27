@@ -489,8 +489,19 @@ def load_session(sid):
     row = conn.execute("SELECT data FROM sessions WHERE session_id=?", (sid,)).fetchone()
     conn.close()
     if not row: return None
-    try: return json.loads(row["data"])
-    except: return None
+    try:
+        data = json.loads(row["data"])
+    except:
+        return None
+    # v11.1: 数据兼容迁移——旧session可能把以下字段存成list或其他类型，统一转为dict
+    if isinstance(data, dict):
+        for _compat_key in ("psychological_states", "event_history", "conflict_state",
+                             "catchphrase_usage", "resilience", "positive_streak",
+                             "milestones", "growth_state", "emotion_history", "alter_system",
+                             "intimacy_map", "user_profile"):
+            if _compat_key in data and not isinstance(data[_compat_key], dict):
+                data[_compat_key] = {}
+    return data
 
 def save_session(sid, data):
     now = time.time()
@@ -3597,6 +3608,13 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
 
         # 保存session
         if request.session_id and session_data is not None:
+            # v11.1: 数据兼容迁移——确保以下字段是dict格式（旧session可能存成list或其他类型）
+            for _compat_key in ("psychological_states", "event_history", "conflict_state",
+                                 "catchphrase_usage", "resilience", "positive_streak",
+                                 "milestones", "growth_state", "emotion_history", "alter_system",
+                                 "intimacy_map", "user_profile"):
+                if not isinstance(session_data.get(_compat_key), dict):
+                    session_data[_compat_key] = {}
             if is_group:
                 session_data["psychological_states"] = debug.get("new_psychological_state", {})
                 session_data["event_history"] = debug.get("new_event_history", {})
