@@ -52,11 +52,11 @@ TTS_FORMAT = os.getenv("TTS_FORMAT", "wav")  # wav/mp3
 # ---- 角色音色映射 ----
 # edge-tts 中文音色
 ROLE_VOICES = {
-    "jingwen": {
-        "edge": "zh-CN-XiaoyiNeural",      # 年轻女声，带点傲娇感
+    "nianqi": {
+        "edge": "zh-CN-XiaohanNeural",      # 温柔细腻女声，安全型依恋
         "openai": "nova",
-        "rate": "+5%",
-        "pitch": "+2Hz",
+        "rate": "-3%",
+        "pitch": "+1Hz",
     },
     "qinghe": {
         "edge": "zh-CN-XiaoxiaoNeural",     # 温柔知性女声
@@ -64,11 +64,11 @@ ROLE_VOICES = {
         "rate": "-5%",
         "pitch": "-1Hz",
     },
-    "yechen": {
-        "edge": "zh-CN-YunxiNeural",        # 年轻男声，冷静
-        "openai": "echo",
-        "rate": "-10%",
-        "pitch": "-2Hz",
+    "jingwen": {
+        "edge": "zh-CN-XiaoyiNeural",      # 年轻女声，带点傲娇感
+        "openai": "nova",
+        "rate": "+5%",
+        "pitch": "+2Hz",
     },
 }
 DEFAULT_VOICE = {"edge": "zh-CN-XiaoxiaoNeural", "openai": "alloy", "rate": "+0%", "pitch": "+0Hz"}
@@ -119,7 +119,7 @@ async def speech_to_text(audio_bytes: bytes, filename: str = "audio.wav") -> str
 # ============================================================
 # TTS 文本转语音
 # ============================================================
-async def text_to_speech(text: str, role_id: str = "jingwen") -> bytes:
+async def text_to_speech(text: str, role_id: str = "nianqi") -> bytes:
     """
     将文本转换为语音。
     根据 TTS_ENGINE 选择 edge-tts 或 OpenAI TTS。
@@ -261,7 +261,7 @@ class VoiceChatRequest(BaseModel):
     """语音聊天请求（base64编码音频）"""
     audio_base64: str
     audio_format: str = "wav"
-    role_ids: list = ["jingwen"]
+    role_ids: list = ["nianqi"]
     session_id: Optional[str] = None
     intimacy_map: Optional[Dict[str, int]] = None
     chat_history: list = []
@@ -332,7 +332,7 @@ async def voice_chat(request: VoiceChatRequest):
             return VoiceChatResponse(success=False, asr_text=asr_text, error="人格后端未返回回复")
 
         # 4. TTS 文本转语音（失败不影响文本回复，仅语音缺失）
-        tts_role = request.role_ids[0] if request.role_ids else "jingwen"
+        tts_role = request.role_ids[0] if request.role_ids else "nianqi"
         audio_b64 = ""
         out_format = "mp3" if TTS_ENGINE == "edge-tts" else TTS_FORMAT
         try:
@@ -377,7 +377,7 @@ async def voice_tts(request: Request):
     """
     body = await request.json()
     text = body.get("text", "").strip()
-    role_id = body.get("role_id", "jingwen")
+    role_id = body.get("role_id", "nianqi")
     if not text:
         raise HTTPException(status_code=400, detail="缺少text参数")
     audio_bytes = await text_to_speech(text, role_id)

@@ -578,7 +578,7 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
     返回 dict: {reply, role_ids, mode, intimacy, session_id, used_llm_analysis}
     """
     if role_ids is None:
-        role_ids = ["jingwen"]
+        role_ids = ["nianqi"]
     if chat_history is None:
         chat_history = []
     mode = "group" if len(role_ids) > 1 else "single"
@@ -712,7 +712,7 @@ async def process_voice_message(identity, audio_base64, role_ids=None, chat_hist
     返回 dict: {reply, asr_text, audio_base64, audio_format, role_ids, mode, intimacy, session_id}
     """
     if role_ids is None:
-        role_ids = ["jingwen"]
+        role_ids = ["nianqi"]
     if chat_history is None:
         chat_history = []
     mode = "group" if len(role_ids) > 1 else "single"
@@ -1004,7 +1004,7 @@ async def lifespan(app):
                 for uname, udata in data.get("users", {}).items():
                     intim = udata.get("intimacy", {}) or {}
                     if not intim:
-                        intim = {"jingwen": 30}
+                        intim = {"nianqi": 30}
                     for rid, val in intim.items():
                         if rid.startswith("group:"):
                             continue
@@ -1150,7 +1150,7 @@ async def qq_webhook(request: Request):
         qq_msg_id = str(body.get("message_id", "")) or None
         result = await identity_queue.submit(
             identity, qq_msg_id,
-            lambda: process_chat_message(identity, text, ["jingwen"], history)
+            lambda: process_chat_message(identity, text, ["nianqi"], history)
         )
         reply_text = result["reply"]
     except Exception as e:
@@ -1486,7 +1486,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
             if action == "set_roles":
                 await websocket.send_text(json.dumps({
-                    "type": "roles_updated", "role_ids": msg.get("role_ids", ["jingwen"])}))
+                    "type": "roles_updated", "role_ids": msg.get("role_ids", ["nianqi"])}))
                 continue
             if action == "set_nickname":
                 nn = msg.get("nickname", "")
@@ -1497,14 +1497,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 # 语音消息：转发到语音后端处理（ASR→人格→TTS）
                 try:
                     audio_b64 = msg.get("audio", "")
-                    role_ids = msg.get("role_ids", ["jingwen"])
+                    role_ids = msg.get("role_ids", ["nianqi"])
                     audio_fmt = msg.get("audio_format", "wav")
                     if not audio_b64:
                         await websocket.send_text(json.dumps(
                             {"type": "error", "message": "未收到语音数据"}, ensure_ascii=False))
                         continue
                     if not role_ids:
-                        role_ids = ["jingwen"]
+                        role_ids = ["nianqi"]
                     logger.info(f"[{username}] 语音对话: roles={role_ids}, 音频base64长度={len(audio_b64)}")
                     ws_voice_msg_id = msg.get("message_id") or f"ws_{username}_{int(time.time()*1000)}_{id(msg)}"
                     result = await identity_queue.submit(
@@ -1537,11 +1537,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
             try:
                 user_message = msg.get("message", "").strip()
-                role_ids = msg.get("role_ids", ["jingwen"])
+                role_ids = msg.get("role_ids", ["nianqi"])
                 if not user_message:
                     continue
                 if not role_ids:
-                    role_ids = ["jingwen"]
+                    role_ids = ["nianqi"]
                 logger.info(f"[{username}] 对话: roles={role_ids}")
                 ws_msg_id = msg.get("message_id") or f"ws_{username}_{int(time.time()*1000)}_{id(msg)}"
                 result = await identity_queue.submit(
@@ -1592,7 +1592,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 # ---- MC 配置(环境变量) ----
 MC_API_KEY = os.getenv("MC_API_KEY", "")              # 留空则不校验 API Key
-MC_DEFAULT_ROLE = os.getenv("MC_DEFAULT_ROLE", "jingwen")
+MC_DEFAULT_ROLE = os.getenv("MC_DEFAULT_ROLE", "nianqi")
 MC_MAX_REPLY_LENGTH = int(os.getenv("MC_MAX_REPLY_LENGTH", "120"))  # Minecraft聊天框长度限制
 MC_ENABLE_JOIN_GREET = os.getenv("MC_ENABLE_JOIN_GREET", "true").lower() == "true"
 
@@ -1601,7 +1601,7 @@ mc_connections: Dict[str, Dict] = {}          # server_id -> {"ws": ws, "authed"
 mc_player_identity: Dict[str, str] = {}       # player_uuid -> identity
 mc_chat_history: Dict[str, List[Dict]] = {}   # identity -> chat history
 mc_player_role: Dict[str, str] = {}            # player_uuid -> 当前角色(覆盖默认)
-MC_KNOWN_ROLES = {"jingwen", "qinghe", "yechen"}  # 可切换角色列表
+MC_KNOWN_ROLES = {"nianqi", "qinghe", "jingwen"}  # 可切换角色列表
 
 
 @mc_app.websocket("/ws")
@@ -1727,9 +1727,9 @@ async def _mc_handle_event(websocket, msg):
         if MC_ENABLE_JOIN_GREET:
             role_id = mc_player_role.get(player_uuid, MC_DEFAULT_ROLE)
             greetings = {
-                "jingwen": "哼，你来了啊。",
+                "nianqi": "你回来啦～我一直在等你呢。",
                 "qinghe": "欢迎回来～",
-                "yechen": "……来了。",
+                "jingwen": "哼，你来了啊。",
             }
             await websocket.send_json({
                 "type": "reply", "player_uuid": player_uuid,
