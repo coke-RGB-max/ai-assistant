@@ -5,6 +5,7 @@ v3.1: NapCat QQ 接入（HTTP Webhook）/ QQ绑定与数据迁移 / 管理员实
 v4.0: 语音消息路由（文本→人格后端，语音→语音后端ASR→人格→TTS）/ 对接人格后端v11.0
 v4.0.1: 修复QQ消息发送/主动后端熔断/消息去重/WS认证超时
 v4.0.2: QQ语音消息完整链路（AMR下载→ffmpeg转WAV→ASR→LLM→TTS→AMR发送）
+v4.0.3: 修复NapCat新版本QQ偏移不全时语音url残缺问题，增加get_record fallback
 """
 import asyncio, json, logging, base64, os, time, hmac, hashlib
 from typing import Optional, Dict, List
@@ -32,7 +33,6 @@ DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 NAPCAT_HTTP_URL = os.getenv("NAPCAT_HTTP_URL", "")  # 例: http://127.0.0.1:3000
 # Webhook 签名校验密钥（NapCat 配置中的 secret，留空则不校验）
 QQ_WEBHOOK_SECRET = os.getenv("QQ_WEBHOOK_SECRET", "")
-
 # ---- 主动后端熔断机制 ----
 # 启动时假设可用，lifespan 健康检查后更新；运行中连续失败 3 次自动熔断，每 60s 放行一次探测
 PROACTIVE_AVAILABLE = True
@@ -40,7 +40,6 @@ _PROACTIVE_FAIL_COUNT = 0
 _PROACTIVE_LAST_PROBE = 0.0
 _PROACTIVE_FAIL_THRESHOLD = 3
 _PROACTIVE_RECOVER_INTERVAL = 60.0  # 秒
-
 def _proactive_should_skip() -> bool:
     """返回 True 表示当前应跳过主动后端调用（熔断中且未到探测时间）"""
     global _PROACTIVE_LAST_PROBE
@@ -51,28 +50,23 @@ def _proactive_should_skip() -> bool:
         _PROACTIVE_LAST_PROBE = now
         return False
     return True
-
 def _proactive_on_success():
     global PROACTIVE_AVAILABLE, _PROACTIVE_FAIL_COUNT
     if not PROACTIVE_AVAILABLE:
         logger.info("[主动后端] 熔断恢复，服务重新可用")
     PROACTIVE_AVAILABLE = True
     _PROACTIVE_FAIL_COUNT = 0
-
 def _proactive_on_fail():
     global PROACTIVE_AVAILABLE, _PROACTIVE_FAIL_COUNT
     _PROACTIVE_FAIL_COUNT += 1
     if _PROACTIVE_FAIL_COUNT >= _PROACTIVE_FAIL_THRESHOLD and PROACTIVE_AVAILABLE:
         PROACTIVE_AVAILABLE = False
         logger.warning(f"[主动后端] 连续失败{_PROACTIVE_FAIL_COUNT}次，熔断60s（后台任务不再阻塞）")
-
 # ---- QQ 消息去重（NapCat 超时重试会导致同一条消息上报多次）----
 _recent_msg_ids: Dict[int, float] = {}
 _MSG_DEDUP_WINDOW = 60.0  # 秒
-
 # ---- ffmpeg 可用性标记（lifespan 启动时检测）----
 FFMPEG_AVAILABLE = False
-
 class UserDB:
     def __init__(self, filepath=None):
         self.filepath = filepath or os.path.join(DATA_DIR, "userdb.json")
@@ -709,14 +703,20 @@ def onebot_has_voice(message):
             if isinstance(seg, dict) and seg.get("type") == "record":
                 return True
     return False
-def extract_onebot_voice_url(message) -> Optional[str]:
-    """从 OneBot v11 message 数组中提取语音段(record)的下载 URL"""
+def extract_onebot_voice_segment(message) -> Optional[dict]:
+    """从 OneBot v11 message 数组中提取语音段(record)的完整 data"""
     if isinstance(message, list):
         for seg in message:
             if isinstance(seg, dict) and seg.get("type") == "record":
-                url = seg.get("data", {}).get("url", "")
-                if url:
-                    return url
+                return seg.get("data", {})
+    return None
+def extract_onebot_voice_url(message) -> Optional[str]:
+    """从 OneBot v11 message 数组中提取语音段(record)的下载 URL（保留兼容）"""
+    seg = extract_onebot_voice_segment(message)
+    if seg:
+        url = seg.get("url", "")
+        if url:
+            return url
     return None
 # -------------------------- 音频下载与转码（ffmpeg） --------------------------
 async def _download_file(url: str) -> Optional[bytes]:
@@ -729,6 +729,38 @@ async def _download_file(url: str) -> Optional[bytes]:
             logger.error(f"下载文件失败: HTTP {resp.status_code} url={url[:100]}")
     except Exception as e:
         logger.error(f"下载文件异常: {e}")
+    return None
+async def _download_voice_via_napcat(record_data: dict) -> Optional[bytes]:
+    """
+    当 webhook 上报的语音 url 不是完整 http 链接时，
+    调用 NapCat /get_record 接口，通过 file_id 获取语音二进制。
+    适用于 NapCat 新版本QQ偏移不全、webhook只返回文件名的场景。
+    """
+    if not NAPCAT_HTTP_URL:
+        logger.error("[QQ] NAPCAT_HTTP_URL 未配置，无法通过NapCat获取语音")
+        return None
+    file_id = record_data.get("file_id") or record_data.get("file")
+    if not file_id:
+        logger.error(f"[QQ] 语音消息缺少file_id: {record_data}")
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{NAPCAT_HTTP_URL.rstrip('/')}/get_record",
+                json={"file_id": file_id, "out_format": "amr"},
+                timeout=30.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                # NapCat get_record 返回的 data.url 是完整http链接，再下载一次
+                real_url = data.get("data", {}).get("url", "")
+                if real_url and real_url.startswith(("http://", "https://")):
+                    return await _download_file(real_url)
+                # 有些版本直接返回 file 字段是本地路径，不可用
+                logger.error(f"[QQ] get_record 返回无有效url: {data}")
+            else:
+                logger.error(f"[QQ] get_record 返回HTTP{resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        logger.error(f"[QQ] 通过NapCat获取语音失败: {e}")
     return None
 async def _ffmpeg_convert(input_bytes: bytes, output_fmt: str,
                            sample_rate: int = 16000, channels: int = 1,
@@ -831,7 +863,7 @@ async def send_qq_private_record(qq_number, audio_b64: str, audio_format: str = 
 @asynccontextmanager
 async def lifespan(app):
     global PROACTIVE_AVAILABLE, FFMPEG_AVAILABLE
-    logger.info("主后端 v4.0.2 启动 - 端口 8000")
+    logger.info("主后端 v4.0.3 启动 - 端口 8000")
     if not NAPCAT_HTTP_URL:
         logger.warning("=" * 60)
         logger.warning("NAPCAT_HTTP_URL 未配置！QQ 回复将无法发送。")
@@ -892,17 +924,15 @@ async def lifespan(app):
             logger.warning(f"注册用户到主动后端失败: {e}")
     yield
     logger.info("主后端关闭")
-app = FastAPI(title="FlexiChrono 主后端", version="4.0.2", lifespan=lifespan)
+app = FastAPI(title="FlexiChrono 主后端", version="4.0.3", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False,
                    allow_methods=["*"], allow_headers=["*"])
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "FlexiChrono 主后端", "version": "4.0.2"}
-
+    return {"status": "ok", "service": "FlexiChrono 主后端", "version": "4.0.3"}
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "main_server", "version": "4.0.2", "port": str(PORT)}
-
+    return {"status": "ok", "service": "main_server", "version": "4.0.3", "port": str(PORT)}
 @app.get("/api/roles")
 async def get_roles():
     try:
@@ -960,15 +990,21 @@ async def qq_webhook(request: Request):
     history = qq_chat_history.setdefault(identity, [])
     # ---- 语音消息：下载AMR → ffmpeg转WAV → 语音后端(ASR→LLM→TTS) → 文本+语音回复 ----
     if onebot_has_voice(body.get("message", "")):
-        voice_url = extract_onebot_voice_url(body.get("message", ""))
-        if not voice_url:
-            logger.warning(f"[QQ] 语音消息无下载URL qq={qq_number}")
+        voice_seg = extract_onebot_voice_segment(body.get("message", ""))
+        if not voice_seg:
+            logger.warning(f"[QQ] 语音消息无record段 qq={qq_number}")
             reply_text = "语音消息获取失败，请发文字给我吧～"
             await send_qq_private_msg(qq_number, reply_text)
             return {"reply": reply_text, "sent_via_api": True}
-        logger.info(f"[QQ] 收到语音消息 qq={qq_number}, 正在下载AMR...")
+        voice_url = voice_seg.get("url", "")
+        logger.info(f"[QQ] 收到语音消息 qq={qq_number}, url={voice_url[:80] if voice_url else '(空)'}")
         # 1. 下载 AMR 语音文件
-        amr_bytes = await _download_file(voice_url)
+        #    优先用完整http url直接下载；url残缺时走NapCat get_record接口
+        if voice_url and voice_url.startswith(("http://", "https://")):
+            amr_bytes = await _download_file(voice_url)
+        else:
+            logger.info(f"[QQ] 语音url非完整链接，改用NapCat get_record接口获取")
+            amr_bytes = await _download_voice_via_napcat(voice_seg)
         if not amr_bytes:
             reply_text = "语音下载失败，请发文字给我吧～"
             await send_qq_private_msg(qq_number, reply_text)
