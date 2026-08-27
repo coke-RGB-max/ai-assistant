@@ -25,6 +25,14 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError
 
+# 可选依赖：jieba 中文分词（MemoryDecaySystem._is_correction 使用，未安装则降级到2-gram）
+try:
+    import jieba
+    JIEBA_AVAILABLE = True
+except ImportError:
+    JIEBA_AVAILABLE = False
+    jieba = None
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("personality_server")
 
@@ -1505,23 +1513,30 @@ class UserProfileExtractor:
         extracted = safe_json_parse(content)
         if not extracted:
             return None
-        return self._merge(extracted)
-    def _merge(self, extracted: Dict) -> Dict:
-        """合并新提取的信息到现有画像，处理冲突。"""
+        merged, updates = self._merge(extracted)
+        if merged is not None:
+            self.profile = merged  # 原子替换，避免并发交叉修改
+        return updates
+    def _merge(self, extracted: Dict) -> Tuple[Optional[Dict], Optional[Dict]]:
+        """合并新提取的信息到现有画像副本，处理冲突。
+        返回 (merged_profile, updates)；无更新时返回 (None, None)。
+        不修改 self.profile，由调用方决定是否原子替换，避免并发交叉修改。"""
+        import copy
+        merged = copy.deepcopy(self.profile)
         updates = {}
         for key in ("likes","dislikes","traits","events"):
             new_items = extracted.get(key, [])
             if not new_items: continue
-            existing = set(self.profile.get(key, []))
+            existing = set(merged.get(key, []))
             added = []
             for item in new_items:
                 if item and item not in existing:
                     # 简单冲突检测：likes和dislikes不能同时包含相同项
-                    if key == "likes" and item in self.profile.get("dislikes",[]):
+                    if key == "likes" and item in merged.get("dislikes",[]):
                         continue  # 矛盾信息跳过，标记为待确认
-                    if key == "dislikes" and item in self.profile.get("likes",[]):
+                    if key == "dislikes" and item in merged.get("likes",[]):
                         continue
-                    self.profile.setdefault(key, []).append(item)
+                    merged.setdefault(key, []).append(item)
                     added.append(item)
             if added:
                 updates[key] = added
@@ -1529,13 +1544,15 @@ class UserProfileExtractor:
         new_basic = extracted.get("basic_info", {})
         if new_basic:
             for k, v in new_basic.items():
-                old_v = self.profile.get("basic_info", {}).get(k)
+                old_v = merged.get("basic_info", {}).get(k)
                 if old_v and old_v != v:
                     continue  # 矛盾信息不覆盖
                 if not old_v:
-                    self.profile.setdefault("basic_info", {})[k] = v
+                    merged.setdefault("basic_info", {})[k] = v
                     updates.setdefault("basic_info", {})[k] = v
-        return updates if updates else None
+        if not updates:
+            return None, None
+        return merged, updates
     def build_context(self) -> str:
         """生成用户画像的prompt上下文。"""
         p = self.profile
@@ -1797,6 +1814,37 @@ class QualityChecker:
         score = max(0, score)
         return {"passed": score >= 60, "score": score, "issues": issues}
 
+    @staticmethod
+    def fallback_reply(role_id: str, emotion: str = "calm") -> str:
+        """OOC重试失败后的规则模板降级回复，确保不崩人设、不暴露AI身份。"""
+        templates = {
+            "jingwen": {
+                "happy": "哼，今天心情还算不错吧。",
+                "shy": "……你、你说什么呢，笨蛋。",
+                "angry": "……哼，不想说了。",
+                "sad": "……没什么，别问了。",
+                "jealous": "哦，是吗，随便你。",
+                "worried": "……你没事吧？",
+                "default": "……哼，算了。"
+            },
+            "qinghe": {
+                "happy": "呵呵，和你聊天很开心呢。",
+                "shy": "哎呀，你这样说我会不好意思的。",
+                "angry": "……好了，别生气了。",
+                "sad": "……我在呢，想说就说吧。",
+                "default": "嗯，我在呢，慢慢说。"
+            },
+            "yechen": {
+                "happy": "……嗯，不错。",
+                "shy": "……",
+                "angry": "……够了。",
+                "sad": "……我在。",
+                "default": "……嗯。"
+            }
+        }
+        role_tpl = templates.get(role_id, {"default": "……嗯，我在。"})
+        return role_tpl.get(emotion, role_tpl["default"])
+
 # ============================================================
 # HDSI-PORT: AlterSystem 情绪偏移追踪系统（移植自HDSI alter.ts）
 # ============================================================
@@ -1860,7 +1908,9 @@ class AlterSystem:
         return {"threshold": threshold, "offset_expired": offset_expired,
                 "threshold_reached": abs(self.alter_value) >= threshold}
 
-    def complete_analysis(self, description):
+    async def complete_analysis(self, description):
+        """完成氛围偏移分析并生成情绪偏移记录。
+        设计为 async：当前为纯同步计算，未来若接入 LLM 生成氛围描述可直接 await，不阻塞事件循环。"""
         now = time.time()
         trigger_value = self.alter_value
         direction = 1 if trigger_value > 0 else -1
@@ -2481,13 +2531,21 @@ class MemoryDecaySystem:
             return False
         # 词语级分词：按标点、空格、常见停用词分割
         def tokenize(text: str) -> set:
-            # 移除标点，按2-gram滑动窗口取词（简易中文分词，不依赖jieba）
+            # 移除标点和数字
             cleaned = re.sub(r'[，。！？、；：""''（）\s\d]+', ' ', text).strip()
+            if JIEBA_AVAILABLE:
+                # 使用 jieba 精确分词，只保留长度>=2的词，避免2-gram噪音匹配
+                words = set()
+                for w in cleaned.split():
+                    for seg in jieba.lcut(w):
+                        if len(seg) >= 2:
+                            words.add(seg)
+                return words
+            # 降级方案：2-gram 滑动窗口（jieba 未安装时使用）
             words = set()
             for w in cleaned.split():
                 if len(w) >= 2:
                     words.add(w)
-                # 2-gram 补充
                 for i in range(len(w)-1):
                     words.add(w[i:i+2])
             return words
@@ -2856,6 +2914,10 @@ class KnowledgeRouter:
         if is_question and has_online_hint:
             self.last_decision = {"need_search": True, "reason": "疑问词开头且含事实性提示词", "confidence": 0.75}
             return self.last_decision
+        # 含在线提示词且为疑问句（不以疑问词开头但带问号），直接判联网，避免额外LLM调用
+        if has_online_hint and ("?" in msg or "？" in msg):
+            self.last_decision = {"need_search": True, "reason": "包含事实性提示词且为疑问句", "confidence": 0.65}
+            return self.last_decision
         if has_offline and not has_online_hint:
             self.last_decision = {"need_search": False, "reason": "包含情感/日常关键词，属于角色对话", "confidence": 0.85}
             return self.last_decision
@@ -3187,7 +3249,7 @@ class PersonalityEngine:
         if alter_result["threshold_reached"] and not alter_system.emotional_offset:
             # 先用简单规则生成氛围描述，避免额外LLM调用延迟
             _dir = "严肃/紧张" if _alter_val > 0 else "轻松/随意"
-            alter_system.complete_analysis(f"最近对话氛围偏向{_dir}，角色的语气会随之微调。")
+            await alter_system.complete_analysis(f"最近对话氛围偏向{_dir}，角色的语气会随之微调。")
             alter_text = alter_system.build_prompt_text()
 
         # HDSI-PORT: IntentManager 被打断草稿注入
@@ -3579,12 +3641,23 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
             checker = QualityChecker(role_ids[0])
             quality = checker.check(reply, expected_emotion=debug.get("emotion","calm"),
                                     expected_length=debug.get("reply_length","medium"))
-            if not quality["passed"] and quality["score"] < 50:
-                logger.warning(f"[质量自检] 检测到OOC(score={quality['score']})，重生成一次。问题: {quality['issues']}")
+            max_retries = 2
+            retry_count = 0
+            while not quality["passed"] and quality["score"] < 50 and retry_count < max_retries:
+                retry_count += 1
+                logger.warning(f"[质量自检] 检测到OOC(score={quality['score']})，第{retry_count}次重生成。问题: {quality['issues']}")
                 retry_reply = await smart_llm_call(messages, request.temperature, request.max_tokens)
-                if retry_reply:
-                    reply = clean_reply(retry_reply)
-                    timer.mark("OOC重生成")
+                if not retry_reply:
+                    break
+                reply = clean_reply(retry_reply)
+                quality = checker.check(reply, expected_emotion=debug.get("emotion","calm"),
+                                        expected_length=debug.get("reply_length","medium"))
+                timer.mark(f"OOC重生成{retry_count}")
+            # 兜底：重试后仍OOC，用规则模板降级，确保不崩人设
+            if not quality["passed"] and quality["score"] < 50:
+                logger.warning(f"[质量自检] 重试{retry_count}次后仍OOC(score={quality['score']})，启用规则模板降级。问题: {quality['issues']}")
+                reply = QualityChecker.fallback_reply(role_ids[0], debug.get("emotion","calm"))
+                timer.mark("OOC规则降级")
 
         if not is_group and request.enable_memory_analysis and use_llm:
             analyzer = debug.get("_mem_analyzer")

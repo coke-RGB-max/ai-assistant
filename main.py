@@ -231,6 +231,100 @@ user_db = UserDB()
 background_tasks = set()
 # QQ 用户的内存聊天历史（重启后丢失；心理状态由 personality_server session 持久化）
 qq_chat_history: Dict[str, List[Dict]] = {}
+
+# ============================================================
+# Identity FIFO Queue — 每个用户独立队列，保证消息严格串行处理
+# 解决：用户短时间内连发多条消息时回复顺序错乱的问题
+# 三层保障：Identity Queue(保证串行) → process_chat_message(整体原子执行) → message_id去重(保证幂等)
+# ============================================================
+class IdentityQueueManager:
+    """
+    每个 identity 一个独立的 FIFO 队列 + worker 协程。
+    同一 identity 的消息严格排队、逐个处理，不会交叉；
+    不同 identity 之间并行，互不影响。
+
+    用法:
+        result = await identity_queue.submit(
+            identity, message_id,
+            lambda: process_chat_message(identity, text, role_ids, history)
+        )
+    """
+    def __init__(self):
+        self._queues: Dict[str, asyncio.Queue] = {}
+        self._workers: Dict[str, asyncio.Task] = {}
+        self._create_lock = asyncio.Lock()
+
+    async def submit(self, identity: str, message_id: Optional[str], coro_factory):
+        """
+        提交任务到 identity 队列，阻塞等待结果并返回。
+        coro_factory: 无参数可调用对象，返回协程（延迟创建，确保在 worker 上下文中执行）
+        """
+        # 第一层幂等检查：入队前就命中则直接返回缓存结果
+        if message_id and message_id in _processed_messages:
+            logger.info(f"[IdentityQueue] 幂等命中(入队前) msg_id={message_id} identity={identity}")
+            return _processed_messages[message_id]
+
+        # 确保该 identity 的队列和 worker 已创建
+        async with self._create_lock:
+            if identity not in self._queues:
+                self._queues[identity] = asyncio.Queue()
+                self._workers[identity] = asyncio.create_task(self._worker(identity))
+                logger.info(f"[IdentityQueue] 创建 worker identity={identity}")
+
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        await self._queues[identity].put((message_id, coro_factory, future))
+        return await future
+
+    async def _worker(self, identity: str):
+        """worker 协程：循环从队列取任务，串行执行，保证同一 identity 同一时刻只有一个任务在跑。"""
+        queue = self._queues[identity]
+        while True:
+            message_id, coro_factory, future = await queue.get()
+            try:
+                # 第二层幂等检查：排队期间可能已被其他途径处理
+                if message_id and message_id in _processed_messages:
+                    if not future.done():
+                        future.set_result(_processed_messages[message_id])
+                    continue
+
+                # 执行协程工厂得到协程并 await —— 整个处理流程在此原子执行，不释放给同 identity 的其他任务
+                coro = coro_factory()
+                result = await coro
+
+                # 记录已处理消息（幂等缓存）
+                if message_id:
+                    _mark_message_processed(message_id, result)
+
+                if not future.done():
+                    future.set_result(result)
+            except Exception as e:
+                logger.error(f"[IdentityQueue] worker 异常 identity={identity} msg_id={message_id}: {e}", exc_info=True)
+                if not future.done():
+                    future.set_exception(e)
+            finally:
+                queue.task_done()
+
+
+# ---- message_id 幂等去重（防止 QQ 重复上报 / 客户端重试 / 网络超时重发导致同一条消息被处理两次）----
+_processed_messages: Dict[str, Dict] = {}
+_PROCESSED_MSG_CACHE_MAX = 20000  # 最多缓存 20000 条结果，超量清理最早的一半
+
+
+def _mark_message_processed(message_id: str, result: Dict):
+    """记录一条消息已处理完成，缓存其结果供幂等命中使用。"""
+    _processed_messages[message_id] = result
+    if len(_processed_messages) > _PROCESSED_MSG_CACHE_MAX:
+        # 清理最早的一半（dict 保序，近似 FIFO）
+        keys = list(_processed_messages.keys())
+        for k in keys[:len(keys) // 2]:
+            del _processed_messages[k]
+        logger.info(f"[IdentityQueue] 幂等缓存清理，剩余 {len(_processed_messages)} 条")
+
+
+# 全局队列管理器实例
+identity_queue = IdentityQueueManager()
+
 # ============================================================
 # 耗时统计工具
 # ============================================================
@@ -1020,8 +1114,12 @@ async def qq_webhook(request: Request):
         logger.info(f"[QQ] WAV转码完成: {len(wav_bytes)}B, 送语音后端处理...")
         # 3. 调用语音后端全流程 ASR→人格→TTS
         try:
-            result = await process_voice_message(
-                identity, audio_b64, ["jingwen"], history, audio_format="wav")
+            qq_voice_msg_id = str(body.get("message_id", "")) or None
+            result = await identity_queue.submit(
+                identity, qq_voice_msg_id,
+                lambda: process_voice_message(
+                    identity, audio_b64, ["jingwen"], history, audio_format="wav")
+            )
             reply_text = result["reply"]
             tts_audio_b64 = result.get("audio_base64", "")
             tts_fmt = result.get("audio_format", "mp3")
@@ -1049,7 +1147,11 @@ async def qq_webhook(request: Request):
         return {"status": "empty"}
     logger.info(f"[QQ] 收到消息 qq={qq_number}: {text[:50]}")
     try:
-        result = await process_chat_message(identity, text, ["jingwen"], history)
+        qq_msg_id = str(body.get("message_id", "")) or None
+        result = await identity_queue.submit(
+            identity, qq_msg_id,
+            lambda: process_chat_message(identity, text, ["jingwen"], history)
+        )
         reply_text = result["reply"]
     except Exception as e:
         logger.error(f"[QQ] 消息处理失败: {e}", exc_info=True)
@@ -1404,8 +1506,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     if not role_ids:
                         role_ids = ["jingwen"]
                     logger.info(f"[{username}] 语音对话: roles={role_ids}, 音频base64长度={len(audio_b64)}")
-                    result = await process_voice_message(
-                        username, audio_b64, role_ids, chat_history, audio_fmt)
+                    ws_voice_msg_id = msg.get("message_id") or f"ws_{username}_{int(time.time()*1000)}_{id(msg)}"
+                    result = await identity_queue.submit(
+                        username, ws_voice_msg_id,
+                        lambda: process_voice_message(
+                            username, audio_b64, role_ids, chat_history, audio_fmt)
+                    )
                     session_id = result["session_id"]
                     await websocket.send_text(json.dumps({
                         "type": "voice_reply",
@@ -1437,7 +1543,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 if not role_ids:
                     role_ids = ["jingwen"]
                 logger.info(f"[{username}] 对话: roles={role_ids}")
-                result = await process_chat_message(username, user_message, role_ids, chat_history)
+                ws_msg_id = msg.get("message_id") or f"ws_{username}_{int(time.time()*1000)}_{id(msg)}"
+                result = await identity_queue.submit(
+                    username, ws_msg_id,
+                    lambda: process_chat_message(username, user_message, role_ids, chat_history)
+                )
                 session_id = result["session_id"]
                 await websocket.send_text(json.dumps({
                     "type": "reply", "content": result["reply"],
@@ -1464,16 +1574,221 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         if username:
             manager.disconnect(username)
-# -------------------------- 预留模块 --------------------------
-from fastapi import FastAPI as FastAPIApp
-mc_app = FastAPIApp()
-pet_app = FastAPIApp()
+# -------------------------- MC (Minecraft) 外接模块 --------------------------
+# 协议：JSON over WebSocket，连接地址 ws://你的域名/mc/ws
+#
+# 客户端(Minecraft插件/mod) → 服务端：
+#   认证: {"type":"auth","server_id":"生存服1","api_key":"可选"}
+#   聊天: {"type":"chat","player_uuid":"xxx","player_name":"玩家名","message":"你好"}
+#   事件: {"type":"event","event":"join|quit|death|achievement","player_uuid":"xxx","player_name":"xxx","data":{}}
+#   命令: {"type":"command","player_uuid":"xxx","command":"role|status|reset|help","args":["jingwen"]}
+#   心跳: {"type":"ping"}
+#
+# 服务端 → 客户端：
+#   认证: {"type":"auth_ok"} / {"type":"auth_fail","reason":"xxx"}
+#   回复: {"type":"reply","player_uuid":"xxx","message":"AI回复","role":"jingwen"}
+#   错误: {"type":"error","message":"xxx"}
+#   心跳: {"type":"pong"}
+
+# ---- MC 配置(环境变量) ----
+MC_API_KEY = os.getenv("MC_API_KEY", "")              # 留空则不校验 API Key
+MC_DEFAULT_ROLE = os.getenv("MC_DEFAULT_ROLE", "jingwen")
+MC_MAX_REPLY_LENGTH = int(os.getenv("MC_MAX_REPLY_LENGTH", "120"))  # Minecraft聊天框长度限制
+MC_ENABLE_JOIN_GREET = os.getenv("MC_ENABLE_JOIN_GREET", "true").lower() == "true"
+
+# ---- MC 运行时状态 ----
+mc_connections: Dict[str, Dict] = {}          # server_id -> {"ws": ws, "authed": bool}
+mc_player_identity: Dict[str, str] = {}       # player_uuid -> identity
+mc_chat_history: Dict[str, List[Dict]] = {}   # identity -> chat history
+mc_player_role: Dict[str, str] = {}            # player_uuid -> 当前角色(覆盖默认)
+MC_KNOWN_ROLES = {"jingwen", "qinghe", "yechen"}  # 可切换角色列表
+
+
 @mc_app.websocket("/ws")
-async def mc_ws(ws):
-    await ws.close(code=4000, reason="MC 模块尚未实现")
+async def mc_ws(websocket: WebSocket):
+    """Minecraft 外接 WebSocket 入口"""
+    await websocket.accept()
+    server_id = None
+    try:
+        # ---- 认证阶段(10秒超时) ----
+        auth_raw = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
+        auth_msg = json.loads(auth_raw)
+        if auth_msg.get("type") != "auth":
+            await websocket.send_json({"type": "auth_fail", "reason": "第一条消息必须是 auth"})
+            await websocket.close(code=4001)
+            return
+        server_id = auth_msg.get("server_id", "default")
+        if MC_API_KEY and auth_msg.get("api_key") != MC_API_KEY:
+            await websocket.send_json({"type": "auth_fail", "reason": "API Key 错误"})
+            await websocket.close(code=4002)
+            return
+        mc_connections[server_id] = {"ws": websocket, "authed": True}
+        await websocket.send_json({"type": "auth_ok", "server_id": server_id, "default_role": MC_DEFAULT_ROLE})
+        logger.info(f"[MC] 服务器 [{server_id}] 已连接")
+
+        # ---- 消息循环 ----
+        while True:
+            raw = await websocket.receive_text()
+            msg = json.loads(raw)
+            msg_type = msg.get("type", "")
+
+            if msg_type == "chat":
+                await _mc_handle_chat(websocket, msg)
+            elif msg_type == "event":
+                await _mc_handle_event(websocket, msg)
+            elif msg_type == "command":
+                await _mc_handle_command(websocket, msg)
+            elif msg_type == "ping":
+                await websocket.send_json({"type": "pong"})
+            else:
+                await websocket.send_json({"type": "error", "message": f"未知消息类型: {msg_type}"})
+
+    except asyncio.TimeoutError:
+        try:
+            await websocket.send_json({"type": "auth_fail", "reason": "认证超时(10秒)"})
+        except Exception:
+            pass
+    except WebSocketDisconnect:
+        logger.info(f"[MC] 服务器 [{server_id}] 断开连接")
+    except Exception as e:
+        logger.error(f"[MC] WebSocket 错误: {e}", exc_info=True)
+    finally:
+        if server_id and server_id in mc_connections:
+            del mc_connections[server_id]
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+def _mc_get_identity(player_uuid: str, player_name: str) -> str:
+    """获取或创建玩家对应的 identity(临时身份，可后续绑定正式账号)"""
+    if player_uuid in mc_player_identity:
+        return mc_player_identity[player_uuid]
+    identity = f"mc_tmp_{player_uuid}"
+    user_db.ensure_tmp_user(identity)
+    mc_player_identity[player_uuid] = identity
+    logger.info(f"[MC] 玩家 {player_name}({player_uuid}) 创建临时身份 {identity}")
+    return identity
+
+
+async def _mc_handle_chat(websocket, msg):
+    """处理玩家聊天消息 → 调AI人格引擎 → 发回游戏"""
+    player_uuid = msg.get("player_uuid", "")
+    player_name = msg.get("player_name", player_uuid)
+    message = msg.get("message", "").strip()
+
+    if not player_uuid or not message:
+        await websocket.send_json({"type": "error", "message": "缺少 player_uuid 或 message"})
+        return
+
+    identity = _mc_get_identity(player_uuid, player_name)
+    history = mc_chat_history.setdefault(identity, [])
+    role_id = mc_player_role.get(player_uuid, MC_DEFAULT_ROLE)
+
+    # 走 Identity Queue 串行处理(保证同一玩家消息不乱序)
+    msg_id = f"mc_{player_uuid}_{int(time.time() * 1000)}_{id(msg)}"
+    try:
+        result = await identity_queue.submit(
+            identity, msg_id,
+            lambda rid=role_id: process_chat_message(identity, message, [rid], history)
+        )
+    except Exception as e:
+        logger.error(f"[MC] 消息处理失败 player={player_name}: {e}", exc_info=True)
+        await websocket.send_json({
+            "type": "reply", "player_uuid": player_uuid,
+            "message": "抱歉，我刚才走神了，能再说一遍吗？", "role": role_id
+        })
+        return
+
+    reply = result.get("reply", "") or "……"
+    # Minecraft 聊天框长度限制，超长截断
+    if len(reply) > MC_MAX_REPLY_LENGTH:
+        reply = reply[:MC_MAX_REPLY_LENGTH] + "…"
+
+    await websocket.send_json({
+        "type": "reply",
+        "player_uuid": player_uuid,
+        "player_name": player_name,
+        "message": reply,
+        "role": role_id,
+        "intimacy": result.get("intimacy", {}),
+    })
+
+
+async def _mc_handle_event(websocket, msg):
+    """处理游戏事件(玩家加入/离开/死亡/成就等)"""
+    event = msg.get("event", "")
+    player_uuid = msg.get("player_uuid", "")
+    player_name = msg.get("player_name", "")
+
+    if event == "join":
+        logger.info(f"[MC] 玩家 {player_name}({player_uuid}) 加入游戏")
+        if MC_ENABLE_JOIN_GREET:
+            role_id = mc_player_role.get(player_uuid, MC_DEFAULT_ROLE)
+            greetings = {
+                "jingwen": "哼，你来了啊。",
+                "qinghe": "欢迎回来～",
+                "yechen": "……来了。",
+            }
+            await websocket.send_json({
+                "type": "reply", "player_uuid": player_uuid,
+                "message": greetings.get(role_id, "你好。"), "role": role_id
+            })
+    elif event == "quit":
+        logger.info(f"[MC] 玩家 {player_name}({player_uuid}) 离开游戏")
+        mc_player_role.pop(player_uuid, None)  # 清理角色选择，身份和历史保留
+    elif event == "death":
+        logger.info(f"[MC] 玩家 {player_name} 死亡")
+    elif event == "achievement":
+        logger.info(f"[MC] 玩家 {player_name} 获得成就: {msg.get('data', {}).get('name', '')}")
+    # 更多事件(挖矿、击杀、PVP等)可在此扩展
+
+
+async def _mc_handle_command(websocket, msg):
+    """处理玩家触发的 AI 命令(游戏内输入 /ai role xxx 等)"""
+    player_uuid = msg.get("player_uuid", "")
+    player_name = msg.get("player_name", "")
+    command = msg.get("command", "").lower()
+    args = msg.get("args", []) or []
+
+    async def send_reply(text):
+        await websocket.send_json({
+            "type": "reply", "player_uuid": player_uuid, "message": text,
+            "role": mc_player_role.get(player_uuid, MC_DEFAULT_ROLE)
+        })
+
+    if command == "role":
+        if not args:
+            current = mc_player_role.get(player_uuid, MC_DEFAULT_ROLE)
+            await send_reply(f"当前角色: {current}。可用: {', '.join(sorted(MC_KNOWN_ROLES))}")
+            return
+        new_role = args[0].lower()
+        if new_role not in MC_KNOWN_ROLES:
+            await send_reply(f"未知角色: {new_role}。可用: {', '.join(sorted(MC_KNOWN_ROLES))}")
+            return
+        mc_player_role[player_uuid] = new_role
+        await send_reply(f"角色已切换为 {new_role}")
+    elif command == "status":
+        identity = _mc_get_identity(player_uuid, player_name)
+        role_id = mc_player_role.get(player_uuid, MC_DEFAULT_ROLE)
+        await send_reply(f"AI助手运行中 | 身份: {identity} | 角色: {role_id}")
+    elif command == "reset":
+        identity = mc_player_identity.get(player_uuid)
+        if identity:
+            mc_chat_history.pop(identity, None)
+            user_db.set_session(identity, None)
+        await send_reply("对话记忆已重置")
+    elif command == "help":
+        await send_reply("命令: role [角色] 切换 | status 状态 | reset 重置记忆 | help 帮助")
+    else:
+        await send_reply(f"未知命令: {command}。输入 /ai help 查看帮助")
+
+
 @pet_app.websocket("/ws")
 async def pet_ws(ws):
     await ws.close(code=4000, reason="Pet 模块尚未实现")
+
 app.mount("/mc", mc_app)
 app.mount("/pet", pet_app)
 if __name__ == "__main__":
