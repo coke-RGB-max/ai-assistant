@@ -936,14 +936,21 @@ async def _download_voice_via_napcat(record_data: dict) -> Optional[bytes]:
         if NAPCAT_ACCESS_TOKEN:
             headers["Authorization"] = f"Bearer {NAPCAT_ACCESS_TOKEN}"
         async with httpx.AsyncClient(timeout=30.0) as client:
+            # 指定 out_format=wav：wav 编码器(pcm_s16le)是 ffmpeg 内置的，避免 amr 编码器缺失导致"未找到编码器"
+            # 后端下载后自行确认/转换为 16kHz mono 给 ASR
             resp = await client.post(
                 f"{NAPCAT_HTTP_URL.rstrip('/')}/get_record",
-                json={"file_id": file_id, "out_format": "amr"},
+                json={"file_id": file_id, "out_format": "wav"},
                 headers=headers,
                 timeout=30.0)
             if resp.status_code == 200:
                 data = resp.json()
                 logger.info(f"[QQ] get_record 返回: {json.dumps(data, ensure_ascii=False)[:300]}")
+                # 检查 NapCat 业务状态
+                if isinstance(data, dict) and data.get("status") == "failed":
+                    err_msg = data.get("message") or data.get("wording") or "未知错误"
+                    logger.error(f"[QQ] get_record 业务失败: {err_msg} (建议在 NapCat 服务器安装 ffmpeg)")
+                    return None
                 # 安全获取 data 字段（兼容返回 null 的情况）
                 resp_data = data.get("data") if isinstance(data, dict) else None
                 if not isinstance(resp_data, dict):
@@ -952,7 +959,16 @@ async def _download_voice_via_napcat(record_data: dict) -> Optional[bytes]:
                 real_url = resp_data.get("url", "") or resp_data.get("file", "")
                 if real_url and real_url.startswith(("http://", "https://")):
                     logger.info(f"[QQ] get_record 解析到语音url: {real_url[:80]}")
-                    return await _download_file(real_url)
+                    raw_bytes = await _download_file(real_url)
+                    if raw_bytes:
+                        # 下载到原始格式后，统一转成 wav(16kHz mono) 给 ASR
+                        wav_bytes = await _ffmpeg_convert(
+                            raw_bytes, "wav", sample_rate=16000, channels=1)
+                        if wav_bytes:
+                            return wav_bytes
+                        logger.warning("[QQ] 语音转wav失败，尝试直接返回原始字节")
+                        return raw_bytes
+                    return None
                 # 有些版本直接返回 file 字段是本地路径，不可用
                 logger.error(f"[QQ] get_record 返回无有效url: data={resp_data} 完整响应={json.dumps(data, ensure_ascii=False)[:200]}")
             else:
