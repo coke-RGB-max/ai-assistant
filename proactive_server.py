@@ -1,7 +1,8 @@
 """
-主动消息后端 v10.0 - 端口 8003
+主动消息后端 v13.0 - 端口 8003
 对接人格后端 v11.0：动机引擎 / 内部事件生成 / 防骚扰策略 / 后台调度
-v10.0: 配置项环境变量化 / 版本号对齐 / 兼容人格后端v11.0接口
+v13.0: 修复欲望状态联动(session_id透传) / 修复filter阶段写死 / 新增话题延续引擎(TopicResumer) / 自圆其说收尾机制
+v12.0: 配置项环境变量化 / 版本号对齐 / 兼容人格后端v11.0接口
 """
 import asyncio
 import json
@@ -14,7 +15,6 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
-
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,7 +32,6 @@ VECTOR_SERVER_URL = os.getenv("VECTOR_SERVER_URL", "http://127.0.0.1:8001")
 MAIN_SERVER_URL = os.getenv("MAIN_SERVER_URL", "http://127.0.0.1:8000")
 INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN", "change_me_internal_secret_2026")
 VECTOR_API_TOKEN = os.getenv("VECTOR_API_TOKEN", "change_me_strong_secret_key_123456")
-
 DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(DATA_DIR, "proactive.db")
 
@@ -47,6 +46,13 @@ SCORE_THRESHOLD_MEMORY_BONUS = 45        # 有强记忆事件时，45分以上�
 SLEEP_START_HOUR = 23
 SLEEP_END_HOUR = 8
 TIMEZONE_CST = timezone(timedelta(hours=8))
+
+# ---------- v13.0: 话题延续配置 ----------
+TOPIC_RESUMER_INTERVAL = int(os.getenv("TOPIC_RESUMER_INTERVAL", "15"))   # 每15秒检查一次
+TOPIC_DELAY_SECONDS = int(os.getenv("TOPIC_DELAY_SECONDS", "90"))         # AI回复后90秒用户没回→发起新话题
+TOPIC_CLOSING_DELAY = int(os.getenv("TOPIC_CLOSING_DELAY", "120"))        # 话题发出后120秒仍未回→自圆其说收尾
+TOPIC_MAX_RECENT_MSGS = 6                                                 # 保留最近6轮对话用于话题生成
+TOPIC_DAILY_LIMIT = int(os.getenv("TOPIC_DAILY_LIMIT", "5"))              # 每天最多主动延续几次话题
 
 # 角色 daily_noise 镜像（与 personality_server 保持一致，用于动机情绪模拟）
 ROLE_DAILY_NOISE = {
@@ -65,7 +71,6 @@ def _get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def init_db() -> None:
     conn = _get_db()
@@ -102,11 +107,28 @@ def init_db() -> None:
             count INTEGER DEFAULT 0,
             PRIMARY KEY (user_id, role_id, date)
         );
+        -- v13.0: 话题延续状态表
+        CREATE TABLE IF NOT EXISTS conversation_state (
+            user_id TEXT NOT NULL,
+            role_id TEXT NOT NULL,
+            last_ai_reply_at REAL DEFAULT 0,
+            last_user_message_at REAL DEFAULT 0,
+            recent_messages TEXT DEFAULT '[]',
+            topic_phase TEXT DEFAULT 'idle',
+            topic_sent_at REAL DEFAULT 0,
+            topic_today_count INTEGER DEFAULT 0,
+            topic_today_date TEXT DEFAULT '',
+            PRIMARY KEY (user_id, role_id)
+        );
     """)
+    # v13.0 迁移：给 activities 加 session_id（用于拉取人格后端真实欲望状态）
+    try:
+        conn.execute("ALTER TABLE activities ADD COLUMN session_id TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # 已存在则忽略
     conn.commit()
     conn.close()
     logger.info(f"SQLite初始化: {DB_PATH}")
-
 
 # ============================================================
 # 工具
@@ -114,10 +136,8 @@ def init_db() -> None:
 def now_cst() -> datetime:
     return datetime.now(TIMEZONE_CST)
 
-
 def today_str() -> str:
     return now_cst().strftime("%Y-%m-%d")
-
 
 def stage_of(intimacy: int) -> str:
     if intimacy <= 30: return "stranger"
@@ -125,7 +145,6 @@ def stage_of(intimacy: int) -> str:
     if intimacy <= 70: return "familiar"
     if intimacy <= 85: return "close"
     return "intimate"
-
 
 # ============================================================
 # v12.0: LongingEngine 欲望演算引擎
@@ -139,7 +158,6 @@ class LongingEngine:
     输出包含：原始欲望5维度、主导欲望、综合动机分数、各维度分项。
     这是主动消息流水线的第一步，后续经过 MotivationEngine(过滤) → ContactPolicy(行为意图) → PersonalityEngine(生成文本)。
     """
-
     async def fetch_desire_from_personality(self, session_id: str, role_id: str) -> Optional[Dict[str, Any]]:
         """从人格后端拉取 DesireMentalState（v12.0 新增接口）。失败返回 None。"""
         if not session_id:
@@ -170,7 +188,6 @@ class LongingEngine:
             "qinghe":  {"longing": 35, "contact_desire": 40, "share_desire": 45, "care_desire": 55, "companionship": 50},
             "jingwen": {"longing": 40, "contact_desire": 25, "share_desire": 30, "care_desire": 35, "companionship": 45},
         }.get(role_id, {"longing": 35, "contact_desire": 30, "share_desire": 30, "care_desire": 35, "companionship": 40})
-
         desire = dict(role_base)
 
         # 空闲时长影响：越久没联系，想念和联系欲越高
@@ -216,7 +233,6 @@ class LongingEngine:
         # 随机抖动
         for dim in desire:
             desire[dim] = round(max(0, min(100, desire[dim] + random.uniform(-5, 5))), 1)
-
         return desire
 
     def calc_motivation_score(self, desire: Dict[str, float]) -> float:
@@ -261,7 +277,6 @@ class LongingEngine:
                 "motivation_score": remote.get("motivation_score", self.calc_motivation_score(desire)),
                 "breakdown": desire,
             }
-
         # 2. 降级：本地计算欲望状态
         desire = self.calc_local_desire(role_id, intimacy, attachment, idle_hours, mood, hour)
         dominant, dom_val = self.dominant_desire(desire)
@@ -274,7 +289,6 @@ class LongingEngine:
             "motivation_score": score,
             "breakdown": desire,
         }
-
 
 # ============================================================
 # MotivationEngine —— 计算「多想找你」(0-100)
@@ -347,13 +361,11 @@ class MotivationEngine:
         hour: int,
     ) -> Dict[str, Any]:
         stage = stage_of(intimacy)
-
         idle_s = self.calc_idle_score(idle_hours)
         attach_s = (max(0.0, min(100.0, attachment)) / 100.0) * 25.0
         mem_s = min(15.0, max(0.0, memory_weight) / 100.0 * 15.0)
         mood_s = self.mood_score(mood)
         time_s = self.calc_time_score(hour)
-
         # 亲密度基础：陌生人不该主动，亲密有加成
         if intimacy < 30:
             intimacy_base = -40.0
@@ -363,11 +375,9 @@ class MotivationEngine:
             intimacy_base = 10.0
         else:
             intimacy_base = 0.0
-
         raw = idle_s + attach_s + mem_s + mood_s + time_s + intimacy_base
         jitter = random.uniform(-8.0, 8.0)
         score = max(0.0, min(100.0, raw + jitter))
-
         return {
             "score": round(score, 1),
             "stage": stage,
@@ -385,9 +395,10 @@ class MotivationEngine:
 
     def filter(self, motivation: Dict[str, Any], fatigue: float = 0.0,
                hour: int = 12, unreplied_count: int = 0, role_id: str = "nianqi",
-               hours_since_last: float = 999.0) -> Dict[str, Any]:
+               hours_since_last: float = 999.0, intimacy: int = 30) -> Dict[str, Any]:
         """
         v12.0: 动机过滤约束层 —— 对 LongingEngine 输出的原始欲望做现实约束压制。
+        v13.0: 修复 stage_of(30) 写死问题，改为传入实际 intimacy。
         压制因子：疲劳、深夜时段、未回复条数、历史冷却、角色性格阈值。
         输出：{allowed, final_score, original_score, suppress_factors, reason}
         """
@@ -418,7 +429,9 @@ class MotivationEngine:
             suppress.append(f"未回复{unreplied_count}条-15")
 
         # 4. 历史冷却：距上次主动消息太近，降低动机
-        min_interval = self.MIN_INTERVAL_HOURS.get(stage_of(30), 4)  # 用默认阶段
+        # v13.0 FIX: 使用实际亲密度对应的阶段，而非写死 stage_of(30)
+        actual_stage = stage_of(intimacy)
+        min_interval = self.MIN_INTERVAL_HOURS.get(actual_stage, 4)
         if hours_since_last < min_interval:
             score -= 30
             suppress.append(f"冷却中({hours_since_last:.1f}h<{min_interval}h)-30")
@@ -432,7 +445,6 @@ class MotivationEngine:
 
         score = max(0.0, min(100.0, score))
         allowed = score >= role_threshold
-
         return {
             "allowed": allowed,
             "final_score": round(score, 1),
@@ -442,13 +454,11 @@ class MotivationEngine:
             "reason": "通过" if allowed else f"分数{score:.1f}<阈值{role_threshold}",
         }
 
-
 # ============================================================
 # InnerEventGenerator —— 生成内部触发事件
 # ============================================================
 class InnerEventGenerator:
     """根据动机分项和记忆，决定"因为什么想联系"，并给出 prompt 引导"""
-
     async def generate(
         self,
         role_id: str,
@@ -459,7 +469,6 @@ class InnerEventGenerator:
     ) -> Dict[str, str]:
         bd = motivation["breakdown"]
         mood = motivation["mood"]
-
         candidates: List[Dict[str, str]] = []
 
         # 1. 记忆触发：检索到高价值共同记忆
@@ -570,14 +579,12 @@ class InnerEventGenerator:
                         applied = True
             except Exception as e:
                 logger.debug(f"[InnerEvent] 应用内在事件到人格后端失败: {e}")
-
         return {
             "event_type": chosen_event,
             "event_desc": chosen_desc,
             "applied_to_desire": applied,
             "intensity": random.uniform(0.5, 1.5),
         }
-
 
 # ============================================================
 # ContactPolicy —— 防骚扰
@@ -652,7 +659,7 @@ class ContactPolicy:
 
         if score >= threshold:
             return {"allowed": True, "reason": "score_ok", "threshold": threshold}
-        return {"allowed": False, "reason": f"score_too_low({score}<{threshold})", "threshold": threshold}
+        return {"allowed": False, "reason": f"score_too_low({score}<{threshold})", "threshold": score}
 
     def increment_daily(self, conn, user_id: str, role_id: str) -> None:
         d = today_str()
@@ -787,9 +794,7 @@ class ContactPolicy:
                 "prompt_hint": "随意自然，像突然想起",
             },
         }
-
         info = intent_details.get(intent_type, intent_details["casual_mention"])
-
         return {
             "intent_type": intent_type,
             "dominant_desire": dominant,
@@ -799,7 +804,6 @@ class ContactPolicy:
             "role_style": role_id,
             "intimacy_stage": stage,
         }
-
 
 # ============================================================
 # 外部服务调用
@@ -829,7 +833,6 @@ async def fetch_related_memory(user_id: str, role_id: str, query: str = "我们�
     except Exception as e:
         logger.warning(f"检索记忆失败: {e}")
     return None
-
 
 async def generate_proactive_message(
     role_id: str, reason_type: str, reason_detail: str,
@@ -868,7 +871,6 @@ async def generate_proactive_message(
         logger.warning(f"调人格后端异常: {e}")
     return None
 
-
 async def push_to_user(message_id: str, user_id: str, role_id: str, content: str) -> bool:
     """推送给主后端，返回是否在线投递成功"""
     try:
@@ -889,7 +891,6 @@ async def push_to_user(message_id: str, user_id: str, role_id: str, content: str
     except Exception as e:
         logger.warning(f"推送主后端失败: {e}")
     return False
-
 
 # ============================================================
 # ProactiveScheduler
@@ -957,6 +958,9 @@ class ProactiveScheduler:
                 if idle_hours < 3:
                     continue
 
+                # v13.0: 从数据库读取 session_id，透传给 LongingEngine 拉取真实欲望状态
+                session_id = row["session_id"] if "session_id" in row.keys() else ""
+
                 mood = self.engine.simulate_mood(role_id, idle_hours)
                 fatigue = float(psych.get("fatigue", 0))
                 unreplied = self.policy._unreplied_count(conn, user_id, role_id)
@@ -967,13 +971,14 @@ class ProactiveScheduler:
                 # 第一步：LongingEngine 欲望演算（优先从人格后端拉取真实欲望状态，降级则本地计算）
                 motivation = await self.longing.calc(
                     user_id, role_id, intimacy, attachment, idle_hours, mood, hour,
-                    session_id=None)
+                    session_id=session_id)  # v13.0 FIX: 不再写死 None
 
                 # 第二步：MotivationEngine 过滤约束（疲劳/深夜/未回复/冷却/角色性格阈值压制）
                 filtered = self.engine.filter(
                     motivation, fatigue=fatigue, hour=hour,
                     unreplied_count=unreplied, role_id=role_id,
-                    hours_since_last=hours_since_last)
+                    hours_since_last=hours_since_last,
+                    intimacy=intimacy)  # v13.0 FIX: 传入实际亲密度
                 if not filtered["allowed"]:
                     continue
 
@@ -998,6 +1003,7 @@ class ProactiveScheduler:
                     related, idle_hours, intimacy, mood, intent=intent)
                 if not content:
                     continue
+
                 msg_id = uuid.uuid4().hex
                 delivered = await push_to_user(msg_id, user_id, role_id, content)
                 conn.execute(
@@ -1013,14 +1019,13 @@ class ProactiveScheduler:
                     "intent_type": intent["intent_type"],
                     "score": score, "delivered": delivered,
                 })
-                logger.info(f"主动消息[v12]: user={user_id} role={role_id} score={score} "
+                logger.info(f"主动消息[v13]: user={user_id} role={role_id} score={score} "
                             f"intent={intent['intent_type']} reason={event['reason_type']} "
-                            f"delivered={delivered} content={content[:30]}")
+                            f"source={motivation.get('source')} delivered={delivered} content={content[:30]}")
                 # 每条之间稍微间隔，避免瞬间打爆
                 await asyncio.sleep(0.5)
         finally:
             conn.close()
-
         if sent or time.time() - self._last_tick_log > 1800:
             logger.info(f"Scheduler tick 完成，本轮发送 {len(sent)} 条")
             self._last_tick_log = time.time()
@@ -1038,6 +1043,255 @@ class ProactiveScheduler:
             pass
         return role_id
 
+# ============================================================
+# v13.0: TopicResumer 话题延续引擎
+# 两阶段机制：
+#   阶段1 topic_continue: AI回复后沉默 N 秒 → 基于上文延伸新话题
+#   阶段2 topic_self_close: 话题发出后再沉默 M 秒 → AI自圆其说收尾
+# 受人格维度约束：亲密度门槛、疲劳抑制、每日上限、角色性格阈值
+# ============================================================
+class TopicResumer:
+    def __init__(self):
+        self._task: Optional[asyncio.Task] = None
+        self._stop = asyncio.Event()
+
+    def start(self) -> None:
+        if self._task is None or self._task.done():
+            self._stop.clear()
+            self._task = asyncio.create_task(self._run(), name="topic-resumer")
+            logger.info(f"TopicResumer 已启动 (延迟={TOPIC_DELAY_SECONDS}s, 收尾延迟={TOPIC_CLOSING_DELAY}s)")
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await self.tick()
+            except Exception as e:
+                logger.error(f"TopicResumer tick 异常: {e}", exc_info=True)
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=TOPIC_RESUMER_INTERVAL)
+            except asyncio.TimeoutError:
+                pass
+
+    def _ensure_state(self, conn, user_id: str, role_id: str) -> sqlite3.Row:
+        row = conn.execute(
+            "SELECT * FROM conversation_state WHERE user_id=? AND role_id=?",
+            (user_id, role_id)
+        ).fetchone()
+        if not row:
+            conn.execute(
+                "INSERT INTO conversation_state(user_id, role_id, topic_today_date) VALUES(?,?,?)",
+                (user_id, role_id, today_str())
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM conversation_state WHERE user_id=? AND role_id=?",
+                (user_id, role_id)
+            ).fetchone()
+        return row
+
+    def _should_resume(self, intimacy: int, fatigue: float, role_id: str,
+                       today_count: int) -> Tuple[bool, str]:
+        """人格维度约束：是否应该发起话题延续"""
+        if intimacy < 30:
+            return False, "intimacy_too_low(<30)"
+        if fatigue > 70:
+            return False, f"fatigue_too_high({fatigue:.0f}>70)"
+        if today_count >= TOPIC_DAILY_LIMIT:
+            return False, f"daily_limit({today_count}/{TOPIC_DAILY_LIMIT})"
+        # 角色性格阈值：傲娇需要更高亲密度才会主动接话题（嘴硬）
+        role_min = {"jingwen": 50, "qinghe": 35, "nianqi": 35}.get(role_id, 40)
+        if intimacy < role_min:
+            return False, f"role_threshold({intimacy}<{role_min})"
+        return True, "ok"
+
+    async def _generate_topic_continue(self, role_id: str, recent_messages_json: str,
+                                       intimacy: int, mood: str) -> Optional[str]:
+        """阶段1：基于最近对话生成延伸话题"""
+        try:
+            msgs = json.loads(recent_messages_json) if recent_messages_json else []
+        except Exception:
+            msgs = []
+        # 取最近3条用户消息做上下文摘要
+        user_msgs = [m.get("content", "") for m in msgs if m.get("role") == "user"][-3:]
+        ai_msgs = [m.get("content", "") for m in msgs if m.get("role") == "ai"][-2:]
+        context_parts = []
+        if ai_msgs:
+            context_parts.append(f"AI刚说: {ai_msgs[-1][:80]}")
+        if user_msgs:
+            context_parts.append(f"用户聊过: {' | '.join(u[:50] for u in user_msgs)}")
+        context_summary = "；".join(context_parts) if context_parts else "日常闲聊"
+
+        reason_detail = (
+            f"【话题延续】用户在AI回复后沉默了{TOPIC_DELAY_SECONDS}秒。"
+            f"上下文：{context_summary}。"
+            f"要求：基于上述对话自然地抛出一个可以往下延伸的新话题，"
+            f"绝对不要重复已经聊过的内容，要像真人聊天时突然想到一个相关点一样自然，"
+            f"不要用'对了'、'话说'、'顺便问一下'这种刻意的开头词，"
+            f"结合角色性格，语气要像正在进行的对话而不是新的开场白。"
+        )
+        return await generate_proactive_message(
+            role_id=role_id,
+            reason_type="topic_continue",
+            reason_detail=reason_detail,
+            related_memory=None,
+            idle_hours=0.05,
+            intimacy=intimacy,
+            mood=mood,
+            intent={
+                "intent_type": "topic_continue",
+                "prompt_hint": "基于上文自然延伸新话题，像突然想到一个相关点，不刻意不重复",
+                "dominant_desire": "share_desire",
+            },
+        )
+
+    async def _generate_self_close(self, role_id: str, intimacy: int, mood: str) -> Optional[str]:
+        """阶段2：自圆其说收尾——用户还是没回，AI给自己和对方找台阶"""
+        reason_detail = (
+            f"【自圆其说】AI主动发起新话题后用户又沉默了{TOPIC_CLOSING_DELAY}秒。"
+            f"AI需要自然地收尾，同时给自己和对方找台阶下："
+            f"给对方台阶——暗示'你肯定在忙吧/有事吧'；"
+            f"给自己台阶——'就是随口一说'、'算了没事'、'不打扰你了'。"
+            f"核心原则：不卑微、不追问、不道歉、不降低关系，"
+            f"要像真人发现对方没在听然后自然收住一样。"
+            f"结合角色性格：温柔型可以体贴收尾，傲娇型可以嘴硬收尾（'切不说算了'）。"
+        )
+        return await generate_proactive_message(
+            role_id=role_id,
+            reason_type="topic_self_close",
+            reason_detail=reason_detail,
+            related_memory=None,
+            idle_hours=0.1,
+            intimacy=intimacy,
+            mood=mood,
+            intent={
+                "intent_type": "topic_self_close",
+                "prompt_hint": "用户没回新话题，AI自圆其说收尾，给双方找台阶，自然不尴尬不卑微",
+                "dominant_desire": "care_desire",
+            },
+        )
+
+    async def tick(self) -> Dict[str, Any]:
+        conn = _get_db()
+        sent = []
+        try:
+            rows = conn.execute("SELECT * FROM conversation_state").fetchall()
+            now_ts = time.time()
+            today = today_str()
+
+            for row in rows:
+                user_id = row["user_id"]
+                role_id = row["role_id"]
+                phase = row["topic_phase"] or "idle"
+                last_ai = float(row["last_ai_reply_at"] or 0)
+                last_user = float(row["last_user_message_at"] or 0)
+                topic_sent_at = float(row["topic_sent_at"] or 0)
+
+                # 读取人格维度
+                act = conn.execute(
+                    "SELECT * FROM activities WHERE user_id=? AND role_id=?",
+                    (user_id, role_id)
+                ).fetchone()
+                if not act:
+                    continue
+                intimacy = int(act["last_intimacy"] or 30)
+                try:
+                    psych = json.loads(act["last_psych"] or "{}")
+                except Exception:
+                    psych = {}
+                fatigue = float(psych.get("fatigue", 0))
+                mood = psych.get("mood", "calm")
+
+                # 日期重置计数
+                if (row["topic_today_date"] or "") != today:
+                    conn.execute(
+                        "UPDATE conversation_state SET topic_today_count=0, topic_today_date=? "
+                        "WHERE user_id=? AND role_id=?",
+                        (today, user_id, role_id)
+                    )
+                    conn.commit()
+                    today_count = 0
+                else:
+                    today_count = int(row["topic_today_count"] or 0)
+
+                if phase == "idle":
+                    # 阶段1：AI回复后用户沉默超过阈值 → 发起新话题
+                    # 条件：有AI回复记录 且 AI回复后用户没再说过话 且 超过延迟
+                    if (last_ai > 0
+                            and last_user < last_ai
+                            and (now_ts - last_ai) >= TOPIC_DELAY_SECONDS):
+                        ok, reason = self._should_resume(intimacy, fatigue, role_id, today_count)
+                        if not ok:
+                            logger.debug(f"[TopicResumer] 跳过话题延续 {user_id}/{role_id}: {reason}")
+                            continue
+                        content = await self._generate_topic_continue(
+                            role_id, row["recent_messages"] or "[]", intimacy, mood)
+                        if content:
+                            msg_id = uuid.uuid4().hex
+                            delivered = await push_to_user(msg_id, user_id, role_id, content)
+                            conn.execute(
+                                "UPDATE conversation_state SET topic_phase='topic_sent', "
+                                "topic_sent_at=?, topic_today_count=topic_today_count+1 "
+                                "WHERE user_id=? AND role_id=?",
+                                (now_ts, user_id, role_id)
+                            )
+                            conn.execute(
+                                "INSERT INTO proactive_messages(id,user_id,role_id,content,"
+                                "reason_type,reason_detail,motivation_score,created_at,delivered,replied) "
+                                "VALUES(?,?,?,?,?,?,?,?,?,0)",
+                                (msg_id, user_id, role_id, content, "topic_continue",
+                                 "话题延续", 55.0, now_ts, 1 if delivered else 0)
+                            )
+                            conn.commit()
+                            sent.append({"user_id": user_id, "role_id": role_id,
+                                         "type": "topic_continue", "content": content})
+                            logger.info(f"[话题延续] {user_id}/{role_id}: {content[:40]}")
+
+                elif phase == "topic_sent":
+                    # 阶段2：话题发出后用户仍沉默 → 自圆其说收尾
+                    if (now_ts - topic_sent_at) >= TOPIC_CLOSING_DELAY:
+                        # 二次确认：用户在话题发出后确实没回复
+                        if last_user < topic_sent_at:
+                            content = await self._generate_self_close(role_id, intimacy, mood)
+                            if content:
+                                msg_id = uuid.uuid4().hex
+                                delivered = await push_to_user(msg_id, user_id, role_id, content)
+                                conn.execute(
+                                    "UPDATE conversation_state SET topic_phase='closing_sent' "
+                                    "WHERE user_id=? AND role_id=?",
+                                    (user_id, role_id)
+                                )
+                                conn.execute(
+                                    "INSERT INTO proactive_messages(id,user_id,role_id,content,"
+                                    "reason_type,reason_detail,motivation_score,created_at,delivered,replied) "
+                                    "VALUES(?,?,?,?,?,?,?,?,?,0)",
+                                    (msg_id, user_id, role_id, content, "topic_self_close",
+                                     "自圆其说收尾", 30.0, now_ts, 1 if delivered else 0)
+                                )
+                                conn.commit()
+                                sent.append({"user_id": user_id, "role_id": role_id,
+                                             "type": "topic_self_close", "content": content})
+                                logger.info(f"[自圆其说] {user_id}/{role_id}: {content[:40]}")
+                        else:
+                            # 用户中间回复过了，重置为idle
+                            conn.execute(
+                                "UPDATE conversation_state SET topic_phase='idle' "
+                                "WHERE user_id=? AND role_id=?",
+                                (user_id, role_id)
+                            )
+                            conn.commit()
+                # closing_sent 状态保持到下一次AI回复或用户说话时重置
+        finally:
+            conn.close()
+        return {"sent": sent, "ts": time.time()}
 
 # ============================================================
 # FastAPI
@@ -1045,25 +1299,24 @@ class ProactiveScheduler:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    logger.info(f"💌 主动消息后端 v12.0 启动 - 端口 {PORT}")
+    logger.info(f"主动消息后端 v13.0 启动 - 端口 {PORT}")
     scheduler.start()
+    topic_resumer.start()
     yield
     await scheduler.stop()
+    await topic_resumer.stop()
     logger.info("主动消息后端关闭")
 
-
-app = FastAPI(title="Proactive Server", version="12.0.0", lifespan=lifespan)
+app = FastAPI(title="Proactive Server", version="13.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False,
                    allow_methods=["*"], allow_headers=["*"])
-
 scheduler = ProactiveScheduler()
-
+topic_resumer = TopicResumer()
 
 async def verify_internal_token(x_internal_token: Optional[str] = Header(None)) -> bool:
     if x_internal_token != INTERNAL_TOKEN:
         raise HTTPException(status_code=403, detail="invalid internal token")
     return True
-
 
 # ---------- 请求模型 ----------
 class ActivityReport(BaseModel):
@@ -1072,47 +1325,100 @@ class ActivityReport(BaseModel):
     intimacy: int = 30
     attachment: Optional[float] = None
     psych: Dict[str, Any] = {}
-
+    session_id: Optional[str] = None  # v13.0: 会话ID，用于拉取人格后端真实欲望状态
 
 class MarkRepliedRequest(BaseModel):
     user_id: str
     role_id: Optional[str] = None
 
-
 class MarkDeliveredRequest(BaseModel):
     message_id: str
-
 
 class TriggerCheckRequest(BaseModel):
     user_id: Optional[str] = None  # 可选，只检查某用户
 
+# ---------- v13.0: 话题延续请求模型 ----------
+class AIReplyReport(BaseModel):
+    """AI回复后上报：记录AI回复时间 + 最近几轮对话，启动话题延续计时"""
+    user_id: str
+    role_id: str
+    recent_messages: List[Dict[str, Any]] = []  # [{"role":"user"/"ai","content":"..."}]
+
+class UserSpokeReport(BaseModel):
+    """用户发消息时上报：重置话题延续状态"""
+    user_id: str
+    role_id: str
 
 # ---------- 接口 ----------
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "proactive_server", "version": "12.0.0", "port": str(PORT)}
-
+    return {"status": "ok", "service": "proactive_server", "version": "13.0.0", "port": str(PORT)}
 
 @app.post("/api/activity/report")
 async def report_activity(req: ActivityReport):
-    """主后端每次聊天后上报：更新最后活跃时间/亲密度/心理快照"""
+    """主后端每次聊天后上报：更新最后活跃时间/亲密度/心理快照/会话ID"""
     now_ts = time.time()
     psych_json = json.dumps(req.psych or {}, ensure_ascii=False)
     attachment = req.attachment if req.attachment is not None else float(req.intimacy) * 0.6
+    session_id = req.session_id or ""
     conn = _get_db()
     try:
         conn.execute(
-            "INSERT INTO activities(user_id,role_id,last_active_at,last_intimacy,last_attachment,last_psych) "
-            "VALUES(?,?,?,?,?,?) "
+            "INSERT INTO activities(user_id,role_id,last_active_at,last_intimacy,last_attachment,last_psych,session_id) "
+            "VALUES(?,?,?,?,?,?,?) "
             "ON CONFLICT(user_id,role_id) DO UPDATE SET "
             "last_active_at=excluded.last_active_at, last_intimacy=excluded.last_intimacy, "
-            "last_attachment=excluded.last_attachment, last_psych=excluded.last_psych",
-            (req.user_id, req.role_id, now_ts, int(req.intimacy), float(attachment), psych_json))
+            "last_attachment=excluded.last_attachment, last_psych=excluded.last_psych, "
+            "session_id=excluded.session_id",
+            (req.user_id, req.role_id, now_ts, int(req.intimacy), float(attachment), psych_json, session_id))
         conn.commit()
     finally:
         conn.close()
     return {"success": True}
 
+# ---------- v13.0: 话题延续接口 ----------
+@app.post("/api/conversation/ai_replied")
+async def on_ai_replied(req: AIReplyReport):
+    """
+    【主后端必须调用】AI每次回复完用户后调用。
+    作用：记录AI回复时间戳 + 缓存最近对话，TopicResumer据此判断是否该主动延续话题。
+    调用时机：AI生成完回复、已经发给用户之后。
+    """
+    now_ts = time.time()
+    conn = _get_db()
+    try:
+        topic_resumer._ensure_state(conn, req.user_id, req.role_id)
+        recent_json = json.dumps(req.recent_messages[-TOPIC_MAX_RECENT_MSGS:], ensure_ascii=False)
+        conn.execute(
+            "UPDATE conversation_state SET last_ai_reply_at=?, recent_messages=?, "
+            "topic_phase='idle' WHERE user_id=? AND role_id=?",
+            (now_ts, recent_json, req.user_id, req.role_id)
+        )
+        conn.commit()
+        return {"success": True, "next_check_in": TOPIC_DELAY_SECONDS}
+    finally:
+        conn.close()
+
+@app.post("/api/conversation/user_spoke")
+async def on_user_spoke(req: UserSpokeReport):
+    """
+    【主后端必须调用】用户每次发消息时调用。
+    作用：标记用户活跃，重置话题延续状态（取消待发的新话题和收尾）。
+    调用时机：收到用户消息、还没生成AI回复之前。
+    """
+    now_ts = time.time()
+    conn = _get_db()
+    try:
+        topic_resumer._ensure_state(conn, req.user_id, req.role_id)
+        conn.execute(
+            "UPDATE conversation_state SET last_user_message_at=?, topic_phase='idle' "
+            "WHERE user_id=? AND role_id=?",
+            (now_ts, req.user_id, req.role_id)
+        )
+        conn.commit()
+        return {"success": True}
+    finally:
+        conn.close()
 
 @app.post("/api/mark_replied")
 async def mark_replied(req: MarkRepliedRequest):
@@ -1133,7 +1439,6 @@ async def mark_replied(req: MarkRepliedRequest):
         return {"success": True, "updated": cur.rowcount}
     finally:
         conn.close()
-
 
 # ---------- v12.0: 用户侧反馈闭环 ----------
 class FeedbackRequest(BaseModel):
@@ -1197,7 +1502,6 @@ async def get_pending(user_id: str):
     finally:
         conn.close()
 
-
 @app.post("/api/mark_delivered")
 async def mark_delivered(req: MarkDeliveredRequest):
     conn = _get_db()
@@ -1207,8 +1511,6 @@ async def mark_delivered(req: MarkDeliveredRequest):
         return {"success": True}
     finally:
         conn.close()
-
-
 
 @app.post("/api/internal/migrate_user")
 async def migrate_user(req: Request, x_internal_token: Optional[str] = Header(None)):
@@ -1232,20 +1534,22 @@ async def migrate_user(req: Request, x_internal_token: Optional[str] = Header(No
                 (new_uid, row["role_id"])
             ).fetchone()
             if existing:
-                # 保留 last_active_at 较新的那条
+                # 保留 last_active_at 较新的那条，session_id 也保留较新的
                 if row["last_active_at"] > existing["last_active_at"]:
                     conn.execute(
                         "UPDATE activities SET last_active_at=?, last_intimacy=?, "
-                        "last_attachment=?, last_psych=? WHERE user_id=? AND role_id=?",
+                        "last_attachment=?, last_psych=?, session_id=? WHERE user_id=? AND role_id=?",
                         (row["last_active_at"], row["last_intimacy"],
                          row["last_attachment"], row["last_psych"],
+                         row["session_id"] if "session_id" in row.keys() else "",
                          new_uid, row["role_id"]))
             else:
                 conn.execute(
                     "INSERT INTO activities(user_id,role_id,last_active_at,last_intimacy,"
-                    "last_attachment,last_psych) VALUES(?,?,?,?,?,?)",
+                    "last_attachment,last_psych,session_id) VALUES(?,?,?,?,?,?,?)",
                     (new_uid, row["role_id"], row["last_active_at"],
-                     row["last_intimacy"], row["last_attachment"], row["last_psych"]))
+                     row["last_intimacy"], row["last_attachment"], row["last_psych"],
+                     row["session_id"] if "session_id" in row.keys() else ""))
         conn.execute("DELETE FROM activities WHERE user_id=?", (old_uid,))
         # proactive_messages: 直接改 user_id
         conn.execute("UPDATE proactive_messages SET user_id=? WHERE user_id=?", (new_uid, old_uid))
@@ -1267,6 +1571,8 @@ async def migrate_user(req: Request, x_internal_token: Optional[str] = Header(No
                     "INSERT INTO daily_counters(user_id,role_id,date,count) VALUES(?,?,?,?)",
                     (new_uid, c["role_id"], c["date"], c["count"]))
         conn.execute("DELETE FROM daily_counters WHERE user_id=?", (old_uid,))
+        # conversation_state: 迁移
+        conn.execute("UPDATE conversation_state SET user_id=? WHERE user_id=?", (new_uid, old_uid))
         conn.commit()
         logger.info(f"主动消息数据迁移: {old_uid} -> {new_uid}")
         return {"success": True}
@@ -1294,10 +1600,19 @@ async def get_status(user_id: str):
                 psych = {}
             attachment = float(row["last_attachment"] or psych.get("attachment", 30))
             mood = scheduler.engine.simulate_mood(row["role_id"], idle_hours)
-            mot = scheduler.engine.calc(
-                int(row["last_intimacy"] or 30), attachment, idle_hours, 0.0, mood, hour)
+            session_id = row["session_id"] if "session_id" in row.keys() else ""
+            # v13.0: 用 LongingEngine 计算（优先拉人格后端真实欲望）
+            mot = await scheduler.longing.calc(
+                user_id, row["role_id"], int(row["last_intimacy"] or 30),
+                attachment, idle_hours, mood, hour, session_id=session_id)
             used = scheduler.policy._today_count(conn, user_id, row["role_id"])
             unreplied = scheduler.policy._unreplied_count(conn, user_id, row["role_id"])
+            # 话题延续状态
+            cs = conn.execute(
+                "SELECT topic_phase, last_ai_reply_at, topic_today_count FROM conversation_state "
+                "WHERE user_id=? AND role_id=?",
+                (user_id, row["role_id"])
+            ).fetchone()
             result.append({
                 "role_id": row["role_id"],
                 "intimacy": row["last_intimacy"],
@@ -1306,11 +1621,12 @@ async def get_status(user_id: str):
                 "motivation": mot,
                 "today_sent": used,
                 "unreplied": unreplied,
+                "topic_phase": cs["topic_phase"] if cs else "none",
+                "topic_today_count": cs["topic_today_count"] if cs else 0,
             })
         return {"success": True, "user_id": user_id, "roles": result, "silent_hour": scheduler.policy.is_silent_hour()}
     finally:
         conn.close()
-
 
 @app.post("/api/trigger/check")
 async def trigger_check(req: TriggerCheckRequest = TriggerCheckRequest()):
@@ -1318,6 +1634,11 @@ async def trigger_check(req: TriggerCheckRequest = TriggerCheckRequest()):
     result = await scheduler.tick()
     return {"success": True, **result}
 
+@app.post("/api/trigger/topic_check")
+async def trigger_topic_check():
+    """v13.0: 手动触发一次话题延续检查（调试用）"""
+    result = await topic_resumer.tick()
+    return {"success": True, **result}
 
 if __name__ == "__main__":
     import uvicorn
