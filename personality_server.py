@@ -80,6 +80,26 @@ EMOTION_CONTAGION_DECAY = 0.3  # 群聊情绪传染衰减系数
 MEMORY_ARCHIVE_THRESHOLD = 500  # 单session记忆超过此数触发归档
 
 # ============================================================
+# v12.1: LLM心理状态校准层（方案B：本地公式算基础值 + LLM输出修正系数）
+# 所有参数均通过环境变量配置，适配 Railway 等云端部署
+# ============================================================
+LLM_CALIBRATION_ENABLED = os.getenv("LLM_CALIBRATION_ENABLED", "true").lower() == "true"
+LLM_CALIBRATION_MODEL = os.getenv("LLM_CALIBRATION_MODEL", "doubao-seed-2.0-mini")
+# API Key 复用 DOUBAO_API_KEY（与主生成链路共用），无需额外配置
+LLM_CALIBRATION_BASE_URL = os.getenv("LLM_CALIBRATION_BASE_URL",
+    os.getenv("DOUBAO_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"))
+LLM_CALIBRATION_MIN_LEN = int(os.getenv("LLM_CALIBRATION_MIN_LEN", "30"))   # 短消息不触发
+LLM_CALIBRATION_COOLDOWN = float(os.getenv("LLM_CALIBRATION_COOLDOWN", "2.0"))  # 两次校准最小间隔(秒)
+LLM_CALIBRATION_TIMEOUT = float(os.getenv("LLM_CALIBRATION_TIMEOUT", "15.0"))    # API超时(秒)
+LLM_CALIBRATION_MAX_TOKENS = int(os.getenv("LLM_CALIBRATION_MAX_TOKENS", "100")) # 输出token上限
+# 触发校准的关键词（含这些词的短消息也会触发）
+LLM_CALIBRATION_TRIGGER_KEYWORDS = [
+    "讽刺","反话","开玩笑","呵呵","哦","随便","算了","别这样",
+    "别的女生","别的男生","前女友","前男友","前任","她比你","他比你",
+    "你是不是","你根本","你从来","无所谓","都行","怪我","我的错",
+]
+
+# ============================================================
 # 耗时统计工具
 # ============================================================
 def _fmt_ms(seconds: float) -> str:
@@ -1180,6 +1200,232 @@ class PsychologicalState:
         d = {k: round(v, 1) for k, v in self.states.items()}
         d["trauma_flag"] = self.trauma_flag
         return d
+
+# ============================================================
+# v12.1: LLMCalibrator —— LLM心理状态校准层
+# 架构：本地公式(PsychologicalState.update)算出基础增减值 → LLM根据完整语境输出6维修正系数(0.3~2.0)
+# 设计原则：本地公式保底稳定，LLM只做语境校准，失败自动降级为原始值，不阻塞主链路
+# ============================================================
+class LLMCalibrator:
+    """
+    LLM校准层：对本地公式算出的心理维度变化做语境感知的修正。
+    
+    工作流程：
+    1. should_calibrate() —— 阈值门控，约60-70%日常短消息跳过，省钱
+    2. calibrate() —— 计算本地公式增量 → 调LLM获取修正系数 → 应用校准 → 写回psych.states
+    
+    所有配置通过环境变量读取，适配 Railway 等云端部署。
+    """
+    
+    # 6个心理维度（与 PsychologicalState.states 保持一致）
+    DIMENSIONS = ("trust", "security", "attachment", "jealousy", "fatigue", "mood")
+    
+    def __init__(self):
+        self.enabled = LLM_CALIBRATION_ENABLED
+        self.model = LLM_CALIBRATION_MODEL
+        self.api_key = DOUBAO_API_KEY  # 复用主链路的豆包API Key
+        self.base_url = LLM_CALIBRATION_BASE_URL
+        self.min_len = LLM_CALIBRATION_MIN_LEN
+        self.cooldown = LLM_CALIBRATION_COOLDOWN
+        self.timeout = LLM_CALIBRATION_TIMEOUT
+        self.max_tokens = LLM_CALIBRATION_MAX_TOKENS
+        self.trigger_keywords = LLM_CALIBRATION_TRIGGER_KEYWORDS
+        self._last_call_time = 0.0
+        self._call_count = 0
+        self._fail_count = 0
+    
+    def should_calibrate(self, msg: str, psych_states: dict, intimacy: int) -> bool:
+        """
+        阈值门控：判断是否需要触发LLM校准。
+        满足以下任一条件即触发：
+        1. 消息长度 >= min_len（默认30字）
+        2. 包含触发关键词（讽刺/反话/前任/别的女生等）
+        3. 心理状态处于敏感区间（安全感<=35 或 醋意>=20）
+        """
+        if not self.enabled:
+            return False
+        if not self.api_key:
+            # 未配置API Key时静默禁用，不报错
+            return False
+        if not msg or not isinstance(msg, str):
+            return False
+        # 条件1：长度
+        if len(msg) >= self.min_len:
+            return True
+        # 条件2：关键词
+        if any(k in msg for k in self.trigger_keywords):
+            return True
+        # 条件3：敏感心理状态
+        if psych_states.get("security", 50) <= 35:
+            return True
+        if psych_states.get("jealousy", 0) >= 20:
+            return True
+        return False
+    
+    def _cooldown_ok(self) -> bool:
+        """冷却控制：避免短时间内多次调用LLM。"""
+        now = time.time()
+        if now - self._last_call_time < self.cooldown:
+            return False
+        self._last_call_time = now
+        return True
+    
+    def _build_prompt(self, msg: str, old_states: dict, delta: dict,
+                      intimacy: int, role_id: str, history: list) -> str:
+        """构建校准Prompt。"""
+        role_name = ROLES_DEFINITION.get(role_id, {}).get("name", role_id)
+        
+        # 最近3轮对话摘要
+        history_text = ""
+        if history:
+            recent = history[-3:] if len(history) >= 3 else history
+            lines = []
+            for h in recent:
+                role_label = "用户" if h.get("role") == "user" else f"{role_name}"
+                content = str(h.get("content", ""))[:60]
+                lines.append(f"{role_label}: {content}")
+            history_text = "\n".join(lines)
+        
+        # 当前状态描述
+        state_desc = (f"信任{old_states.get('trust',0):.0f} "
+                      f"安全{old_states.get('security',0):.0f} "
+                      f"依恋{old_states.get('attachment',0):.0f} "
+                      f"醋意{old_states.get('jealousy',0):.0f} "
+                      f"心情{old_states.get('mood',0):.0f}")
+        
+        # 增量描述（只列非零项）
+        delta_items = {k: v for k, v in delta.items() if abs(v) >= 0.1}
+        delta_text = json.dumps(delta_items, ensure_ascii=False) if delta_items else "{}"
+        
+        prompt = f"""你是心理状态校准器。根据完整对话语境，对6个心理维度的基础变化值给出修正系数。
+
+系数范围 0.3 ~ 2.0：
+- 1.0 = 保持本地公式的计算结果不变
+- < 1.0 = 减弱该维度的变化（如：玩笑话的批评不应真的降低安全感）
+- > 1.0 = 增强该维度的变化（如：安全感很低时，一句普通的话可能被解读为抛弃）
+
+【角色】{role_name}（{role_id}）
+【亲密度】{intimacy}/100
+【当前心理状态】{state_desc}
+【最近对话】
+{history_text if history_text else "(无)"}
+【用户消息】{msg}
+【本地公式算出的基础变化值】{delta_text}
+
+请分析：这句话在当前语境和心理状态下，各个维度的实际影响应该比基础值强还是弱？
+
+只输出JSON，不要任何其他文字、解释或markdown标记：
+{{"trust":1.0,"security":1.0,"attachment":1.0,"jealousy":1.0,"fatigue":1.0,"mood":1.0}}"""
+        return prompt
+    
+    async def _call_llm(self, prompt: str) -> Optional[dict]:
+        """调用豆包API获取修正系数。失败返回None。"""
+        if not self._cooldown_ok():
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                resp = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.3,
+                        "max_tokens": self.max_tokens,
+                        "response_format": {"type": "json_object"}
+                    },
+                    timeout=self.timeout
+                )
+            self._call_count += 1
+            if resp.status_code != 200:
+                self._fail_count += 1
+                logger.warning(f"[LLMCalibrator] API返回HTTP{resp.status_code}: {resp.text[:200]}")
+                return None
+            content = resp.json()["choices"][0]["message"]["content"]
+            coeffs = safe_json_parse(content)
+            if not coeffs:
+                self._fail_count += 1
+                logger.warning(f"[LLMCalibrator] 返回内容无法解析为JSON: {content[:200]}")
+                return None
+            return coeffs
+        except httpx.TimeoutException:
+            self._fail_count += 1
+            logger.warning("[LLMCalibrator] API调用超时")
+            return None
+        except Exception as e:
+            self._fail_count += 1
+            logger.warning(f"[LLMCalibrator] API调用异常: {type(e).__name__}: {e}")
+            return None
+    
+    async def calibrate(self, msg: str, psych: 'PsychologicalState',
+                        old_states: dict, raw_new_states: dict,
+                        intimacy: int, role_id: str, history: list = None) -> dict:
+        """
+        执行校准。
+        
+        参数：
+            msg: 用户原始消息
+            psych: PsychologicalState对象（校准后会直接更新 psych.states）
+            old_states: 调用 psych.update() 之前的状态快照
+            raw_new_states: 调用 psych.update() 之后的原始结果
+            intimacy: 当前亲密度
+            role_id: 角色ID
+            history: 聊天历史列表（可选，用于语境判断）
+        
+        返回：校准后的最终状态字典
+        """
+        # 1. 计算本地公式的增量
+        delta = {}
+        for k in self.DIMENSIONS:
+            delta[k] = round(raw_new_states.get(k, 0) - old_states.get(k, 0), 1)
+        
+        # 2. 如果所有维度都没变化，直接返回
+        if all(abs(v) < 0.1 for v in delta.values()):
+            return raw_new_states
+        
+        # 3. 构建Prompt并调用LLM
+        prompt = self._build_prompt(msg, old_states, delta, intimacy, role_id, history or [])
+        coeffs = await self._call_llm(prompt)
+        
+        # 4. LLM失败或冷却中 → 降级为原始值
+        if not coeffs:
+            return raw_new_states
+        
+        # 5. 应用校准系数
+        final_states = dict(raw_new_states)
+        applied_coeffs = {}
+        for k in self.DIMENSIONS:
+            c = float(coeffs.get(k, 1.0))
+            # 系数限制在 0.3~2.0，防止LLM给出极端值
+            c = max(0.3, min(2.0, c))
+            applied_coeffs[k] = c
+            # 最终值 = 旧值 + 增量 × 修正系数
+            final_states[k] = round(old_states.get(k, 0) + delta[k] * c, 1)
+            # 限制在 0~100
+            final_states[k] = max(0, min(100, final_states[k]))
+        
+        # 6. 写回 psych 对象（后续代码可能用 psych.build() 等）
+        for k in self.DIMENSIONS:
+            psych.states[k] = final_states[k]
+        
+        # 7. 日志
+        coeff_str = ", ".join(f"{k}:{applied_coeffs[k]:.2f}" for k in self.DIMENSIONS if abs(delta[k]) >= 0.1)
+        delta_str = ", ".join(f"{k}:{delta[k]:+.1f}" for k in self.DIMENSIONS if abs(delta[k]) >= 0.1)
+        logger.info(f"[LLMCalibrator] role={role_id} 增量=[{delta_str}] 系数=[{coeff_str}] "
+                    f"(调用{self._call_count}次, 失败{self._fail_count}次)")
+        
+        return final_states
+
+# 全局校准器实例（模块加载时创建，配置从环境变量读取）
+llm_calibrator = LLMCalibrator()
+if llm_calibrator.enabled and not llm_calibrator.api_key:
+    logger.warning("[LLMCalibrator] 已启用但未配置 DOUBAO_API_KEY，校准层将自动禁用（不影响主链路）")
+elif llm_calibrator.enabled:
+    logger.info(f"[LLMCalibrator] 已启用，模型={llm_calibrator.model}，"
+                f"触发阈值={llm_calibrator.min_len}字，冷却={llm_calibrator.cooldown}s")
 
 # ============================================================
 # CatchphraseController（v10.0: 支持动态变体）
@@ -2290,7 +2536,14 @@ class GroupBrain:
             just_repaired = repair_result is not None
             cat = EVENT_CATEGORY.get(et, "neutral")
             is_trauma = conflict.get("is_trauma", False)
-            new_psych[rid] = psych.update(et, tracker, turn, repair_result, repair.damage_reduction(), interp, cat, is_trauma)
+            # v12.1: LLM校准层 —— 先保存旧状态快照，本地公式算基础值，复杂语境下由LLM输出修正系数
+            old_psych_states = dict(psych.states)
+            raw_new_psych = psych.update(et, tracker, turn, repair_result, repair.damage_reduction(), interp, cat, is_trauma)
+            if llm_calibrator.should_calibrate(msg, old_psych_states, intimacy):
+                new_psych[rid] = await llm_calibrator.calibrate(
+                    msg, psych, old_psych_states, raw_new_psych, intimacy, rid, history)
+            else:
+                new_psych[rid] = raw_new_psych
             if et != "none": tracker.record(et, turn)
             new_ev[rid] = tracker.history
             cp_decision = cp_ctrl.decide(intimacy, emotion.value, conflict["severity"], just_repaired, inner)
@@ -3230,7 +3483,14 @@ class PersonalityEngine:
         cat = EVENT_CATEGORY.get(et, "neutral")
         is_trauma = conflict.get("is_trauma", False)
 
-        new_psych = psych.update(et, tracker, self.turn, repair_result, repair.damage_reduction(), interp, cat, is_trauma)
+        # v12.1: LLM校准层 —— 先保存旧状态快照，本地公式算基础值，复杂语境下由LLM输出修正系数
+        old_psych_states = dict(psych.states)
+        raw_new_psych = psych.update(et, tracker, self.turn, repair_result, repair.damage_reduction(), interp, cat, is_trauma)
+        if llm_calibrator.should_calibrate(msg, old_psych_states, intimacy):
+            new_psych = await llm_calibrator.calibrate(
+                msg, psych, old_psych_states, raw_new_psych, intimacy, rid, history)
+        else:
+            new_psych = raw_new_psych
         if et != "none": tracker.record(et, self.turn)
         psych_text = psych.build(just_repaired)
 
