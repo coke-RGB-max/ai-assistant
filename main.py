@@ -1603,6 +1603,9 @@ mc_chat_history: Dict[str, List[Dict]] = {}   # identity -> chat history
 mc_player_role: Dict[str, str] = {}            # player_uuid -> 当前角色(覆盖默认)
 MC_KNOWN_ROLES = {"nianqi", "qinghe", "jingwen"}  # 可切换角色列表
 
+# ---- MC / Pet 子应用实例（必须在装饰器使用前定义）----
+mc_app = FastAPI(title="FlexiChrono MC 外接模块", version="1.0")
+pet_app = FastAPI(title="FlexiChrono Pet 模块", version="0.1")
 
 @mc_app.websocket("/ws")
 async def mc_ws(websocket: WebSocket):
