@@ -943,38 +943,46 @@ async def _download_voice_via_napcat(record_data: dict) -> Optional[bytes]:
                 json={"file_id": file_id, "out_format": "wav"},
                 headers=headers,
                 timeout=30.0)
-            if resp.status_code == 200:
+            raw_text = resp.text
+            logger.info(f"[QQ] get_record HTTP{resp.status_code} 原始响应: {raw_text[:300]}")
+            if resp.status_code != 200:
+                logger.error(f"[QQ] get_record HTTP{resp.status_code}: {raw_text[:200]}")
+                return None
+            try:
                 data = resp.json()
-                logger.info(f"[QQ] get_record 返回: {json.dumps(data, ensure_ascii=False)[:300]}")
-                # 检查 NapCat 业务状态
-                if isinstance(data, dict) and data.get("status") == "failed":
-                    err_msg = data.get("message") or data.get("wording") or "未知错误"
-                    logger.error(f"[QQ] get_record 业务失败: {err_msg} (建议在 NapCat 服务器安装 ffmpeg)")
-                    return None
-                # 安全获取 data 字段（兼容返回 null 的情况）
-                resp_data = data.get("data") if isinstance(data, dict) else None
-                if not isinstance(resp_data, dict):
-                    resp_data = {}
-                # NapCat get_record 返回的 data.url 是完整http链接，再下载一次
-                real_url = resp_data.get("url", "") or resp_data.get("file", "")
-                if real_url and real_url.startswith(("http://", "https://")):
-                    logger.info(f"[QQ] get_record 解析到语音url: {real_url[:80]}")
-                    raw_bytes = await _download_file(real_url)
-                    if raw_bytes:
-                        # 下载到原始格式后，统一转成 wav(16kHz mono) 给 ASR
-                        wav_bytes = await _ffmpeg_convert(
-                            raw_bytes, "wav", sample_rate=16000, channels=1)
-                        if wav_bytes:
-                            return wav_bytes
-                        logger.warning("[QQ] 语音转wav失败，尝试直接返回原始字节")
-                        return raw_bytes
-                    return None
-                # 有些版本直接返回 file 字段是本地路径，不可用
-                logger.error(f"[QQ] get_record 返回无有效url: data={resp_data} 完整响应={json.dumps(data, ensure_ascii=False)[:200]}")
-            else:
-                logger.error(f"[QQ] get_record 返回HTTP{resp.status_code}: {resp.text[:200]}")
+            except Exception as je:
+                logger.error(f"[QQ] get_record 响应不是合法JSON: {type(je).__name__}: {je} 原始内容={raw_text[:200]}")
+                return None
+            # 检查 NapCat 业务状态
+            if isinstance(data, dict) and data.get("status") == "failed":
+                err_msg = data.get("message") or data.get("wording") or "未知错误"
+                logger.error(f"[QQ] get_record 业务失败: {err_msg} (NapCat服务器可能缺少对应编码器，建议安装ffmpeg full版)")
+                return None
+            # 安全获取 data 字段（兼容返回 null / 非dict 的情况）
+            resp_data = data.get("data") if isinstance(data, dict) else None
+            if not isinstance(resp_data, dict):
+                resp_data = data if isinstance(data, dict) else {}
+            # NapCat get_record 返回的 data.url 是完整http链接，再下载一次
+            # 兼容多种字段名：url / file / file_url
+            real_url = (resp_data.get("url") or resp_data.get("file")
+                        or resp_data.get("file_url") or "")
+            if real_url and real_url.startswith(("http://", "https://")):
+                logger.info(f"[QQ] get_record 解析到语音url: {real_url[:80]}")
+                raw_bytes = await _download_file(real_url)
+                if raw_bytes:
+                    # 下载到原始格式后，统一转成 wav(16kHz mono) 给 ASR
+                    wav_bytes = await _ffmpeg_convert(
+                        raw_bytes, "wav", sample_rate=16000, channels=1)
+                    if wav_bytes:
+                        return wav_bytes
+                    logger.warning("[QQ] 语音转wav失败，尝试直接返回原始字节")
+                    return raw_bytes
+                return None
+            # 有些版本直接返回 file 字段是本地路径，不可用
+            logger.error(f"[QQ] get_record 返回无有效url: data={resp_data} 完整响应={raw_text[:200]}")
     except Exception as e:
-        logger.error(f"[QQ] 通过NapCat获取语音失败: {e}")
+        err_detail = repr(e) if not str(e) else str(e)
+        logger.error(f"[QQ] 通过NapCat获取语音失败: type={type(e).__name__} error={err_detail}", exc_info=True)
     return None
 async def _ffmpeg_convert(input_bytes: bytes, output_fmt: str,
                            sample_rate: int = 16000, channels: int = 1,
