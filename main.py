@@ -943,12 +943,18 @@ async def _download_voice_via_napcat(record_data: dict) -> Optional[bytes]:
                 timeout=30.0)
             if resp.status_code == 200:
                 data = resp.json()
+                logger.info(f"[QQ] get_record 返回: {json.dumps(data, ensure_ascii=False)[:300]}")
+                # 安全获取 data 字段（兼容返回 null 的情况）
+                resp_data = data.get("data") if isinstance(data, dict) else None
+                if not isinstance(resp_data, dict):
+                    resp_data = {}
                 # NapCat get_record 返回的 data.url 是完整http链接，再下载一次
-                real_url = data.get("data", {}).get("url", "")
+                real_url = resp_data.get("url", "") or resp_data.get("file", "")
                 if real_url and real_url.startswith(("http://", "https://")):
+                    logger.info(f"[QQ] get_record 解析到语音url: {real_url[:80]}")
                     return await _download_file(real_url)
                 # 有些版本直接返回 file 字段是本地路径，不可用
-                logger.error(f"[QQ] get_record 返回无有效url: {data}")
+                logger.error(f"[QQ] get_record 返回无有效url: data={resp_data} 完整响应={json.dumps(data, ensure_ascii=False)[:200]}")
             else:
                 logger.error(f"[QQ] get_record 返回HTTP{resp.status_code}: {resp.text[:200]}")
     except Exception as e:
