@@ -1205,8 +1205,8 @@ async def qq_webhook(request: Request):
         if not voice_seg:
             logger.warning(f"[QQ] 语音消息无record段 qq={qq_number}")
             reply_text = "语音消息获取失败，请发文字给我吧～"
-            await send_qq_private_msg(qq_number, reply_text)
-            return {"reply": reply_text, "sent_via_api": True}
+            _sent = await send_qq_private_msg(qq_number, reply_text)
+            return {"sent_via_api": _sent, **({"reply": reply_text} if not _sent else {})}
         voice_url = voice_seg.get("url", "")
         logger.info(f"[QQ] 收到语音消息 qq={qq_number}, url={voice_url[:80] if voice_url else '(空)'}")
         # 1. 下载 AMR 语音文件
@@ -1218,15 +1218,15 @@ async def qq_webhook(request: Request):
             amr_bytes = await _download_voice_via_napcat(voice_seg)
         if not amr_bytes:
             reply_text = "语音下载失败，请发文字给我吧～"
-            await send_qq_private_msg(qq_number, reply_text)
-            return {"reply": reply_text, "sent_via_api": True}
+            _sent = await send_qq_private_msg(qq_number, reply_text)
+            return {"sent_via_api": _sent, **({"reply": reply_text} if not _sent else {})}
         logger.info(f"[QQ] AMR下载完成: {len(amr_bytes)}B, 正在ffmpeg转WAV(16kHz mono)...")
         # 2. AMR → WAV (16kHz mono, ASR 输入格式)
         wav_bytes = await _ffmpeg_convert(amr_bytes, "wav", sample_rate=16000, channels=1)
         if not wav_bytes:
             reply_text = "语音转码失败（请确认服务器已安装ffmpeg），请发文字给我吧～"
-            await send_qq_private_msg(qq_number, reply_text)
-            return {"reply": reply_text, "sent_via_api": True}
+            _sent = await send_qq_private_msg(qq_number, reply_text)
+            return {"sent_via_api": _sent, **({"reply": reply_text} if not _sent else {})}
         audio_b64 = base64.b64encode(wav_bytes).decode()
         logger.info(f"[QQ] WAV转码完成: {len(wav_bytes)}B, 送语音后端处理...")
         # 3. 调用语音后端全流程 ASR→人格→TTS
@@ -1257,7 +1257,11 @@ async def qq_webhook(request: Request):
         total_dur = time.perf_counter() - webhook_t0
         logger.info(f"[QQ][总耗时] qq={qq_number} identity={identity} "
                     f"语音全流程={_fmt_ms(total_dur)} 发送={'成功' if sent else '失败/未配置'}")
-        return {"reply": reply_text, "sent_via_api": sent}
+        # HTTP API发送成功时不返回reply，避免NapCat重复发送；失败时用响应体兜底
+        resp = {"sent_via_api": sent}
+        if not sent:
+            resp["reply"] = reply_text
+        return resp
     # ---- 文本消息 ----
     text = extract_onebot_text(body.get("message", ""))
     if not text:
@@ -1280,7 +1284,11 @@ async def qq_webhook(request: Request):
     logger.info(f"[QQ][总耗时] qq={qq_number} identity={identity} "
                 f"回复长度={len(reply_text)} 发送={'成功' if sent else '失败/未配置'} "
                 f"Webhook全流程={_fmt_ms(total_dur)}")
-    return {"reply": reply_text, "sent_via_api": sent}
+    # HTTP API发送成功时不返回reply，避免NapCat重复发送；失败时用响应体兜底
+    resp = {"sent_via_api": sent}
+    if not sent:
+        resp["reply"] = reply_text
+    return resp
 # -------------------------- QQ 绑定与数据迁移 --------------------------
 @app.post("/api/user/bind-qq")
 async def bind_qq(request: Request):
