@@ -31,6 +31,10 @@ DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 # 必须通过 HTTP API 调用 send_private_msg 才能把回复发出去。
 # 配置方法: export NAPCAT_HTTP_URL="http://127.0.0.1:3000"
 NAPCAT_HTTP_URL = os.getenv("NAPCAT_HTTP_URL", "")  # 例: http://127.0.0.1:3000
+# NapCat HTTP API 访问令牌（NapCat HTTP服务器配置中的 access_token）。
+# 如果 NapCat 配置了 token，所有 API 请求必须在 Header 中带 Authorization: Bearer <token>，否则返回 403 token verify failed
+# 配置方法: export NAPCAT_ACCESS_TOKEN="你的token"
+NAPCAT_ACCESS_TOKEN = os.getenv("NAPCAT_ACCESS_TOKEN", "")
 # Webhook 签名校验密钥（NapCat 配置中的 secret，留空则不校验）
 QQ_WEBHOOK_SECRET = os.getenv("QQ_WEBHOOK_SECRET", "")
 # ---- 主动后端熔断机制 ----
@@ -928,10 +932,14 @@ async def _download_voice_via_napcat(record_data: dict) -> Optional[bytes]:
         logger.error(f"[QQ] 语音消息缺少file_id: {record_data}")
         return None
     try:
+        headers = {}
+        if NAPCAT_ACCESS_TOKEN:
+            headers["Authorization"] = f"Bearer {NAPCAT_ACCESS_TOKEN}"
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{NAPCAT_HTTP_URL.rstrip('/')}/get_record",
                 json={"file_id": file_id, "out_format": "amr"},
+                headers=headers,
                 timeout=30.0)
             if resp.status_code == 200:
                 data = resp.json()
@@ -993,11 +1001,15 @@ async def send_qq_private_msg(qq_number, text):
         return False
     t0 = time.perf_counter()
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        headers = {}
+        if NAPCAT_ACCESS_TOKEN:
+            headers["Authorization"] = f"Bearer {NAPCAT_ACCESS_TOKEN}"
+        async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
                 f"{NAPCAT_HTTP_URL.rstrip('/')}/send_private_msg",
                 json={"user_id": int(qq_number), "message": text},
-                timeout=10.0)
+                headers=headers,
+                timeout=15.0)
             _log_port_timing("NapCat", "/send_private_msg", time.perf_counter() - t0,
                               f"HTTP{resp.status_code}")
             if resp.status_code == 200:
@@ -1040,6 +1052,9 @@ async def send_qq_private_record(qq_number, audio_b64: str, audio_format: str = 
             else:
                 logger.warning(f"[QQ] MP3转码失败，使用原始格式({audio_format})发送")
         file_field = "base64://" + base64.b64encode(raw_bytes).decode()
+        headers = {}
+        if NAPCAT_ACCESS_TOKEN:
+            headers["Authorization"] = f"Bearer {NAPCAT_ACCESS_TOKEN}"
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
                 f"{NAPCAT_HTTP_URL.rstrip('/')}/send_private_msg",
@@ -1047,6 +1062,7 @@ async def send_qq_private_record(qq_number, audio_b64: str, audio_format: str = 
                     "user_id": int(qq_number),
                     "message": [{"type": "record", "data": {"file": file_field}}]
                 },
+                headers=headers,
                 timeout=15.0)
             if resp.status_code == 200:
                 return True
