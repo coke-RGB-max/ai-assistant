@@ -26,7 +26,7 @@ import httpx
 from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 # 可选依赖：jieba 中文分词（MemoryDecaySystem._is_correction 使用，未安装则降级到2-gram）
 try:
@@ -4264,6 +4264,17 @@ class ProactiveGenerateRequest(BaseModel):
     intimacy: int = 30
     mood: str = "calm"
     intent: Optional[Dict[str, Any]] = None  # v12.2: 行为意图引导（intent_type/prompt_hint/dominant_desire）
+
+    @field_validator("mood", mode="before")
+    @classmethod
+    def _coerce_mood_to_str(cls, v):
+        """防御性修复：mood 必须是字符串，数字型(如78.0)自动转换，避免422错误"""
+        if v is None:
+            return "calm"
+        if not isinstance(v, str):
+            logger.warning(f"[ProactiveGenerateRequest] mood收到非字符串类型: {v!r}({type(v).__name__})，已自动转换")
+            return str(v)
+        return v
 
 PROACTIVE_REASON_PROMPT = {
     "missing_you": "你发现自己有点想他/她。你们已经有一阵子没聊了，这种想念让你主动打开了对话框。",

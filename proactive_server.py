@@ -840,6 +840,13 @@ async def generate_proactive_message(
     intimacy: int, mood: str, intent: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """调人格后端生成主动消息文本。v12.0: 支持传入行为意图(intent)引导生成风格。"""
+    # 防御性修复：mood 必须是字符串，否则人格后端 FastAPI 会返回 422
+    # 历史 bug：某些路径可能传入数字型 mood（如 psych["mood"]=78.0）
+    if not isinstance(mood, str):
+        logger.warning(f"[mood类型修复] 收到非字符串 mood={mood!r} type={type(mood).__name__}，已强制转字符串")
+        mood = str(mood)
+    if not mood:
+        mood = "calm"
     payload = {
         "role_id": role_id,
         "reason_type": reason_type,

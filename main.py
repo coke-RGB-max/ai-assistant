@@ -1005,8 +1005,19 @@ async def send_qq_private_msg(qq_number, text):
             logger.error(f"[QQ] NapCat 返回非200: {resp.status_code} {resp.text[:200]}")
             return False
     except Exception as e:
-        _log_port_timing("NapCat", "/send_private_msg", time.perf_counter() - t0, f"ERROR:{e}")
-        logger.error(f"NapCat 发送消息失败: {e}")
+        dur = time.perf_counter() - t0
+        _log_port_timing("NapCat", "/send_private_msg", dur, f"ERROR:{type(e).__name__}:{e}")
+        # 改进错误日志：输出异常类型+详情+repr，避免某些异常 str() 为空导致日志只有冒号
+        err_detail = repr(e) if not str(e) else str(e)
+        logger.error(f"NapCat 发送消息失败: type={type(e).__name__} qq={qq_number} "
+                     f"url={NAPCAT_HTTP_URL.rstrip('/')} error={err_detail}")
+        # 常见异常的额外诊断信息
+        if isinstance(e, httpx.ConnectError):
+            logger.error(f"  → 连接失败：NapCat HTTP服务未启动/地址错误/防火墙拦截，NAPCAT_HTTP_URL={NAPCAT_HTTP_URL}")
+        elif isinstance(e, httpx.TimeoutException):
+            logger.error(f"  → 超时：NapCat响应慢或卡死，超时10s")
+        elif isinstance(e, httpx.RemoteProtocolError):
+            logger.error(f"  → 协议错误：NapCat返回了非法HTTP响应，可能是服务异常")
         return False
 async def send_qq_private_record(qq_number, audio_b64: str, audio_format: str = "mp3") -> bool:
     """
@@ -1331,6 +1342,14 @@ async def get_qq_binding(request: Request):
     qq = user_db.get_qq_by_username(user["username"])
     return {"bound": qq is not None, "qq_number": qq}
 # -------------------------- 主动消息推送 --------------------------
+def _extract_qq_number(user_id: str):
+    """从 user_id 中提取 QQ 号码。支持 qq_tmp_{qq} 格式和已绑定正式账号的情况。"""
+    if user_id.startswith("qq_tmp_"):
+        qq = user_id[len("qq_tmp_"):]
+        return qq if qq.isdigit() else None
+    # 正式账号：查绑定表
+    return user_db.get_qq_by_username(user_id)
+
 @app.post("/api/internal/proactive_push")
 async def internal_proactive_push(request: Request, x_internal_token: str = Header(None)):
     if x_internal_token != INTERNAL_TOKEN:
@@ -1348,15 +1367,41 @@ async def internal_proactive_push(request: Request, x_internal_token: str = Head
     pending_proactive_in_history[user_id] = {
         "role_id": role_id, "content": content, "timestamp": time.time()
     }
+
+    delivered = False
+    ws_sent = False
+    qq_sent = False
+
+    # 1. 尝试 WebSocket 推送给网页端在线用户
     ws = manager.active_connections.get(user_id)
     if ws:
         try:
             await ws.send_text(json.dumps(msg, ensure_ascii=False))
-            return {"delivered": True}
+            ws_sent = True
+            delivered = True
         except Exception as e:
-            logger.warning(f"主动推送WS发送失败，转离线: {e}")
-    manager.pending_messages.setdefault(user_id, []).append(msg)
-    return {"delivered": False}
+            logger.warning(f"主动推送WS发送失败: {e}")
+
+    # 2. 尝试通过 NapCat 发送 QQ 消息（核心修复：之前完全缺失这一步）
+    qq_number = _extract_qq_number(user_id)
+    if qq_number:
+        try:
+            qq_sent = await send_qq_private_msg(qq_number, content)
+            if qq_sent:
+                delivered = True
+                logger.info(f"[主动消息] QQ发送成功 user={user_id} qq={qq_number} role={role_id} content={content[:30]}")
+            else:
+                logger.warning(f"[主动消息] QQ发送失败 user={user_id} qq={qq_number} role={role_id}")
+        except Exception as e:
+            logger.error(f"[主动消息] QQ发送异常 user={user_id} qq={qq_number}: {type(e).__name__}: {e}", exc_info=True)
+    else:
+        logger.debug(f"[主动消息] 用户 {user_id} 未绑定QQ，跳过QQ发送")
+
+    # 3. 如果都没成功，存入 pending 等待网页端上线拉取
+    if not delivered:
+        manager.pending_messages.setdefault(user_id, []).append(msg)
+
+    return {"delivered": delivered, "ws_sent": ws_sent, "qq_sent": qq_sent}
 # -------------------------- 认证 --------------------------
 @app.post("/api/login")
 async def login(request: Request):
