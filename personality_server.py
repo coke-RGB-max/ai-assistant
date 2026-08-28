@@ -1,5 +1,5 @@
 """
-人格后端 v10.0 - 端口 8002
+人格后端 v12.2 - 端口 8002
 v8.1 基础: ums拼写 / event_history统一 / 群聊conflict保存 / 亲密度曲线 / 隐藏动机行为化
       角色关系矩阵 / LLM阈值 / CORS可配置 / Prompt缓存
 v9.0 基础: 主动消息生成 / 管理员状态读写
@@ -13,6 +13,9 @@ v10.0 新增:
   七、性能优化: 多级缓存扩展 / 记忆摘要压缩
   八、活起来细节: 口头禅动态变体 / 专属emoji偏好 / 称呼进化 / 吃醋分阶段
   九、知识路由架构: 判断模型(豆包)→知道(B线直答)/不知道(A线Kimi联网搜索→整理→人格回复)
+v12.0: DesireMentalState 意念欲望状态 / 主动消息欲望联动
+v12.1: LLM心理状态校准层（方案B：本地公式算基础值 + LLM输出修正系数）
+v12.2: 配合proactive_server v13 话题延续引擎 —— 新增 topic_continue / topic_self_close 两种主动消息reason_type，支持intent行为意图引导
 """
 import asyncio, json, logging, re, random, time, os, sqlite3, hashlib, datetime
 from typing import Optional, List, Dict, Any, Tuple
@@ -3755,7 +3758,7 @@ async def lifespan(app):
         except asyncio.CancelledError: pass
     logger.info("人格后端关闭")
 
-app = FastAPI(title="人格后端 v11.0", version="11.0.0", lifespan=lifespan)
+app = FastAPI(title="人格后端 v12.2", version="12.2.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS,
                    allow_credentials=CORS_CREDENTIALS, allow_methods=["*"], allow_headers=["*"])
 
@@ -3845,7 +3848,7 @@ async def rate_limit_dependency(request: Request):
 # ============================================================
 @app.get("/health")
 async def health():
-    return {"status":"ok","service":"personality_server","version":"11.0.0","port":PORT,
+    return {"status":"ok","service":"personality_server","version":"12.2.0","port":PORT,
             "features":["session_state","rate_limit","smart_retry","safe_json","group_brain",
                         "mode_unified","behavior_tendency","role_relationship_matrix","llm_threshold","persona_cache",
                         "v10_time_context","v10_weather","v10_micro_narrative","v10_emotion_blend",
@@ -4260,6 +4263,7 @@ class ProactiveGenerateRequest(BaseModel):
     idle_hours: float = 0
     intimacy: int = 30
     mood: str = "calm"
+    intent: Optional[Dict[str, Any]] = None  # v12.2: 行为意图引导（intent_type/prompt_hint/dominant_desire）
 
 PROACTIVE_REASON_PROMPT = {
     "missing_you": "你发现自己有点想他/她。你们已经有一阵子没聊了，这种想念让你主动打开了对话框。",
@@ -4268,6 +4272,9 @@ PROACTIVE_REASON_PROMPT = {
     "daily_share": "你正在做自己的事，某件小事让你想到了他/她，想顺手分享给他/她。",
     "emotion_need": "你现在心情不太好，想找他/她说说话，哪怕只是随便聊聊。",
     "check_in": "你没什么特别的事，就是忽然想问候他/她一声。",
+    # v12.2: 话题延续引擎专用类型
+    "topic_continue": "你们正在聊天，但对方沉默了一会儿。你根据刚才聊的内容自然地想到了一个相关的新话题，想接着聊下去，不要让对话冷场。",
+    "topic_self_close": "你主动提起了一个新话题，但对方没有回应。你需要自然地收尾，给自己和对方找个台阶下，不要显得尴尬、卑微或追问。",
 }
 
 @app.post("/api/proactive_generate")
@@ -4283,8 +4290,20 @@ async def proactive_generate(request: ProactiveGenerateRequest):
         noise_text = f"你此刻{noise['description']}。" if noise else ""
         reason_block = PROACTIVE_REASON_PROMPT.get(
             request.reason_type, PROACTIVE_REASON_PROMPT["check_in"])
-        if request.reason_detail and request.reason_type in ("daily_share", "memory_recall", "emotion_need"):
-            reason_block += f"（具体由头：{request.reason_detail}）"
+
+        # v12.2: reason_detail 处理 —— 话题延续类必须展示上下文摘要和生成要求
+        if request.reason_detail:
+            if request.reason_type in ("topic_continue", "topic_self_close"):
+                # 这两个类型的 reason_detail 包含上下文+详细生成指令，作为核心情况说明
+                reason_block += f"\n【当前情况】{request.reason_detail}"
+            elif request.reason_type in ("daily_share", "memory_recall", "emotion_need"):
+                reason_block += f"（具体由头：{request.reason_detail}）"
+
+        # v12.2: intent.prompt_hint 行为意图风格引导
+        intent_hint = ""
+        if request.intent and request.intent.get("prompt_hint"):
+            intent_hint = f"\n【风格要求】{request.intent['prompt_hint']}"
+
         memory_block = ""
         if request.related_memory:
             mem_summary = request.related_memory.get("summary", "")
@@ -4294,21 +4313,53 @@ async def proactive_generate(request: ProactiveGenerateRequest):
         if role.get("catchphrases"):
             cp_hint = (f"偶尔可以自然带一句口头禅（如「{random.choice(role['catchphrases'])}」），"
                        f"但不要每条都用。")
+
+        # v12.2: 根据 reason_type 动态调整场景描述和输出规则
+        is_topic_continue = request.reason_type == "topic_continue"
+        is_self_close = request.reason_type == "topic_self_close"
+
+        if is_topic_continue:
+            scene_desc = "你们正在聊天过程中，对方暂时没有回复，你想自然地把话题延续下去。"
+            output_rules = (
+                f"1. 只输出你要发的消息内容本身，1-2句话，口语化，像正在进行的对话\n"
+                f"2. 不要解释你为什么发消息，不要说'我是AI/系统/语言模型'，不要提'触发''主动消息'这类词\n"
+                f"3. 这是对话的延续，不是新的开场白——不要用'对了/话说/顺便问一下'这类刻意的转折词\n"
+                f"4. 基于刚才聊的内容自然延伸，不要重复已经说过的话题\n"
+                f"5. 符合你的性格和说话风格，不要OOC。{cp_hint}\n"
+                f"6. 就发一条，不要连发多条，不要加动作描写或括号旁白"
+            )
+        elif is_self_close:
+            scene_desc = "你刚才主动提起了一个新话题，但对方没有回应。你需要自然地收尾。"
+            output_rules = (
+                f"1. 只输出你要发的消息内容本身，1句话，简短自然\n"
+                f"2. 不要解释你为什么发消息，不要说'我是AI/系统/语言模型'\n"
+                f"3. 核心：给自己和对方都找台阶下——暗示对方可能在忙，同时表示自己就是随口一说\n"
+                f"4. 不要卑微、不要追问、不要道歉、不要降低关系，就像真人发现对方没在听然后自然收住\n"
+                f"5. 符合你的性格和说话风格，不要OOC。温柔型可以体贴收尾，傲娇型可以嘴硬收尾。{cp_hint}\n"
+                f"6. 就发一条，不要加动作描写或括号旁白"
+            )
+        else:
+            scene_desc = "现在不是在回复对方的消息，而是你自己主动想联系他/她。"
+            output_rules = (
+                f"1. 只输出你要发的消息内容本身，1-2句话，口语化，像真人随手发的微信/短信\n"
+                f"2. 不要解释你为什么发消息，不要说'我是AI/系统/语言模型'，不要提'触发''主动消息'这类词\n"
+                f"3. 不要每次都问'在吗/在干嘛/忙吗'，根据上面的由头自然开场\n"
+                f"4. 符合你的性格和说话风格，不要OOC。{cp_hint}\n"
+                f"5. 就发一条，不要连发多条，不要加动作描写或括号旁白\n"
+                f"6. 不要过度热情，也不要太生硬，把握好你们当前的关系距离"
+            )
+
         system_prompt = (
             f"你是{rname}，{role['age']}{role['gender']}生。{role['description']}\n"
             f"性格：{role['personality']}。说话风格：{role['speaking_style']}。\n"
             f"你们现在的关系：{stage_name}（亲密度{request.intimacy}/100）。\n"
             f"{noise_text}\n\n"
-            f"现在不是在回复对方的消息，而是你自己主动想联系他/她。\n"
+            f"{scene_desc}\n"
             f"{reason_block}\n"
+            f"{intent_hint}\n"
             f"{memory_block}\n\n"
             f"【输出规则】\n"
-            f"1. 只输出你要发的消息内容本身，1-2句话，口语化，像真人随手发的微信/短信\n"
-            f"2. 不要解释你为什么发消息，不要说'我是AI/系统/语言模型'，不要提'触发''主动消息'这类词\n"
-            f"3. 不要每次都问'在吗/在干嘛/忙吗'，根据上面的由头自然开场\n"
-            f"4. 符合你的性格和说话风格，不要OOC。{cp_hint}\n"
-            f"5. 就发一条，不要连发多条，不要加动作描写或括号旁白\n"
-            f"6. 不要过度热情，也不要太生硬，把握好你们当前的关系距离"
+            f"{output_rules}"
         )
         content = await smart_llm_call(
             [{"role": "system", "content": system_prompt}],

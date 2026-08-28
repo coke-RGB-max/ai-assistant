@@ -232,6 +232,11 @@ background_tasks = set()
 # QQ 用户的内存聊天历史（重启后丢失；心理状态由 personality_server session 持久化）
 qq_chat_history: Dict[str, List[Dict]] = {}
 
+# v13.0: 待纳入对话历史的主动消息缓存
+# 场景：proactive_server 推送话题延续/主动消息后，用户下一次发消息时需要把这条主动消息
+# 加入 chat_history，这样大模型才知道自己刚才说了什么。key=user_id, value={role_id, content, timestamp}
+pending_proactive_in_history: Dict[str, Dict] = {}
+
 # ============================================================
 # Identity FIFO Queue — 每个用户独立队列，保证消息严格串行处理
 # 解决：用户短时间内连发多条消息时回复顺序错乱的问题
@@ -473,7 +478,7 @@ async def call_vector_migrate(old_user_id, new_user_id):
         logger.error(f"向量记忆迁移失败: {e}")
     return {"success": False, "migrated": 0}
 # -------------------------- 主动消息后端对接（带熔断） --------------------------
-async def call_proactive_report(user_id, role_id, intimacy, attachment=None, psych=None):
+async def call_proactive_report(user_id, role_id, intimacy, attachment=None, psych=None, session_id=None):
     if _proactive_should_skip():
         return
     t0 = time.perf_counter()
@@ -487,6 +492,8 @@ async def call_proactive_report(user_id, role_id, intimacy, attachment=None, psy
                     pass
             if psych and isinstance(psych, dict):
                 payload["psych"] = psych
+            if session_id:
+                payload["session_id"] = session_id
             resp = await client.post(f"{PROACTIVE_SERVER_URL}/api/activity/report", json=payload, timeout=10.0)
             dur = time.perf_counter() - t0
             _log_port_timing("主动后端", "/api/activity/report", dur, f"HTTP{resp.status_code}")
@@ -532,6 +539,59 @@ async def call_proactive_migrate(old_user_id, new_user_id):
     except Exception as e:
         logger.warning(f"proactive数据迁移失败: {e}")
     return False
+
+# -------------------------- v13.0: 话题延续引擎调用 --------------------------
+async def call_proactive_user_spoke(user_id, role_id):
+    """用户发消息时调用：重置话题延续状态（取消待发的新话题和收尾）"""
+    if _proactive_should_skip():
+        return
+    t0 = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(
+                f"{PROACTIVE_SERVER_URL}/api/conversation/user_spoke",
+                json={"user_id": user_id, "role_id": role_id}, timeout=8.0)
+            dur = time.perf_counter() - t0
+            _log_port_timing("主动后端", "/api/conversation/user_spoke", dur, f"HTTP{resp.status_code}")
+            if resp.status_code == 200:
+                _proactive_on_success()
+            else:
+                _proactive_on_fail()
+    except Exception as e:
+        _proactive_on_fail()
+        _log_port_timing("主动后端", "/api/conversation/user_spoke", time.perf_counter() - t0, f"ERROR:{e}")
+        logger.warning(f"proactive用户发言上报失败: {e}")
+
+async def call_proactive_ai_replied(user_id, role_id, recent_messages):
+    """AI回复完成后调用：记录AI回复时间+缓存最近对话，启动话题延续计时"""
+    if _proactive_should_skip():
+        return
+    t0 = time.perf_counter()
+    try:
+        # 只保留最近6轮，格式转换为 {"role":"user"/"ai","content":"..."}
+        msgs = []
+        for m in (recent_messages or [])[-6:]:
+            role = m.get("role", "")
+            content = m.get("content", "")
+            if role == "user":
+                msgs.append({"role": "user", "content": content})
+            elif role == "assistant":
+                msgs.append({"role": "ai", "content": content})
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(
+                f"{PROACTIVE_SERVER_URL}/api/conversation/ai_replied",
+                json={"user_id": user_id, "role_id": role_id, "recent_messages": msgs},
+                timeout=8.0)
+            dur = time.perf_counter() - t0
+            _log_port_timing("主动后端", "/api/conversation/ai_replied", dur, f"HTTP{resp.status_code}")
+            if resp.status_code == 200:
+                _proactive_on_success()
+            else:
+                _proactive_on_fail()
+    except Exception as e:
+        _proactive_on_fail()
+        _log_port_timing("主动后端", "/api/conversation/ai_replied", time.perf_counter() - t0, f"ERROR:{e}")
+        logger.warning(f"proactive AI回复上报失败: {e}")
 class ConnectionManager:
     def __init__(self):
         self.active_connections = {}
@@ -588,6 +648,11 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
     _t = asyncio.create_task(call_proactive_mark_replied(identity))
     background_tasks.add(_t)
     _t.add_done_callback(background_tasks.discard)
+    # v13.0: 单聊模式下，通知话题延续引擎用户发言了（重置状态）
+    if mode == "single":
+        _ts = asyncio.create_task(call_proactive_user_spoke(identity, role_ids[0]))
+        background_tasks.add(_ts)
+        _ts.add_done_callback(background_tasks.discard)
     # 获取/创建 session
     session_id = user_db.get_session(identity)
     if not session_id:
@@ -616,6 +681,10 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
     if not result.get("success") and not reply:
         reply = "抱歉，我暂时无法回应..."
     # 更新聊天历史
+    # v13.0: 如果有主动推送的消息（话题延续等）还没纳入历史，先加进去，保证大模型知道自己刚才说了什么
+    pending = pending_proactive_in_history.pop(identity, None)
+    if pending and mode == "single":
+        chat_history.append({"role": "assistant", "content": pending.get("content", "")})
     chat_history.append({"role": "user", "content": user_message})
     chat_history.append({"role": "assistant", "content": reply})
     if len(chat_history) > 20:
@@ -655,9 +724,15 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
         psych_snap = dbg.get("psychological_state") or {}
         attachment = psych_snap.get("attachment")
         _t2 = asyncio.create_task(call_proactive_report(
-            identity, rid, response_intimacy.get(rid, 30), attachment, psych_snap))
+            identity, rid, response_intimacy.get(rid, 30), attachment, psych_snap,
+            session_id=session_id))
         background_tasks.add(_t2)
         _t2.add_done_callback(background_tasks.discard)
+        # v13.0: 通知话题延续引擎AI回复完成，传入最近对话用于生成延伸话题
+        _t3 = asyncio.create_task(call_proactive_ai_replied(
+            identity, rid, list(chat_history)))
+        background_tasks.add(_t3)
+        _t3.add_done_callback(background_tasks.discard)
     # 输出耗时汇总日志
     llm_used = result.get("used_llm_analysis", False)
     timer.log(f" | 回复长度={len(reply)} | LLM分析={'是' if llm_used else '否'}")
@@ -722,6 +797,11 @@ async def process_voice_message(identity, audio_base64, role_ids=None, chat_hist
     _t = asyncio.create_task(call_proactive_mark_replied(identity))
     background_tasks.add(_t)
     _t.add_done_callback(background_tasks.discard)
+    # v13.0: 单聊模式下，通知话题延续引擎用户发言了（重置状态）
+    if mode == "single":
+        _ts = asyncio.create_task(call_proactive_user_spoke(identity, role_ids[0]))
+        background_tasks.add(_ts)
+        _ts.add_done_callback(background_tasks.discard)
     # 获取/创建 session
     session_id = user_db.get_session(identity)
     if not session_id:
@@ -750,6 +830,10 @@ async def process_voice_message(identity, audio_base64, role_ids=None, chat_hist
         reply = "抱歉，我没听清你说什么..."
     # 更新聊天历史（用ASR识别出的文本）
     if asr_text:
+        # v13.0: 如果有主动推送的消息还没纳入历史，先加进去
+        pending = pending_proactive_in_history.pop(identity, None)
+        if pending and mode == "single":
+            chat_history.append({"role": "assistant", "content": pending.get("content", "")})
         chat_history.append({"role": "user", "content": asr_text})
         chat_history.append({"role": "assistant", "content": reply})
         if len(chat_history) > 20:
@@ -764,9 +848,15 @@ async def process_voice_message(identity, audio_base64, role_ids=None, chat_hist
     if mode == "single" and asr_text:
         rid = role_ids[0]
         _t2 = asyncio.create_task(call_proactive_report(
-            identity, rid, intimacy_map.get(rid, 30), None, {}))
+            identity, rid, intimacy_map.get(rid, 30), None, {},
+            session_id=session_id))
         background_tasks.add(_t2)
         _t2.add_done_callback(background_tasks.discard)
+        # v13.0: 通知话题延续引擎AI回复完成
+        _t3 = asyncio.create_task(call_proactive_ai_replied(
+            identity, rid, list(chat_history)))
+        background_tasks.add(_t3)
+        _t3.add_done_callback(background_tasks.discard)
     timer.log(f" | ASR文本={asr_text[:30]} | 回复长度={len(reply)} | 音频={'有' if audio_out else '无'}")
     return {
         "reply": reply,
@@ -1254,6 +1344,10 @@ async def internal_proactive_push(request: Request, x_internal_token: str = Head
         return JSONResponse({"error": "bad_request"}, status_code=400)
     msg = {"type": "proactive", "role_id": role_id, "content": content,
            "timestamp": time.time(), "message_id": message_id}
+    # v13.0: 缓存主动消息，用户下一次发消息时纳入 chat_history，保证大模型知道自己刚才说了什么
+    pending_proactive_in_history[user_id] = {
+        "role_id": role_id, "content": content, "timestamp": time.time()
+    }
     ws = manager.active_connections.get(user_id)
     if ws:
         try:
