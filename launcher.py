@@ -65,8 +65,8 @@ async def read_stream(name, stream):
     """异步读取子进程输出流，带服务名前缀"""
     while True:
         try:
-            # P3 修复：设置1MB行长度限制，避免超长日志（如NapCat返回的长文件路径）导致 LimitOverrunError
-            line = await stream.readline(limit=1024 * 1024)
+            # P3 修复：readline() 使用 create_subprocess_exec 时设置的 1MB limit
+            line = await stream.readline()
         except asyncio.LimitOverrunError:
             # 行超过1MB，分块读取直到换行
             chunks = []
