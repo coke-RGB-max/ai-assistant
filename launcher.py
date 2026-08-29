@@ -64,7 +64,27 @@ def log(name: str, msg: str):
 async def read_stream(name, stream):
     """异步读取子进程输出流，带服务名前缀"""
     while True:
-        line = await stream.readline()
+        try:
+            # P3 修复：设置1MB行长度限制，避免超长日志（如NapCat返回的长文件路径）导致 LimitOverrunError
+            line = await stream.readline(limit=1024 * 1024)
+        except asyncio.LimitOverrunError:
+            # 行超过1MB，分块读取直到换行
+            chunks = []
+            while True:
+                try:
+                    chunk = await stream.read(4096)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    if b"\n" in chunk:
+                        break
+                except Exception:
+                    break
+            line = b"".join(chunks)
+        except Exception as e:
+            log(name, f"[read_stream] 读取异常: {type(e).__name__}: {e}")
+            await asyncio.sleep(0.1)
+            continue
         if not line:
             break
         try:
@@ -107,6 +127,7 @@ async def run_service(name, script, port, env_overrides):
             stderr=asyncio.subprocess.STDOUT,
             env=env,
             cwd=str(SCRIPT_DIR),
+            limit=1024 * 1024,  # P3 修复：设置1MB流读取限制，避免超长行崩溃
         )
     except Exception as e:
         log(name, f"启动失败: {e}")
