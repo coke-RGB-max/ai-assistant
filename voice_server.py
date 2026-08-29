@@ -42,11 +42,9 @@ DASHVECTOR_DIMENSION = 2048
 REQUEST_TIMEOUT = 60
 LOG_MAX_CHARS = 2000
 
-# 新版独有的 DeepSeek 配置（记忆摘要分析，用DeepSeek官方API）
-# 注意：必须用DeepSeek官方Key，不能用火山方舟的Key！
-# 优先读 DEEPSEEK_OFFICIAL_API_KEY（和P1多模型路由保持一致），fallback到 DEEPSEEK_API_KEY
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_OFFICIAL_API_KEY", "") or os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_OFFICIAL_BASE_URL", "") or os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+# 新版独有的 DeepSeek 配置
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 # ==========================================================================================
 
 logging.basicConfig(level=logging.INFO)
@@ -672,5 +670,19 @@ async def clear_memory(request: ClearMemoryRequest):
 
 
 if __name__ == "__main__":
+    # P3 修复：启动前检测端口是否已被占用，避免与旧实例冲突导致无限崩溃重启
+    import socket
+    def _is_port_in_use(port: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind((HOST, port))
+                return False
+            except OSError:
+                return True
+    if _is_port_in_use(PORT):
+        print(f"[vector_server] 端口 {PORT} 已被占用，可能已有实例在运行，正常退出。", flush=True)
+        import sys
+        sys.exit(0)  # 退出码0表示正常退出，launcher不会重启
+
     import uvicorn
     uvicorn.run("vector_server:app", host=HOST, port=PORT, workers=1, log_level="info")

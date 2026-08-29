@@ -128,6 +128,10 @@ async def monitor_process(name, proc):
     if shutdown_event.is_set():
         log(name, f"已停止 (退出码 {proc.returncode})")
         return
+    # P3 修复：退出码0表示正常退出（如端口被占用时主动退出），不重启
+    if proc.returncode == 0:
+        log(name, f"正常退出 (退出码 0)，不重启")
+        return
     log(name, f"异常退出 (退出码 {proc.returncode})，5秒后重启...")
     await asyncio.sleep(5)
     if shutdown_event.is_set():
