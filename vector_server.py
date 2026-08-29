@@ -43,8 +43,15 @@ REQUEST_TIMEOUT = 60
 LOG_MAX_CHARS = 2000
 
 # 新版独有的 DeepSeek 配置
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+# P3 修复：优先用火山方舟的 DeepSeek API（用户配置的 DEEPSEEK_BASE_URL + DEEPSEEK_API_KEY + DEEPSEEK_MODEL），
+# 失败时才 fallback 到 DeepSeek 官方 API（DEEPSEEK_OFFICIAL_API_KEY + https://api.deepseek.com + deepseek-chat）
+# 注意：火山方舟的模型名是 Endpoint ID（如 ep-xxxxxx），官方的模型名是 deepseek-chat
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", os.getenv("DOUBAO_API_KEY", ""))  # 优先用用户配置的，fallback到豆包Key
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")  # 默认火山方舟
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")  # 火山方舟的模型Endpoint ID，用户需配置
+DEEPSEEK_OFFICIAL_API_KEY = os.getenv("DEEPSEEK_OFFICIAL_API_KEY", "")  # 官方API Key，保底用
+DEEPSEEK_OFFICIAL_BASE_URL = "https://api.deepseek.com"  # 官方API地址
+DEEPSEEK_OFFICIAL_MODEL = "deepseek-chat"  # 官方模型名
 # ==========================================================================================
 
 logging.basicConfig(level=logging.INFO)
@@ -340,52 +347,69 @@ async def analyze_memory_with_deepseek(
     role_names: List[str],
     existing_memories: str
 ) -> Optional[Dict[str, Any]]:
+    """P3 修复：优先用火山方舟的 DeepSeek API，失败时 fallback 到官方 API。"""
+    user_prompt = (
+        f"角色：{', '.join(role_names)}\n"
+        f"用户消息：{user_message}\n"
+        f"角色回复：{assistant_reply}\n"
+        f"已有记忆：{existing_memories if existing_memories else '无'}\n"
+        "\n请分析并返回 JSON。"
+    )
+    
+    # 定义两个 API 端点：优先火山方舟，保底官方
+    endpoints = [
+        {"name": "火山方舟", "base_url": DEEPSEEK_BASE_URL, "api_key": DEEPSEEK_API_KEY, "model": DEEPSEEK_MODEL},
+    ]
+    # 只有配置了官方 Key 才加入保底
+    if DEEPSEEK_OFFICIAL_API_KEY:
+        endpoints.append({"name": "DeepSeek官方", "base_url": DEEPSEEK_OFFICIAL_BASE_URL, 
+                          "api_key": DEEPSEEK_OFFICIAL_API_KEY, "model": DEEPSEEK_OFFICIAL_MODEL})
+    
     async with httpx.AsyncClient(timeout=60.0) as client:
-        for attempt in range(3):
-            try:
-                headers = {
-                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-                    "Content-Type": "application/json"
-                }
-                user_prompt = (
-                    f"角色：{', '.join(role_names)}\n"
-                    f"用户消息：{user_message}\n"
-                    f"角色回复：{assistant_reply}\n"
-                    f"已有记忆：{existing_memories if existing_memories else '无'}\n"
-                    "\n请分析并返回 JSON。"
-                )
-                payload = {
-                    "model": "deepseek-chat",
-                    "messages": [
-                        {"role": "system", "content": DEEPSEEK_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    "temperature": 0.3,
-                    "max_tokens": 300,
-                }
-                response = await client.post(
-                    f"{DEEPSEEK_BASE_URL}/chat/completions",
-                    headers=headers,
-                    json=payload,
-                    timeout=60.0
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    content = data["choices"][0]["message"]["content"]
-                    json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', content, re.DOTALL)
-                    if json_match:
-                        content = json_match.group(1).strip()
-                    result = json.loads(content)
-                    result["intimacy_change"] = max(-5, min(5, result.get("intimacy_change", 0)))
-                    return result
-                else:
-                    logger.warning(f"DeepSeek API 错误: {response.status_code}")
-                    if attempt < 2:
+        for endpoint in endpoints:
+            for attempt in range(2):  # 每个端点重试2次
+                try:
+                    headers = {
+                        "Authorization": f"Bearer {endpoint['api_key']}",
+                        "Content-Type": "application/json"
+                    }
+                    payload = {
+                        "model": endpoint["model"],
+                        "messages": [
+                            {"role": "system", "content": DEEPSEEK_SYSTEM_PROMPT},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": 300,
+                    }
+                    response = await client.post(
+                        f"{endpoint['base_url'].rstrip('/')}/chat/completions",
+                        headers=headers,
+                        json=payload,
+                        timeout=60.0
+                    )
+                    if response.status_code == 200:
+                        data = response.json()
+                        resp_content = data["choices"][0]["message"]["content"]
+                        json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', resp_content, re.DOTALL)
+                        if json_match:
+                            resp_content = json_match.group(1).strip()
+                        result = json.loads(resp_content)
+                        result["intimacy_change"] = max(-5, min(5, result.get("intimacy_change", 0)))
+                        logger.info(f"[DeepSeek] {endpoint['name']} 记忆分析成功")
+                        return result
+                    else:
+                        logger.warning(f"[DeepSeek] {endpoint['name']} API 错误: {response.status_code} {response.text[:200]}")
+                        if attempt < 1:
+                            await asyncio.sleep(2)
+                except Exception as e:
+                    logger.error(f"[DeepSeek] {endpoint['name']} API 异常: {type(e).__name__}: {e}")
+                    if attempt < 1:
                         await asyncio.sleep(2)
-            except Exception as e:
-                logger.error(f"DeepSeek API 异常: {e}")
-                if attempt < 2:
-                    await asyncio.sleep(2)
+            # 当前端点失败，尝试下一个端点
+            if endpoint != endpoints[-1]:
+                logger.warning(f"[DeepSeek] {endpoint['name']} 失败，尝试下一个端点...")
+        logger.warning("[DeepSeek] 所有端点都失败，返回 None")
     return None
 
 class SearchMemoryRequest(BaseModel):
@@ -670,5 +694,19 @@ async def clear_memory(request: ClearMemoryRequest):
 
 
 if __name__ == "__main__":
+    # P3 修复：启动前检测端口是否已被占用，避免与旧实例冲突导致无限崩溃重启
+    import socket
+    def _is_port_in_use(port: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind((HOST, port))
+                return False
+            except OSError:
+                return True
+    if _is_port_in_use(PORT):
+        print(f"[vector_server] 端口 {PORT} 已被占用，可能已有实例在运行，正常退出。", flush=True)
+        import sys
+        sys.exit(0)  # 退出码0表示正常退出，launcher不会重启
+
     import uvicorn
     uvicorn.run("vector_server:app", host=HOST, port=PORT, workers=1, log_level="info")
