@@ -4172,3 +4172,91 @@ async def image_status():
         return system.get_status()
     except Exception as e:
         return {"error": str(e)}
+
+
+class SelfieFromMessageRequest(BaseModel):
+    """P2 新增：从用户原始消息直接生成自拍"""
+    user_id: str
+    role_id: str
+    message: str  # 用户原始消息
+    intimacy: int = 30
+    psych_states: Optional[Dict[str, float]] = None
+
+
+class SelfieFromMessageResponse(BaseModel):
+    """自拍响应"""
+    is_selfie_request: bool  # 是否是自拍请求
+    allowed: bool = False
+    message: str = ""
+    image_url: str = ""
+    mode: str = ""  # 检测到的自拍模式（mirror/direct）
+    scene: str = ""  # 提取的场景
+    clothing: str = ""  # 提取的服装
+    expression: str = ""  # 提取的表情
+    error: str = ""
+
+
+@app.post("/api/image/selfie_from_message", response_model=SelfieFromMessageResponse)
+async def generate_selfie_from_message(req: SelfieFromMessageRequest):
+    """
+    P2 新增：从用户原始消息直接生成自拍。
+    自动检测是否是自拍请求、自拍模式、场景/服装/表情，然后生成图片。
+    前端可以在用户发送消息前先调用这个接口，如果是自拍请求则显示图片。
+    """
+    try:
+        from core.image_generator import (
+            get_selfie_system, is_selfie_request,
+            detect_selfie_mode, extract_scene, extract_clothing, extract_expression,
+        )
+        
+        # 1. 检测是否是自拍请求
+        if not is_selfie_request(req.message):
+            return SelfieFromMessageResponse(
+                is_selfie_request=False,
+                message="",
+            )
+        
+        # 2. 检测模式和上下文
+        mode = detect_selfie_mode(req.message)
+        scene = extract_scene(req.message) or "indoor"
+        clothing = extract_clothing(req.message) or "casual"
+        expression = extract_expression(req.message) or "gentle smile"
+        
+        logger.info(
+            f"[SelfieP2] 自拍请求: user={req.user_id} role={req.role_id} "
+            f"mode={mode.value} scene={scene} clothing={clothing} expression={expression}"
+        )
+        
+        # 3. 调用自拍系统生成
+        system = get_selfie_system()
+        result = await system.handle_selfie_request(
+            user_id=req.user_id,
+            role_id=req.role_id,
+            intimacy=req.intimacy,
+            psych_states=req.psych_states,
+            scene=scene,
+            expression=expression,
+            clothing=clothing,
+            mode=mode,
+        )
+        
+        return SelfieFromMessageResponse(
+            is_selfie_request=True,
+            allowed=result.get("allowed", False),
+            message=result.get("message", ""),
+            image_url=result.get("image_url", ""),
+            mode=mode.value,
+            scene=scene,
+            clothing=clothing,
+            expression=expression,
+            error=result.get("error", ""),
+        )
+        
+    except Exception as e:
+        logger.error(f"[SelfieP2] 从消息生成自拍失败: {e}", exc_info=True)
+        return SelfieFromMessageResponse(
+            is_selfie_request=True,
+            allowed=False,
+            message="图片生成出了点问题，稍后再试吧。",
+            error=str(e),
+        )

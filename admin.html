@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FlexiChrono 管理后台</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0f0f1a;
+    color: #e0e0e0;
+    min-height: 100vh;
+}
+/* 登录页 */
+.login-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+}
+.login-box {
+    background: #1a1a2e;
+    padding: 40px;
+    border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+    width: 360px;
+}
+.login-box h2 {
+    text-align: center;
+    margin-bottom: 24px;
+    color: #a78bfa;
+}
+.login-box input {
+    width: 100%;
+    padding: 12px;
+    margin-bottom: 16px;
+    background: #16162a;
+    border: 1px solid #2d2d4a;
+    border-radius: 8px;
+    color: #e0e0e0;
+    font-size: 14px;
+}
+.login-box button {
+    width: 100%;
+    padding: 12px;
+    background: linear-gradient(135deg, #7c3aed, #a78bfa);
+    border: none;
+    border-radius: 8px;
+    color: white;
+    font-size: 16px;
+    cursor: pointer;
+    transition: opacity 0.2s;
+}
+.login-box button:hover { opacity: 0.9; }
+/* 主布局 */
+.app { display: none; }
+.sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: 220px;
+    height: 100vh;
+    background: #1a1a2e;
+    padding: 20px 0;
+    border-right: 1px solid #2d2d4a;
+}
+.sidebar h3 {
+    padding: 0 20px 20px;
+    color: #a78bfa;
+    font-size: 18px;
+    border-bottom: 1px solid #2d2d4a;
+    margin-bottom: 10px;
+}
+.nav-item {
+    padding: 12px 20px;
+    cursor: pointer;
+    transition: background 0.2s;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.nav-item:hover { background: #252540; }
+.nav-item.active {
+    background: #2d2d5a;
+    border-left: 3px solid #7c3aed;
+    color: #a78bfa;
+}
+.main {
+    margin-left: 220px;
+    padding: 24px;
+}
+.page { display: none; }
+.page.active { display: block; }
+.page h2 {
+    margin-bottom: 20px;
+    color: #a78bfa;
+    font-size: 22px;
+}
+/* 卡片 */
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+}
+.stat-card {
+    background: #1a1a2e;
+    padding: 20px;
+    border-radius: 10px;
+    border: 1px solid #2d2d4a;
+}
+.stat-card .label { font-size: 13px; color: #888; margin-bottom: 8px; }
+.stat-card .value { font-size: 28px; font-weight: bold; color: #a78bfa; }
+/* 表格 */
+.table-container {
+    background: #1a1a2e;
+    border-radius: 10px;
+    border: 1px solid #2d2d4a;
+    overflow: hidden;
+    margin-bottom: 20px;
+}
+table { width: 100%; border-collapse: collapse; }
+th, td {
+    padding: 12px 16px;
+    text-align: left;
+    border-bottom: 1px solid #2d2d4a;
+    font-size: 13px;
+}
+th {
+    background: #252540;
+    color: #a78bfa;
+    font-weight: 600;
+}
+tr:hover { background: #252540; }
+/* 按钮 */
+.btn {
+    padding: 6px 14px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    transition: opacity 0.2s;
+}
+.btn:hover { opacity: 0.85; }
+.btn-primary { background: #7c3aed; color: white; }
+.btn-success { background: #059669; color: white; }
+.btn-danger { background: #dc2626; color: white; }
+.btn-warning { background: #d97706; color: white; }
+.btn-sm { padding: 4px 10px; font-size: 11px; }
+/* 模态框 */
+.modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.6);
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+.modal-overlay.active { display: flex; }
+.modal {
+    background: #1a1a2e;
+    padding: 24px;
+    border-radius: 12px;
+    width: 400px;
+    max-width: 90vw;
+}
+.modal h3 { margin-bottom: 16px; color: #a78bfa; }
+.modal input, .modal select, .modal textarea {
+    width: 100%;
+    padding: 10px;
+    margin-bottom: 12px;
+    background: #16162a;
+    border: 1px solid #2d2d4a;
+    border-radius: 6px;
+    color: #e0e0e0;
+    font-size: 13px;
+}
+.modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+/* 进度条 */
+.progress-bar {
+    height: 8px;
+    background: #2d2d4a;
+    border-radius: 4px;
+    overflow: hidden;
+    margin-top: 4px;
+}
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #7c3aed, #a78bfa);
+    border-radius: 4px;
+}
+/* 标签 */
+.tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+}
+.tag-green { background: #05966933; color: #34d399; }
+.tag-red { background: #dc262633; color: #f87171; }
+.tag-blue { background: #2563eb33; color: #60a5fa; }
+.tag-yellow { background: #d9770633; color: #fbbf24; }
+/* 分页 */
+.pagination {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin-top: 16px;
+}
+.pagination button {
+    padding: 6px 12px;
+    background: #252540;
+    border: 1px solid #2d2d4a;
+    border-radius: 6px;
+    color: #e0e0e0;
+    cursor: pointer;
+    font-size: 12px;
+}
+.pagination button.active { background: #7c3aed; border-color: #7c3aed; }
+.pagination button:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Toast */
+.toast {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: 12px 20px;
+    border-radius: 8px;
+    color: white;
+    font-size: 14px;
+    z-index: 2000;
+    transform: translateX(120%);
+    transition: transform 0.3s;
+}
+.toast.show { transform: translateX(0); }
+.toast.success { background: #059669; }
+.toast.error { background: #dc2626; }
+.toast.info { background: #2563eb; }
+/* 详情面板 */
+.detail-panel {
+    background: #16162a;
+    padding: 16px;
+    border-radius: 8px;
+    margin-top: 12px;
+    font-size: 13px;
+    line-height: 1.8;
+    max-height: 400px;
+    overflow-y: auto;
+}
+.detail-panel pre {
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: #a78bfa;
+}
+</style>
+</head>
+<body>
+
+<!-- 登录页 -->
+<div class="login-container" id="loginPage">
+    <div class="login-box">
+        <h2>FlexiChrono 管理后台</h2>
+        <input type="password" id="adminToken" placeholder="管理员 Token" />
+        <button onclick="doLogin()">登录</button>
+    </div>
+</div>
+
+<!-- 主应用 -->
+<div class="app" id="app">
+    <!-- 侧边栏 -->
+    <div class="sidebar">
+        <h3>管理后台</h3>
+        <div class="nav-item active" onclick="switchPage('dashboard')">📊 仪表盘</div>
+        <div class="nav-item" onclick="switchPage('users')">👥 用户管理</div>
+        <div class="nav-item" onclick="switchPage('characters')">🎭 角色配置</div>
+        <div class="nav-item" onclick="switchPage('backups')">💾 备份管理</div>
+        <div class="nav-item" onclick="switchPage('status')">⚙️ 系统状态</div>
+        <div class="nav-item" onclick="doLogout()" style="margin-top:auto;position:absolute;bottom:20px;width:100%;">🚪 退出登录</div>
+    </div>
+
+    <!-- 主内容 -->
+    <div class="main">
+        <!-- 仪表盘 -->
+        <div class="page active" id="page-dashboard">
+            <h2>仪表盘</h2>
+            <div class="stats-grid" id="statsGrid"></div>
+            <div class="table-container">
+                <table>
+                    <thead><tr><th>亲密度区间</th><th>用户数</th><th>占比</th></tr></thead>
+                    <tbody id="intimacyTable"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- 用户管理 -->
+        <div class="page" id="page-users">
+            <h2>用户管理</h2>
+            <div class="table-container">
+                <table>
+                    <thead><tr>
+                        <th>用户名</th><th>昵称</th><th>类型</th><th>QQ绑定</th>
+                        <th>亲密度</th><th>状态</th><th>操作</th>
+                    </tr></thead>
+                    <tbody id="usersTable"></tbody>
+                </table>
+            </div>
+            <div class="pagination" id="usersPagination"></div>
+        </div>
+
+        <!-- 角色配置 -->
+        <div class="page" id="page-characters">
+            <h2>角色配置</h2>
+            <div class="table-container">
+                <table>
+                    <thead><tr><th>角色ID</th><th>名称</th><th>操作</th></tr></thead>
+                    <tbody id="charactersTable"></tbody>
+                </table>
+            </div>
+            <div id="characterDetail"></div>
+        </div>
+
+        <!-- 备份管理 -->
+        <div class="page" id="page-backups">
+            <h2>备份管理</h2>
+            <div style="margin-bottom:16px;">
+                <button class="btn btn-primary" onclick="createBackup()">+ 创建备份</button>
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead><tr>
+                        <th>备份名称</th><th>创建时间</th><th>文件数</th><th>大小</th>
+                        <th>备注</th><th>操作</th>
+                    </tr></thead>
+                    <tbody id="backupsTable"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- 系统状态 -->
+        <div class="page" id="page-status">
+            <h2>系统状态</h2>
+            <div class="stats-grid" id="statusGrid"></div>
+            <div class="table-container">
+                <table>
+                    <thead><tr><th>配置项</th><th>值</th></tr></thead>
+                    <tbody id="configTable"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 模态框 -->
+<div class="modal-overlay" id="modal">
+    <div class="modal">
+        <h3 id="modalTitle">标题</h3>
+        <div id="modalBody"></div>
+        <div class="modal-actions">
+            <button class="btn" onclick="closeModal()">取消</button>
+            <button class="btn btn-primary" id="modalConfirm">确认</button>
+        </div>
+    </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+let adminToken = localStorage.getItem('admin_token') || '';
+let currentPage = 1;
+const pageSize = 20;
+
+// ========== 登录 ==========
+function doLogin() {
+    const token = document.getElementById('adminToken').value.trim();
+    if (!token) { showToast('请输入管理员Token', 'error'); return; }
+    adminToken = token;
+    localStorage.setItem('admin_token', token);
+    // 验证token
+    apiGet('/api/admin/status').then(data => {
+        if (data.error) {
+            showToast('Token无效', 'error');
+            adminToken = '';
+            localStorage.removeItem('admin_token');
+        } else {
+            showToast('登录成功', 'success');
+            document.getElementById('loginPage').style.display = 'none';
+            document.getElementById('app').style.display = 'block';
+            loadDashboard();
+        }
+    }).catch(() => {
+        showToast('登录失败，请检查Token', 'error');
+        adminToken = '';
+        localStorage.removeItem('admin_token');
+    });
+}
+
+function doLogout() {
+    adminToken = '';
+    localStorage.removeItem('admin_token');
+    document.getElementById('app').style.display = 'none';
+    document.getElementById('loginPage').style.display = 'flex';
+}
+
+// 自动登录
+if (adminToken) {
+    document.getElementById('loginPage').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    loadDashboard();
+}
+
+// ========== API ==========
+function apiGet(path) {
+    return fetch(path, { headers: { 'Authorization': `Bearer ${adminToken}` } }).then(r => r.json());
+}
+function apiPost(path, body) {
+    return fetch(path, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {})
+    }).then(r => r.json());
+}
+function apiDelete(path) {
+    return fetch(path, { method: 'DELETE', headers: { 'Authorization': `Bearer ${adminToken}` } }).then(r => r.json());
+}
+
+// ========== 页面切换 ==========
+function switchPage(page) {
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    event.target.classList.add('active');
+    document.getElementById('page-' + page).classList.add('active');
+    if (page === 'dashboard') loadDashboard();
+    if (page === 'users') loadUsers();
+    if (page === 'characters') loadCharacters();
+    if (page === 'backups') loadBackups();
+    if (page === 'status') loadStatus();
+}
+
+// ========== 仪表盘 ==========
+function loadDashboard() {
+    apiGet('/api/admin/stats').then(data => {
+        if (data.error) { showToast(data.error, 'error'); return; }
+        document.getElementById('statsGrid').innerHTML = `
+            <div class="stat-card"><div class="label">总用户数</div><div class="value">${data.total_users}</div></div>
+            <div class="stat-card"><div class="label">QQ临时用户</div><div class="value">${data.qq_tmp_users}</div></div>
+            <div class="stat-card"><div class="label">已绑定用户</div><div class="value">${data.bound_users}</div></div>
+            <div class="stat-card"><div class="label">NapCat配置</div><div class="value" style="font-size:18px;">${data.services.napcat_available ? '✅ 已配置' : '❌ 未配置'}</div></div>
+        `;
+        const dist = data.intimacy_distribution;
+        const total = Object.values(dist).reduce((a,b) => a+b, 0) || 1;
+        document.getElementById('intimacyTable').innerHTML = Object.entries(dist).map(([k,v]) => `
+            <tr><td>${k}</td><td>${v}</td><td>
+                <div class="progress-bar"><div class="progress-fill" style="width:${(v/total*100).toFixed(1)}%"></div></div>
+                ${(v/total*100).toFixed(1)}%
+            </td></tr>
+        `).join('');
+    });
+}
+
+// ========== 用户管理 ==========
+function loadUsers() {
+    apiGet(`/api/admin/users?page=${currentPage}&page_size=${pageSize}`).then(data => {
+        if (data.error) { showToast(data.error, 'error'); return; }
+        document.getElementById('usersTable').innerHTML = data.users.map(u => {
+            const intimacy = u.intimacy || {};
+            const intimacyStr = Object.entries(intimacy).map(([r,v]) => `${r}:${v}`).join(', ') || '无';
+            return `<tr>
+                <td>${u.username}</td>
+                <td>${u.nickname || '-'}</td>
+                <td>${u.is_qq_tmp ? '<span class="tag tag-blue">QQ临时</span>' : '<span class="tag tag-green">正式</span>'}</td>
+                <td>${u.qq_bound ? '<span class="tag tag-green">已绑定</span>' : '<span class="tag tag-yellow">未绑定</span>'}</td>
+                <td style="max-width:200px;font-size:11px;">${intimacyStr}</td>
+                <td>${u.disabled ? '<span class="tag tag-red">已禁用</span>' : '<span class="tag tag-green">正常</span>'}</td>
+                <td>
+                    <button class="btn btn-sm btn-warning" onclick="editIntimacy('${u.username}')">亲密度</button>
+                    <button class="btn btn-sm btn-primary" onclick="resetPassword('${u.username}')">密码</button>
+                    <button class="btn btn-sm ${u.disabled ? 'btn-success' : 'btn-danger'}" onclick="toggleDisable('${u.username}', ${!u.disabled})">${u.disabled ? '启用' : '禁用'}</button>
+                </td>
+            </tr>`;
+        }).join('');
+        // 分页
+        const totalPages = Math.ceil(data.total / pageSize);
+        let pagHtml = `<button ${currentPage<=1?'disabled':''} onclick="changePage(${currentPage-1})">上一页</button>`;
+        for (let i = 1; i <= Math.min(totalPages, 5); i++) {
+            pagHtml += `<button class="${i===currentPage?'active':''}" onclick="changePage(${i})">${i}</button>`;
+        }
+        pagHtml += `<button ${currentPage>=totalPages?'disabled':''} onclick="changePage(${currentPage+1})">下一页</button>`;
+        document.getElementById('usersPagination').innerHTML = pagHtml;
+    });
+}
+
+function changePage(p) { currentPage = p; loadUsers(); }
+
+function editIntimacy(username) {
+    showModal('修改亲密度', `
+        <label>角色ID</label>
+        <input id="intimacyRole" placeholder="如 nianqi" />
+        <label>亲密度值 (0-100)</label>
+        <input id="intimacyValue" type="number" min="0" max="100" value="50" />
+    `, () => {
+        const role = document.getElementById('intimacyRole').value.trim();
+        const value = parseInt(document.getElementById('intimacyValue').value);
+        if (!role) { showToast('请输入角色ID', 'error'); return; }
+        apiPost(`/api/admin/users/${username}/intimacy`, { role_id: role, value }).then(r => {
+            if (r.success) { showToast('亲密度已更新', 'success'); closeModal(); loadUsers(); }
+            else showToast(r.error || '更新失败', 'error');
+        });
+    });
+}
+
+function resetPassword(username) {
+    showModal('重置密码', `
+        <label>新密码</label>
+        <input id="newPassword" type="password" placeholder="输入新密码" />
+    `, () => {
+        const pwd = document.getElementById('newPassword').value;
+        if (!pwd) { showToast('请输入新密码', 'error'); return; }
+        apiPost(`/api/admin/users/${username}/password`, { password: pwd }).then(r => {
+            if (r.success) { showToast('密码已重置', 'success'); closeModal(); }
+            else showToast(r.error || '重置失败', 'error');
+        });
+    });
+}
+
+function toggleDisable(username, disabled) {
+    apiPost(`/api/admin/users/${username}/disable`, { disabled }).then(r => {
+        if (r.success) { showToast(disabled ? '已禁用' : '已启用', 'success'); loadUsers(); }
+        else showToast(r.error || '操作失败', 'error');
+    });
+}
+
+// ========== 角色配置 ==========
+function loadCharacters() {
+    apiGet('/api/admin/characters').then(data => {
+        if (data.error) { showToast(data.error, 'error'); return; }
+        document.getElementById('charactersTable').innerHTML = (data.characters || []).map(c => `
+            <tr>
+                <td>${c.role_id || c.id || '-'}</td>
+                <td>${c.name || c.nickname || '-'}</td>
+                <td><button class="btn btn-sm btn-primary" onclick="viewCharacter('${c.role_id || c.id}')">查看配置</button></td>
+            </tr>
+        `).join('');
+    });
+}
+
+function viewCharacter(roleId) {
+    apiGet(`/api/admin/characters/${roleId}`).then(data => {
+        if (data.error) { showToast(data.error, 'error'); return; }
+        document.getElementById('characterDetail').innerHTML = `
+            <div class="table-container">
+                <div style="padding:16px;">
+                    <h3 style="color:#a78bfa;margin-bottom:12px;">${roleId} 配置详情</h3>
+                    <div class="detail-panel"><pre>${JSON.stringify(data.config, null, 2)}</pre></div>
+                </div>
+            </div>
+        `;
+    });
+}
+
+// ========== 备份管理 ==========
+function loadBackups() {
+    apiGet('/api/admin/backups').then(data => {
+        if (data.error) { showToast(data.error, 'error'); return; }
+        document.getElementById('backupsTable').innerHTML = (data.backups || []).map(b => `
+            <tr>
+                <td>${b.name}</td>
+                <td>${b.created_at_iso || b.created_at}</td>
+                <td>${b.file_count}</td>
+                <td>${b.size_human}</td>
+                <td>${b.note || '-'}</td>
+                <td>
+                    <a href="/api/admin/backups/${b.name}/download" target="_blank" style="text-decoration:none;">
+                        <button class="btn btn-sm btn-primary">下载</button>
+                    </a>
+                    <button class="btn btn-sm btn-warning" onclick="restoreBackup('${b.name}')">恢复</button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteBackup('${b.name}')">删除</button>
+                </td>
+            </tr>
+        `).join('') || '<tr><td colspan="6" style="text-align:center;color:#888;">暂无备份</td></tr>';
+    });
+}
+
+function createBackup() {
+    showModal('创建备份', `
+        <label>备注（可选）</label>
+        <input id="backupNote" placeholder="如：升级前备份" value="manual" />
+    `, () => {
+        const note = document.getElementById('backupNote').value || 'manual';
+        showToast('正在创建备份...', 'info');
+        apiPost('/api/admin/backups', { note }).then(r => {
+            if (r.success) { showToast('备份创建成功', 'success'); closeModal(); loadBackups(); }
+            else showToast(r.error || '创建失败', 'error');
+        });
+    });
+}
+
+function restoreBackup(name) {
+    if (!confirm(`确定要恢复备份 "${name}" 吗？这将覆盖现有数据！`)) return;
+    showToast('正在恢复备份...', 'info');
+    apiPost(`/api/admin/backups/${name}/restore`, { overwrite: true }).then(r => {
+        if (r.success) { showToast(`恢复成功，${r.restored_count}个文件已恢复`, 'success'); loadBackups(); }
+        else showToast(r.error || '恢复失败', 'error');
+    });
+}
+
+function deleteBackup(name) {
+    if (!confirm(`确定要删除备份 "${name}" 吗？`)) return;
+    apiDelete(`/api/admin/backups/${name}`).then(r => {
+        if (r.success) { showToast('备份已删除', 'success'); loadBackups(); }
+        else showToast(r.error || '删除失败', 'error');
+    });
+}
+
+// ========== 系统状态 ==========
+function loadStatus() {
+    apiGet('/api/admin/status').then(data => {
+        if (data.error) { showToast(data.error, 'error'); return; }
+        const svc = data.services;
+        document.getElementById('statusGrid').innerHTML = `
+            <div class="stat-card"><div class="label">主后端</div><div class="value" style="font-size:18px;">✅ 运行中</div></div>
+            <div class="stat-card"><div class="label">NapCat</div><div class="value" style="font-size:18px;">${svc.napcat_configured ? '✅ 已配置' : '❌ 未配置'}</div></div>
+            <div class="stat-card"><div class="label">主动发图</div><div class="value" style="font-size:18px;">${svc.proactive_auto_image ? '✅ 已启用' : '❌ 未启用'}</div></div>
+        `;
+        const cfg = data.config;
+        document.getElementById('configTable').innerHTML = `
+            <tr><td>数据目录</td><td>${cfg.data_dir}</td></tr>
+            <tr><td>LLM失败降级阈值</td><td>${cfg.llm_fail_threshold} 次</td></tr>
+            <tr><td>每用户每小时自拍上限</td><td>${cfg.max_user_images_per_hour} 张</td></tr>
+            <tr><td>每角色每天主动发图上限</td><td>${cfg.max_proactive_images_per_day} 张</td></tr>
+            <tr><td>服务器时间</td><td>${new Date(data.timestamp * 1000).toLocaleString()}</td></tr>
+        `;
+    });
+}
+
+// ========== 模态框 ==========
+function showModal(title, bodyHtml, onConfirm) {
+    document.getElementById('modalTitle').textContent = title;
+    document.getElementById('modalBody').innerHTML = bodyHtml;
+    document.getElementById('modal').classList.add('active');
+    document.getElementById('modalConfirm').onclick = onConfirm;
+}
+function closeModal() {
+    document.getElementById('modal').classList.remove('active');
+}
+
+// ========== Toast ==========
+function showToast(msg, type = 'info') {
+    const toast = document.getElementById('toast');
+    toast.textContent = msg;
+    toast.className = `toast ${type} show`;
+    setTimeout(() => toast.classList.remove('show'), 3000);
+}
+</script>
+</body>
+</html>

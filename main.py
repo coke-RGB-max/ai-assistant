@@ -38,6 +38,13 @@ NAPCAT_HTTP_URL = os.getenv("NAPCAT_HTTP_URL", "")  # 例: http://127.0.0.1:3000
 NAPCAT_ACCESS_TOKEN = os.getenv("NAPCAT_ACCESS_TOKEN", "")
 # Webhook 签名校验密钥（NapCat 配置中的 secret，留空则不校验）
 QQ_WEBHOOK_SECRET = os.getenv("QQ_WEBHOOK_SECRET", "")
+
+# P3：主动联系时自动发图（自拍）
+# 启用后，proactive_server 主动联系用户时，会自动生成一张角色自拍图片一起发到QQ
+# 配置方法: export PROACTIVE_AUTO_IMAGE=true
+PROACTIVE_AUTO_IMAGE = os.getenv("PROACTIVE_AUTO_IMAGE", "false").lower() == "true"
+# 主动发图的亲密度阈值（低于此值不发图，避免陌生人主动发自拍）
+PROACTIVE_IMAGE_INTIMACY_THRESHOLD = int(os.getenv("PROACTIVE_IMAGE_INTIMACY_THRESHOLD", "50"))
 # ---- 主动后端熔断机制 ----
 # 启动时假设可用，lifespan 健康检查后更新；运行中连续失败 3 次自动熔断，每 60s 放行一次探测
 PROACTIVE_AVAILABLE = True
@@ -1230,6 +1237,171 @@ async def image_status():
     except Exception:
         pass
     return {"error": "图像生成服务不可用"}
+
+
+@app.post("/api/image/selfie_from_message")
+async def generate_selfie_from_message(request: Request):
+    """P2 新增：从用户原始消息直接生成自拍（自动检测模式/场景/服装）"""
+    try:
+        body = await request.json()
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            r = await client.post(
+                f"{PERSONALITY_SERVER_URL}/api/image/selfie_from_message",
+                json=body,
+                timeout=90.0,
+            )
+            if r.status_code == 200:
+                return r.json()
+            return {"is_selfie_request": False, "error": f"HTTP {r.status_code}"}
+    except Exception as e:
+        logger.error(f"[ImageAPI] 转发自拍请求失败: {e}")
+        return {"is_selfie_request": False, "error": str(e)}
+# -------------------------- P3 群聊消息处理（多角色调度） --------------------------
+async def handle_group_message(body: dict) -> dict:
+    """
+    P3 新增：处理群聊消息，支持多角色调度。
+    借鉴 NoneBot2 的事件处理设计，用 group_router 做角色匹配和调度。
+
+    流程：
+    1. group_router 解析消息，判断是否应该回复、哪些角色回复
+    2. 对每个角色：构建用户身份 → 图片理解（如有）→ 调用人格后端 → 发送到群聊
+    3. 返回处理结果
+    """
+    try:
+        from core.napcat import (
+            get_group_router, parse_message, process_image_message,
+            send_group_text, is_image_message,
+        )
+        from core.napcat.group_router import GroupMessageContext
+
+        router = get_group_router()
+
+        # 1. 解析群聊消息
+        context = router.parse_group_message(body)
+        if context is None:
+            return {"status": "not_group"}
+
+        group_id = context.group_id
+        user_id = context.user_id
+
+        # 2. 判断是否应该回复
+        should_reply, role_ids = router.should_reply(context)
+        if not should_reply or not role_ids:
+            return {"status": "ignored", "reason": "no_trigger"}
+
+        logger.info(
+            f"[QQ群聊] 群{group_id} 用户{user_id} 触发角色{role_ids} "
+            f"文本='{context.text_content[:50]}'"
+        )
+
+        # 3. 构建用户身份（群聊用户数据隔离）
+        identity = router.build_user_identity(context)
+
+        # 4. 图片理解（如果消息包含图片）
+        image_description = ""
+        if is_image_message(context.message):
+            logger.info(f"[QQ群聊] 消息包含图片，开始理解...")
+            image_desc, _ = await process_image_message(
+                context.message,
+                additional_prompt="请以角色的视角描述这张图片，注意图片中的细节和情感。"
+            )
+            if image_desc:
+                image_description = image_desc
+                logger.info(f"[QQ群聊] 图片理解完成: {image_description[:80]}...")
+
+        # 5. 对每个角色生成回复并发送
+        results = []
+        for role_id in role_ids:
+            try:
+                # 构建发送给人格后端的消息
+                user_message = context.text_content
+                if image_description:
+                    user_message = f"{user_message}\n\n[用户发送了图片，图片内容描述：{image_description}]"
+
+                if not user_message.strip():
+                    user_message = "（用户只发了图片或表情）"
+
+                # 调用人格后端生成回复
+                reply_text = await _call_personality_for_qq(
+                    identity=identity,
+                    role_id=role_id,
+                    message=user_message,
+                    mode="group",
+                )
+
+                if not reply_text:
+                    logger.warning(f"[QQ群聊] 角色{role_id} 生成回复为空")
+                    continue
+
+                # 发送到群聊（@用户）
+                sent = await send_group_text(
+                    group_id=group_id,
+                    text=reply_text,
+                    at_qq=user_id,
+                )
+
+                results.append({
+                    "role_id": role_id,
+                    "reply": reply_text[:100],
+                    "sent": sent,
+                })
+
+                logger.info(
+                    f"[QQ群聊] 角色{role_id} 回复: '{reply_text[:50]}...' 发送={'成功' if sent else '失败'}"
+                )
+
+            except Exception as e:
+                logger.error(f"[QQ群聊] 角色{role_id} 处理失败: {e}", exc_info=True)
+                results.append({"role_id": role_id, "error": str(e)})
+
+        return {
+            "status": "processed",
+            "group_id": group_id,
+            "user_id": user_id,
+            "roles": role_ids,
+            "results": results,
+        }
+
+    except Exception as e:
+        logger.error(f"[QQ群聊] 群聊消息处理异常: {e}", exc_info=True)
+        return {"status": "error", "error": str(e)}
+
+
+async def _call_personality_for_qq(
+    identity: str,
+    role_id: str,
+    message: str,
+    mode: str = "single",
+) -> str:
+    """
+    调用人格后端生成回复（供QQ私聊/群聊共用）。
+    从现有 process_qq_message 中提取的核心逻辑。
+    """
+    try:
+        payload = {
+            "user_id": identity,
+            "role_id": role_id,
+            "message": message,
+            "mode": mode,
+            "stream": False,
+        }
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            r = await client.post(
+                f"{PERSONALITY_SERVER_URL}/api/generate",
+                json=payload,
+                timeout=60.0,
+            )
+        if r.status_code == 200:
+            data = r.json()
+            return data.get("reply", "") or data.get("response", "")
+        else:
+            logger.error(f"[Personality] HTTP {r.status_code}: {r.text[:200]}")
+            return ""
+    except Exception as e:
+        logger.error(f"[Personality] 调用失败: {e}", exc_info=True)
+        return ""
+
+
 # -------------------------- NapCat QQ Webhook --------------------------
 @app.post("/api/qq/webhook")
 async def qq_webhook(request: Request):
@@ -1252,7 +1424,9 @@ async def qq_webhook(request: Request):
     if body.get("post_type") != "message":
         return {"status": "ignored"}
     if body.get("message_type") != "private":
-        return {"status": "ignored_group"}
+        # P3：群聊消息走多角色调度处理
+        group_result = await handle_group_message(body)
+        return group_result
     # ---- 消息去重：NapCat 上报超时会重试，同一条消息可能到达多次 ----
     msg_id = body.get("message_id")
     if msg_id is not None:
@@ -1486,10 +1660,51 @@ async def internal_proactive_push(request: Request, x_internal_token: str = Head
     qq_number = _extract_qq_number(user_id)
     if qq_number:
         try:
-            qq_sent = await send_qq_private_msg(qq_number, content)
+            # P3：主动发图（如果启用了且亲密度足够）
+            image_url = ""
+            if PROACTIVE_AUTO_IMAGE and role_id:
+                try:
+                    # 查询用户亲密度
+                    user_intimacy = 0
+                    try:
+                        user_info = user_db.get_user(user_id)
+                        if user_info:
+                            user_intimacy = user_info.get("intimacy", {}).get(role_id, 0)
+                    except Exception:
+                        pass
+
+                    if user_intimacy >= PROACTIVE_IMAGE_INTIMACY_THRESHOLD:
+                        logger.info(f"[主动发图] 亲密度{user_intimacy}≥阈值{PROACTIVE_IMAGE_INTIMACY_THRESHOLD}，开始生成自拍...")
+                        from core.image_generator import get_selfie_system
+                        selfie_system = get_selfie_system()
+                        if selfie_system.client.available:
+                            img_result = await selfie_system.generate_proactive_image(
+                                user_id=user_id,
+                                role_id=role_id,
+                                intimacy=user_intimacy,
+                            )
+                            if img_result.get("allowed") and img_result.get("image_url"):
+                                image_url = img_result["image_url"]
+                                logger.info(f"[主动发图] 图片生成成功: {image_url[:60]}...")
+                            else:
+                                logger.warning(f"[主动发图] 图片生成失败: {img_result.get('error')}")
+                        else:
+                            logger.warning("[主动发图] 图像生成API不可用")
+                    else:
+                        logger.debug(f"[主动发图] 亲密度{user_intimacy}<阈值{PROACTIVE_IMAGE_INTIMACY_THRESHOLD}，跳过发图")
+                except Exception as img_e:
+                    logger.warning(f"[主动发图] 异常: {type(img_e).__name__}: {img_e}")
+
+            # 发送消息（有图则图文一起发，无图则只发文本）
+            if image_url:
+                from core.napcat import send_private_image
+                qq_sent = await send_private_image(qq_number, image_url, text=content)
+            else:
+                qq_sent = await send_qq_private_msg(qq_number, content)
+
             if qq_sent:
                 delivered = True
-                logger.info(f"[主动消息] QQ发送成功 user={user_id} qq={qq_number} role={role_id} content={content[:30]}")
+                logger.info(f"[主动消息] QQ发送成功 user={user_id} qq={qq_number} role={role_id} content={content[:30]} image={'有' if image_url else '无'}")
             else:
                 logger.warning(f"[主动消息] QQ发送失败 user={user_id} qq={qq_number} role={role_id}")
         except Exception as e:
@@ -2033,6 +2248,301 @@ async def pet_ws(ws):
 
 app.mount("/mc", mc_app)
 app.mount("/pet", pet_app)
+
+
+# ============================================================
+# P3 模块2：管理后台 API（用户管理、角色配置、数据统计、日志、备份）
+# ============================================================
+
+def _require_admin(request: Request):
+    """验证管理员权限（简单实现：检查用户是否在管理员列表中）。"""
+    try:
+        token = request.headers.get("Authorization", "").replace("Bearer ", "")
+        if not token:
+            return None, JSONResponse({"error": "unauthorized"}, status_code=401)
+        # 简单的token验证（实际应该用用户系统）
+        admin_token = os.getenv("ADMIN_TOKEN", "flexichrono_admin_2026")
+        if token == admin_token:
+            return {"username": "admin", "is_admin": True}, None
+        return None, JSONResponse({"error": "forbidden"}, status_code=403)
+    except Exception:
+        return None, JSONResponse({"error": "unauthorized"}, status_code=401)
+
+
+# ---------- 用户管理 ----------
+
+@app.get("/api/admin/users")
+async def admin_list_users(request: Request, page: int = 1, page_size: int = 50):
+    """列出所有用户（分页）。"""
+    _, err = _require_admin(request)
+    if err:
+        return err
+    try:
+        users = user_db.get_all_users()
+        total = len(users)
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_users = users[start:end]
+        # 简化用户信息（不返回密码哈希）
+        simplified = []
+        for u in page_users:
+            simplified.append({
+                "username": u.get("username"),
+                "nickname": u.get("nickname", ""),
+                "created_at": u.get("created_at", ""),
+                "is_qq_tmp": u.get("is_qq_tmp", False),
+                "qq_bound": u.get("qq_bound", False),
+                "intimacy": u.get("intimacy", {}),
+                "disabled": u.get("disabled", False),
+            })
+        return {"total": total, "page": page, "page_size": page_size, "users": simplified}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/admin/users/{username}/intimacy")
+async def admin_update_intimacy(request: Request, username: str):
+    """修改用户亲密度。"""
+    _, err = _require_admin(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+        role_id = body.get("role_id")
+        value = int(body.get("value", 0))
+        if not role_id:
+            return JSONResponse({"error": "role_id required"}, status_code=400)
+        user_db.set_intimacy(username, role_id, value)
+        return {"success": True, "username": username, "role_id": role_id, "intimacy": value}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/admin/users/{username}/password")
+async def admin_reset_password(request: Request, username: str):
+    """重置用户密码。"""
+    _, err = _require_admin(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+        new_password = body.get("password", "")
+        if not new_password:
+            return JSONResponse({"error": "password required"}, status_code=400)
+        success = user_db.reset_password(username, new_password)
+        if success:
+            return {"success": True, "username": username}
+        return JSONResponse({"error": "user not found"}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/admin/users/{username}/disable")
+async def admin_toggle_disable(request: Request, username: str):
+    """禁用/启用用户。"""
+    _, err = _require_admin(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+        disabled = body.get("disabled", True)
+        user_db.set_user_field(username, "disabled", disabled)
+        return {"success": True, "username": username, "disabled": disabled}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ---------- 角色配置 ----------
+
+@app.get("/api/admin/characters")
+async def admin_list_characters(request: Request):
+    """列出所有角色。"""
+    _, err = _require_admin(request)
+    if err:
+        return err
+    try:
+        from core.characters.loader import get_character_loader
+        loader = get_character_loader()
+        characters = loader.list_characters()
+        return {"characters": characters}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/admin/characters/{role_id}")
+async def admin_get_character(request: Request, role_id: str):
+    """获取角色配置详情。"""
+    _, err = _require_admin(request)
+    if err:
+        return err
+    try:
+        from core.characters.loader import get_character_loader
+        loader = get_character_loader()
+        char = loader.get_character(role_id)
+        if not char:
+            return JSONResponse({"error": "character not found"}, status_code=404)
+        return {"role_id": role_id, "config": char.to_dict()}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ---------- 数据统计 ----------
+
+@app.get("/api/admin/stats")
+async def admin_get_stats(request: Request):
+    """获取数据统计（用户数、对话数、亲密度分布、角色活跃度）。"""
+    _, err = _require_admin(request)
+    if err:
+        return err
+    try:
+        users = user_db.get_all_users()
+        total_users = len(users)
+        qq_users = sum(1 for u in users if u.get("is_qq_tmp"))
+        bound_users = sum(1 for u in users if u.get("qq_bound"))
+
+        # 亲密度分布
+        intimacy_dist = {"0-20": 0, "21-40": 0, "41-60": 0, "61-80": 0, "81-100": 0}
+        role_intimacy = {}
+        for u in users:
+            for role_id, val in u.get("intimacy", {}).items():
+                role_intimacy[role_id] = role_intimacy.get(role_id, 0) + 1
+                if val <= 20:
+                    intimacy_dist["0-20"] += 1
+                elif val <= 40:
+                    intimacy_dist["21-40"] += 1
+                elif val <= 60:
+                    intimacy_dist["41-60"] += 1
+                elif val <= 80:
+                    intimacy_dist["61-80"] += 1
+                else:
+                    intimacy_dist["81-100"] += 1
+
+        # 服务状态
+        services = {
+            "main": "running",
+            "napcat_available": bool(NAPCAT_HTTP_URL),
+            "proactive_auto_image": PROACTIVE_AUTO_IMAGE,
+        }
+
+        return {
+            "total_users": total_users,
+            "qq_tmp_users": qq_users,
+            "bound_users": bound_users,
+            "intimacy_distribution": intimacy_dist,
+            "role_user_count": role_intimacy,
+            "services": services,
+            "timestamp": time.time(),
+        }
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ---------- 备份管理 ----------
+
+@app.get("/api/admin/backups")
+async def admin_list_backups(request: Request):
+    """列出所有备份。"""
+    _, err = _require_admin(request)
+    if err:
+        return err
+    try:
+        from core.backup import list_backups
+        backups = list_backups()
+        return {"backups": backups, "total": len(backups)}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/admin/backups")
+async def admin_create_backup(request: Request):
+    """创建备份。"""
+    _, err = _require_admin(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+        note = body.get("note", "manual")
+        from core.backup import create_backup
+        result = create_backup(note=note)
+        return result
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/admin/backups/{backup_name}/restore")
+async def admin_restore_backup(request: Request, backup_name: str):
+    """恢复备份。"""
+    _, err = _require_admin(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+        overwrite = body.get("overwrite", True)
+        from core.backup import restore_backup
+        result = restore_backup(backup_name, overwrite=overwrite)
+        return result
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.delete("/api/admin/backups/{backup_name}")
+async def admin_delete_backup(request: Request, backup_name: str):
+    """删除备份。"""
+    _, err = _require_admin(request)
+    if err:
+        return err
+    try:
+        from core.backup import delete_backup
+        result = delete_backup(backup_name)
+        return result
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/admin/backups/{backup_name}/download")
+async def admin_download_backup(request: Request, backup_name: str):
+    """下载备份文件。"""
+    _, err = _require_admin(request)
+    if err:
+        return err
+    try:
+        from core.backup import get_backup_path
+        path = get_backup_path(backup_name)
+        if not path:
+            return JSONResponse({"error": "backup not found"}, status_code=404)
+        from fastapi.responses import FileResponse
+        return FileResponse(path, filename=f"{backup_name}.zip", media_type="application/zip")
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ---------- 系统状态 ----------
+
+@app.get("/api/admin/status")
+async def admin_system_status(request: Request):
+    """获取系统状态（各服务可用性、配置概览）。"""
+    _, err = _require_admin(request)
+    if err:
+        return err
+    try:
+        return {
+            "services": {
+                "main": "running",
+                "napcat_configured": bool(NAPCAT_HTTP_URL),
+                "proactive_auto_image": PROACTIVE_AUTO_IMAGE,
+            },
+            "config": {
+                "data_dir": os.getenv("DATA_DIR", "."),
+                "llm_fail_threshold": int(os.getenv("LLM_FAIL_THRESHOLD", "3")),
+                "max_user_images_per_hour": int(os.getenv("MAX_USER_IMAGES_PER_HOUR", "5")),
+                "max_proactive_images_per_day": int(os.getenv("MAX_PROACTIVE_IMAGES_PER_DAY", "2")),
+            },
+            "timestamp": time.time(),
+        }
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")

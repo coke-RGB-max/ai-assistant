@@ -1650,3 +1650,60 @@ async def trigger_topic_check():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("proactive_server:app", host="0.0.0.0", port=PORT, workers=1, log_level="info")
+
+
+
+# ============================================================
+# P2 新增：主动发图接口（与主动联系系统绑定）
+# ============================================================
+class ProactiveImageRequest(BaseModel):
+    """主动发图请求"""
+    user_id: str
+    role_id: str
+    intimacy: int = 30
+    scene: str = "indoor"  # 场景
+    expression: str = "happy"  # 表情
+    clothing: str = "casual"  # 服装
+
+
+class ProactiveImageResponse(BaseModel):
+    """主动发图响应"""
+    success: bool
+    image_url: str = ""
+    message: str = ""
+    error: str = ""
+
+
+@app.post("/api/proactive/generate_image", response_model=ProactiveImageResponse)
+async def generate_proactive_image(req: ProactiveImageRequest):
+    """
+    P2 新增：生成主动发图。
+    主动联系时可以调用此接口生成自拍/风景照，附带在消息中发送。
+    主动发图不需要亲密度判断（角色主动发的），但有每天次数限制。
+    """
+    try:
+        from core.image_generator import get_selfie_system
+        system = get_selfie_system()
+        
+        result = await system.generate_proactive_image(
+            user_id=req.user_id,
+            role_id=req.role_id,
+            intimacy=req.intimacy,
+            scene=req.scene,
+            expression=req.expression,
+            clothing=req.clothing,
+        )
+        
+        return ProactiveImageResponse(
+            success=result.get("allowed", False),
+            image_url=result.get("image_url", ""),
+            message=result.get("message", ""),
+            error=result.get("error", ""),
+        )
+        
+    except Exception as e:
+        logger.error(f"[ProactiveImage] 生成主动发图失败: {e}", exc_info=True)
+        return ProactiveImageResponse(
+            success=False,
+            error=str(e),
+        )

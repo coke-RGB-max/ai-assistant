@@ -74,6 +74,175 @@ ROLE_SELFIE_THRESHOLD = {
     "jingwen": 50,   # 温柔古风少女，有点害羞
 }
 
+# ============================================================
+# P2 新增：两种自拍模式 + 上下文场景识别
+# 借鉴 Clawra：Mirror（镜子自拍/全身/服装）+ Direct（直接自拍/特写/场景）
+# ============================================================
+from enum import Enum
+
+class SelfieMode(str, Enum):
+    """自拍模式"""
+    MIRROR = "mirror"  # 镜子自拍，适合全身/服装展示
+    DIRECT = "direct"  # 直接自拍，适合特写/场景/表情
+    AUTO = "auto"      # 自动检测
+
+# Mirror模式关键词（服装/全身/镜子）
+MIRROR_KEYWORDS = [
+    "outfit", "wearing", "clothes", "dress", "suit", "fashion",
+    "full-body", "mirror", "reflection",
+    "全身", "穿搭", "衣服", "裙子", "套装", "镜子", "换装", "造型",
+    "穿什么", "今天穿", "搭配",
+]
+
+# Direct模式关键词（场景/特写/表情）
+DIRECT_KEYWORDS = [
+    "cafe", "restaurant", "beach", "park", "city", "street",
+    "close-up", "portrait", "face", "eyes", "smile", "selfie",
+    "咖啡馆", "餐厅", "饭店", "海滩", "海边", "公园", "街上", "城市",
+    "特写", "脸", "眼睛", "笑", "自拍", "照片", "相片",
+    "在干嘛", "在哪", "在做什么", "看看你", "发张",
+]
+
+# 场景关键词映射（中文场景 -> 英文描述）
+SCENE_KEYWORDS = {
+    "咖啡馆": "cozy cafe with warm lighting",
+    "咖啡店": "cozy cafe with warm lighting",
+    "咖啡厅": "cozy cafe with warm lighting",
+    "餐厅": "nice restaurant",
+    "饭店": "nice restaurant",
+    "食堂": "university cafeteria",
+    "海滩": "sunny beach",
+    "海边": "sunny beach",
+    "公园": "peaceful park with greenery",
+    "街上": "busy city street",
+    "城市": "city street at night",
+    "家里": "cozy home living room",
+    "房间": "cozy bedroom",
+    "卧室": "cozy bedroom",
+    "宿舍": "cozy dorm room",
+    "学校": "university campus",
+    "图书馆": "quiet library",
+    "健身房": "gym",
+    "超市": "supermarket",
+    "商场": "shopping mall",
+    "电影院": "cinema",
+    "早上": "morning sunlight, just woke up",
+    "早晨": "morning sunlight, just woke up",
+    "晚上": "night, soft room lighting",
+    "夜晚": "night, soft room lighting",
+    "睡前": "bedroom, night, cozy lighting",
+    "刚起床": "bedroom, morning sunlight, just woke up",
+}
+
+# 服装关键词映射
+CLOTHING_KEYWORDS = {
+    "裙子": "cute dress",
+    "连衣裙": "elegant dress",
+    "卫衣": "casual hoodie",
+    "校服": "school uniform",
+    "制服": "uniform",
+    "T恤": "casual t-shirt",
+    "毛衣": "cozy sweater",
+    "外套": "stylish jacket",
+    "大衣": "warm coat",
+    "睡衣": "cute pajamas",
+    "家居服": "cozy homewear",
+    "运动服": "sportswear",
+    "牛仔裤": "jeans and casual top",
+    "短裤": "shorts and casual top",
+    "汉服": "traditional hanfu",
+    "洛丽塔": "lolita dress",
+    "JK": "JK uniform",
+    "女仆": "maid outfit",
+}
+
+# 表情关键词映射
+EXPRESSION_KEYWORDS = {
+    "笑": "happy smile",
+    "开心": "happy smile",
+    "高兴": "happy smile",
+    "害羞": "shy blush",
+    "羞涩": "shy blush",
+    "脸红": "shy blush",
+    "生气": "slightly pouting",
+    "傲娇": "tsundere expression, slight blush",
+    "难过": "sad expression",
+    "伤心": "sad expression",
+    "困": "sleepy expression",
+    "累": "tired expression",
+    "惊讶": "surprised expression",
+    "调皮": "playful wink",
+    "眨眼": "playful wink",
+    "嘟嘴": "pouting",
+    "委屈": "pouting, teary eyes",
+}
+
+
+def detect_selfie_mode(message: str) -> SelfieMode:
+    """
+    从用户消息中自动检测自拍模式。
+    借鉴 Clawra 的关键词检测逻辑。
+    P2 修复：先检测Mirror（服装/全身/穿搭），再检测Direct（特写/场景）。
+    因为"穿裙子"、"穿搭"等服装相关请求应该用Mirror模式展示全身。
+    """
+    msg_lower = message.lower()
+    
+    # 先检测 Mirror 关键词（服装/全身/穿搭，优先级更高）
+    for kw in MIRROR_KEYWORDS:
+        if kw.lower() in msg_lower:
+            return SelfieMode.MIRROR
+    
+    # 再检测 Direct 关键词（特写/场景/表情）
+    for kw in DIRECT_KEYWORDS:
+        if kw.lower() in msg_lower:
+            return SelfieMode.DIRECT
+    
+    # 默认 Direct 模式（大多数自拍请求都是特写）
+    return SelfieMode.DIRECT
+
+
+def extract_scene(message: str) -> str:
+    """从用户消息中提取场景描述。"""
+    for kw, scene_desc in SCENE_KEYWORDS.items():
+        if kw in message:
+            return scene_desc
+    return ""  # 没检测到特定场景
+
+
+def extract_clothing(message: str) -> str:
+    """从用户消息中提取服装描述。"""
+    for kw, clothing_desc in CLOTHING_KEYWORDS.items():
+        if kw in message:
+            return clothing_desc
+    return ""  # 没检测到特定服装
+
+
+def extract_expression(message: str) -> str:
+    """从用户消息中提取表情描述。"""
+    for kw, expr_desc in EXPRESSION_KEYWORDS.items():
+        if kw in message:
+            return expr_desc
+    return ""  # 没检测到特定表情
+
+
+def is_selfie_request(message: str) -> bool:
+    """
+    判断用户消息是否是自拍请求。
+    触发词：发自拍、发张照片、看看你、你长什么样、发张照、自拍、照片等
+    """
+    selfie_triggers = [
+        "发自拍", "发张自拍", "发张照片", "发张照", "发个照片", "发个自拍",
+        "看看你", "看你", "你长什么样", "你长啥样", "你的照片", "你的自拍",
+        "自拍", "照片", "相片", "照骗",
+        "发图", "发张图", "发个图",
+        "现在在干嘛", "你在干嘛", "你在哪", "你在做什么",
+    ]
+    msg = message.lower()
+    for trigger in selfie_triggers:
+        if trigger in msg:
+            return True
+    return False
+
 # 角色拒绝自拍时的理由（符合性格）
 ROLE_SELFIE_REJECTIONS = {
     "nianqi": [
@@ -217,6 +386,7 @@ class AppearanceManager:
         scene: str = "indoor",
         expression: str = "gentle smile",
         clothing: str = "casual",
+        mode: SelfieMode = SelfieMode.DIRECT,
         extra: str = "",
     ) -> str:
         """
@@ -246,26 +416,43 @@ class AppearanceManager:
         }
         scene_desc = scene_map.get(scene, f"{scene} background")
 
-        # 自拍构图
-        composition = "selfie angle, looking at camera, upper body shot"
-
         # 质量描述
-        quality = "high quality, detailed, 4K, anime style, beautiful detailed face, soft lighting"
+        quality = "high quality, detailed, 4K, anime style, beautiful detailed face, soft lighting, masterpiece"
 
-        # 组合prompt
-        prompt_parts = [
-            f"1girl, {appearance}",
-            composition,
-            f"expression: {expression}",
-            f"wearing {clothing} clothes",
-            scene_desc,
-            quality,
-        ]
+        if mode == SelfieMode.MIRROR:
+            # Mirror模式：全身照，镜子自拍，服装展示
+            # 借鉴 Clawra: "make a pic of this person, but ... the person is taking a mirror selfie"
+            composition = "full body shot, taking a mirror selfie, mirror reflection, holding phone in front of mirror"
+            prompt_parts = [
+                f"1girl, {appearance}",
+                composition,
+                f"expression: {expression}",
+                f"wearing {clothing}",
+                f"at {scene_desc}",
+                quality,
+            ]
+        else:
+            # Direct模式：特写，直接自拍，眼神接触
+            # 借鉴 Clawra: "a close-up selfie taken by herself at ... direct eye contact with camera"
+            composition = (
+                "close-up selfie, direct eye contact with camera, looking straight into lens, "
+                "eyes centered and clearly visible, phone held at arm's length, face fully visible, "
+                "upper body shot"
+            )
+            prompt_parts = [
+                f"1girl, {appearance}",
+                composition,
+                f"expression: {expression}",
+                f"wearing {clothing}",
+                f"at {scene_desc}",
+                quality,
+            ]
+
         if extra:
             prompt_parts.append(extra)
 
         full_prompt = ", ".join(prompt_parts)
-        logger.debug(f"[ImageGen] 生成prompt: {full_prompt[:200]}...")
+        logger.debug(f"[ImageGen][{mode.value}] 生成prompt: {full_prompt[:200]}...")
         return full_prompt
 
 
@@ -551,6 +738,51 @@ class SelfieSystem:
         self.judger = IntimacyJudger()
         self.rate_limiter = RateLimiter()
 
+    async def handle_selfie_from_message(
+        self,
+        user_id: str,
+        role_id: str,
+        message: str,
+        intimacy: int,
+        psych_states: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
+        """
+        P2 新增：从用户原始消息直接处理自拍请求。
+        自动检测自拍模式、提取场景/服装/表情，然后生成图片。
+
+        Args:
+            user_id: 用户ID
+            role_id: 角色ID
+            message: 用户原始消息
+            intimacy: 亲密度
+            psych_states: 心理状态
+
+        Returns:
+            同 handle_selfie_request
+        """
+        # 1. 自动检测自拍模式
+        mode = detect_selfie_mode(message)
+        logger.info(f"[SelfieP2] 自动检测模式: {mode.value} (消息: {message[:30]}...)")
+
+        # 2. 从消息中提取场景、服装、表情
+        scene = extract_scene(message) or "indoor"
+        clothing = extract_clothing(message) or "casual"
+        expression = extract_expression(message) or "gentle smile"
+
+        logger.info(f"[SelfieP2] 提取上下文: scene={scene}, clothing={clothing}, expression={expression}")
+
+        # 3. 调用标准处理流程
+        return await self.handle_selfie_request(
+            user_id=user_id,
+            role_id=role_id,
+            intimacy=intimacy,
+            psych_states=psych_states,
+            scene=scene,
+            expression=expression,
+            clothing=clothing,
+            mode=mode,
+        )
+
     async def handle_selfie_request(
         self,
         user_id: str,
@@ -560,6 +792,7 @@ class SelfieSystem:
         scene: str = "indoor",
         expression: str = "gentle smile",
         clothing: str = "casual",
+        mode: SelfieMode = SelfieMode.DIRECT,
     ) -> Dict[str, Any]:
         """
         处理用户的自拍请求。
@@ -600,12 +833,13 @@ class SelfieSystem:
                 "error": "api_unavailable",
             }
 
-        # 4. 构建prompt并生成
+        # 4. 构建prompt并生成（P2：支持两种自拍模式）
         prompt = self.appearance.build_full_prompt(
             role_id=role_id,
             scene=scene,
             expression=expression,
             clothing=clothing,
+            mode=mode,
         )
 
         # 反向提示词：确保动漫风格，排除写实
@@ -676,12 +910,13 @@ class SelfieSystem:
             expression = expression or "gentle smile"
             clothing = clothing or "casual"
 
-        # 4. 构建prompt并生成
+        # 4. 构建prompt并生成（P2：主动发图默认Direct模式）
         prompt = self.appearance.build_full_prompt(
             role_id=role_id,
             scene=scene,
             expression=expression,
             clothing=clothing,
+            mode=SelfieMode.DIRECT,
         )
 
         negative_prompt = "realistic, photo, 3d render, low quality, blurry, deformed, ugly"
@@ -719,6 +954,14 @@ class SelfieSystem:
             "sizes": {
                 "selfie": SELFIE_SIZE,
                 "landscape": LANDSCAPE_SIZE,
+            },
+            "p2_features": {
+                "dual_modes": True,
+                "context_detection": True,
+                "modes": ["mirror (全身/服装)", "direct (特写/场景)"],
+                "scene_keywords": len(SCENE_KEYWORDS),
+                "clothing_keywords": len(CLOTHING_KEYWORDS),
+                "expression_keywords": len(EXPRESSION_KEYWORDS),
             },
         }
 
