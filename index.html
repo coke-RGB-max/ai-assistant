@@ -373,6 +373,20 @@
       background: var(--primary); color: #fff;
     }
     .save-psych-btn:hover { background: var(--primary-strong); }
+    /* P3：两层亲密度显示区 */
+    .intimacy-bar { margin: 10px 0 14px; padding: 12px; background: var(--panel-2); border-radius: 12px; border: 1px solid var(--border-soft); }
+    .intimacy-bar-title { font-size: 12px; font-weight: 600; color: var(--text-soft); margin-bottom: 8px; }
+    .intimacy-bar-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+    .intimacy-item { display: flex; flex-direction: column; gap: 4px; padding: 8px; border-radius: 8px; background: var(--panel); }
+    .intimacy-item.layer1 { border-left: 3px solid #1890ff; }
+    .intimacy-item.layer2 { border-left: 3px solid #52c41a; }
+    .intimacy-item.avg { border-left: 3px solid #fa8c16; }
+    .intimacy-label { font-size: 11px; color: var(--muted); }
+    .intimacy-val { font-size: 20px; font-weight: 700; color: var(--text); }
+    .intimacy-input { width: 100%; padding: 4px 6px; font-size: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); }
+    .intimacy-save-btn { padding: 4px 8px; font-size: 11px; border: none; border-radius: 6px; background: #1890ff; color: #fff; cursor: pointer; }
+    .intimacy-save-btn:hover { background: #096dd9; }
+    .intimacy-hint { font-size: 10px; color: var(--muted); }
 
     /* ===== Toast ===== */
     .toast {
@@ -1559,6 +1573,84 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         title.className = "psych-role-title";
         title.textContent = `${role.emoji} ${role.name}`;
         block.appendChild(title);
+
+        // P3：两层亲密度显示区（第一层基础 + 第二层当下 + 平均值）
+        const intimacyBar = document.createElement("div");
+        intimacyBar.className = "intimacy-bar";
+        intimacyBar.innerHTML = `
+          <div class="intimacy-bar-title">两层亲密度（自拍取平均值）</div>
+          <div class="intimacy-bar-grid">
+            <div class="intimacy-item layer1">
+              <span class="intimacy-label">第一层(基础)</span>
+              <span class="intimacy-val" id="layer1-val-${role.id}">加载中</span>
+              <input type="number" min="0" max="100" class="intimacy-input" id="layer1-input-${role.id}" placeholder="0-100" />
+              <button class="intimacy-save-btn" type="button" id="layer1-save-${role.id}">保存</button>
+            </div>
+            <div class="intimacy-item layer2">
+              <span class="intimacy-label">第二层(当下)</span>
+              <span class="intimacy-val" id="layer2-val-${role.id}">-</span>
+              <span class="intimacy-hint">在下方亲密度滑块编辑</span>
+            </div>
+            <div class="intimacy-item avg">
+              <span class="intimacy-label">平均值(自拍用)</span>
+              <span class="intimacy-val" id="avg-val-${role.id}">-</span>
+            </div>
+          </div>
+        `;
+        block.appendChild(intimacyBar);
+        
+        // 异步加载第一层亲密度
+        (async () => {
+          try {
+            const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/get_both_intimacy/${encodeURIComponent(username)}`, {
+              headers: { Authorization: `Bearer ${currentUser.token}` }
+            });
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const layer1 = (data.layer1_basic || {})[role.id] || 0;
+            const layer2 = (data.layer2_realtime || {})[role.id] || 0;
+            const avg = (data.average || {})[role.id] || 0;
+            const l1El = document.getElementById(`layer1-val-${role.id}`);
+            const l2El = document.getElementById(`layer2-val-${role.id}`);
+            const avgEl = document.getElementById(`avg-val-${role.id}`);
+            const l1Input = document.getElementById(`layer1-input-${role.id}`);
+            if (l1El) l1El.textContent = layer1;
+            if (l2El) l2El.textContent = layer2;
+            if (avgEl) avgEl.textContent = avg;
+            if (l1Input) l1Input.value = layer1;
+            
+            // 保存第一层亲密度
+            const saveBtn = document.getElementById(`layer1-save-${role.id}`);
+            if (saveBtn) {
+              saveBtn.addEventListener("click", async () => {
+                const val = parseInt(l1Input.value) || 0;
+                setButtonLoading(saveBtn, true, "保存中...");
+                try {
+                  const r = await fetch(`${CONFIG.HTTP_BASE}/api/admin/set_intimacy`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentUser.token}` },
+                    body: JSON.stringify({ username, role_id: role.id, value: val })
+                  });
+                  const rd = await r.json();
+                  if (r.ok && rd.success) {
+                    showToast(`${role.name} 第一层亲密度已更新为 ${val}`, "success");
+                    if (l1El) l1El.textContent = val;
+                    // 重新计算平均值
+                    const newAvg = layer2 > 0 ? Math.round((val + layer2) / 2) : val;
+                    if (avgEl) avgEl.textContent = newAvg;
+                  } else {
+                    showToast(rd.error || rd.detail || "保存失败", "error");
+                  }
+                } catch (e) {
+                  showToast("网络错误", "error");
+                }
+                setButtonLoading(saveBtn, false);
+              });
+            }
+          } catch (e) {
+            // 静默失败，不影响心理状态编辑
+          }
+        })();
 
         const grid = document.createElement("div");
         grid.className = "psych-grid";

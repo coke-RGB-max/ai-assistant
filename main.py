@@ -251,6 +251,67 @@ class UserDB:
             self._write(data)
         return True
 user_db = UserDB()
+
+async def _get_user_intimacy(user_id: str, role_id: str) -> int:
+    """P3 修复：获取用户对角色的亲密度（两层平均值）。
+    第一层：userdb.json 的 intimacy（长期基础好感度，admin可手动设置）
+    第二层：proactive_server 的 last_intimacy（当下实时好感度，随对话波动）
+    取两层平均值，更全面地反映关系状态。
+    """
+    # 1. 读取第一层：userdb.json 的基础亲密度
+    intimacy_userdb = 0
+    try:
+        user_info = user_db.get_user(user_id)
+        if user_info:
+            intimacy_userdb = int(user_info.get("intimacy", {}).get(role_id, 0))
+    except Exception:
+        pass
+    
+    # 2. 读取第二层：proactive_server 的当下亲密度
+    intimacy_proactive = 0
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{PROACTIVE_SERVER_URL}/api/status/{user_id}")
+            if resp.status_code == 200:
+                data = resp.json()
+                # data 是列表，每个元素是一个角色的状态
+                if isinstance(data, list):
+                    for role_status in data:
+                        if role_status.get("role_id") == role_id:
+                            proactive_val = role_status.get("intimacy")
+                            if proactive_val is not None:
+                                intimacy_proactive = int(proactive_val)
+                                break
+                elif isinstance(data, dict):
+                    # 兼容返回字典的情况
+                    roles = data.get("roles", data.get("status", []))
+                    if isinstance(roles, list):
+                        for role_status in roles:
+                            if role_status.get("role_id") == role_id:
+                                proactive_val = role_status.get("intimacy")
+                                if proactive_val is not None:
+                                    intimacy_proactive = int(proactive_val)
+                                    break
+    except Exception as e:
+        logger.debug(f"[亲密度] 从proactive_server读取失败: {e}")
+    
+    # 3. 取两层平均值（只有有效值参与计算）
+    valid_values = []
+    if intimacy_userdb > 0:
+        valid_values.append(intimacy_userdb)
+    if intimacy_proactive > 0:
+        valid_values.append(intimacy_proactive)
+    
+    if valid_values:
+        intimacy = int(sum(valid_values) / len(valid_values))
+    else:
+        intimacy = 0  # 两层都没有值，返回0
+    
+    logger.debug(f"[亲密度] user_id={user_id} role={role_id} "
+                 f"第一层={intimacy_userdb} 第二层={intimacy_proactive} "
+                 f"平均值={intimacy}")
+    
+    return max(0, min(100, intimacy))
 # 后台任务引用集合
 background_tasks = set()
 # QQ 用户的内存聊天历史（重启后丢失；心理状态由 personality_server session 持久化）
@@ -1206,6 +1267,139 @@ async def get_roles():
     return {}
 
 
+# -------------------------- P3：第一层亲密度管理（userdb.json） --------------------------
+class SetIntimacyRequest(BaseModel):
+    username: str
+    role_id: str
+    value: int  # 0-100
+
+@app.post("/api/admin/set_intimacy")
+async def admin_set_intimacy(req: SetIntimacyRequest, request: Request):
+    """P3 新增：管理员设置第一层亲密度（userdb.json 的基础好感度）。
+    第二层亲密度（proactive_server 当下状态）在 admin 面板的心理状态编辑里设置。
+    自拍判断时取两层平均值。
+    """
+    # 简单鉴权：内部 token 或 admin 登录态
+    if x_internal_token != INTERNAL_TOKEN:
+        # TODO: 这里可以加 admin session 校验，暂时只允许内部 token
+        raise HTTPException(status_code=403, detail="需要内部令牌")
+    
+    value = max(0, min(100, int(req.value)))
+    success = user_db.set_intimacy(req.username, req.role_id, value)
+    if success:
+        logger.info(f"[亲密度] admin设置第一层亲密度: {req.username}/{req.role_id} = {value}")
+        return {"success": True, "username": req.username, "role_id": req.role_id, "intimacy": value}
+    else:
+        raise HTTPException(status_code=404, detail=f"用户 {req.username} 不存在")
+
+
+@app.get("/api/admin/get_intimacy/{username}")
+async def admin_get_intimacy(username: str, request: Request):
+    """P3 新增：获取用户第一层亲密度（所有角色）"""
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    admin = user_db.authenticate_token(token)
+    if not admin or not admin["is_admin"]:
+        raise HTTPException(status_code=403, detail="无权限")
+    
+    user_info = user_db.get_user(username)
+    if not user_info:
+        raise HTTPException(status_code=404, detail=f"用户 {username} 不存在")
+    
+    return {
+        "success": True,
+        "username": username,
+        "intimacy": user_info.get("intimacy", {}),
+        "note": "这是第一层基础亲密度；第二层当下亲密度请查 proactive_server /api/status/{user_id}"
+    }
+
+
+class SetProactiveIntimacyRequest(BaseModel):
+    user_id: str
+    role_id: str
+    intimacy: int  # 0-100
+
+@app.post("/api/admin/set_proactive_intimacy")
+async def admin_set_proactive_intimacy(req: SetProactiveIntimacyRequest, request: Request):
+    """P3 新增：设置第二层亲密度（proactive_server 的当下亲密度）。
+    通过调用 proactive_server /api/activity/report 实现。
+    """
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    admin = user_db.authenticate_token(token)
+    if not admin or not admin["is_admin"]:
+        raise HTTPException(status_code=403, detail="无权限")
+    
+    value = max(0, min(100, int(req.intimacy)))
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(
+                f"{PROACTIVE_SERVER_URL}/api/activity/report",
+                json={
+                    "user_id": req.user_id,
+                    "role_id": req.role_id,
+                    "intimacy": value,
+                    "psych": {},
+                    "session_id": None,
+                },
+                timeout=8.0,
+            )
+            if resp.status_code == 200:
+                logger.info(f"[亲密度] admin设置第二层亲密度: {req.user_id}/{req.role_id} = {value}")
+                return {"success": True, "user_id": req.user_id, "role_id": req.role_id, "intimacy": value}
+            else:
+                raise HTTPException(status_code=500, detail=f"proactive_server 返回 HTTP {resp.status_code}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"设置第二层亲密度失败: {e}")
+
+
+@app.get("/api/admin/get_both_intimacy/{username}")
+async def admin_get_both_intimacy(username: str, request: Request):
+    """P3 新增：获取用户两层亲密度（第一层+第二层+平均值），供admin面板展示。"""
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    admin = user_db.authenticate_token(token)
+    if not admin or not admin["is_admin"]:
+        raise HTTPException(status_code=403, detail="无权限")
+    
+    # 第一层
+    user_info = user_db.get_user(username)
+    layer1 = {}
+    if user_info:
+        layer1 = user_info.get("intimacy", {})
+    
+    # 第二层（从 proactive_server 读取）
+    layer2 = {}
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{PROACTIVE_SERVER_URL}/api/status/{username}")
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list):
+                    for role_status in data:
+                        rid = role_status.get("role_id")
+                        ival = role_status.get("intimacy")
+                        if rid and ival is not None:
+                            layer2[rid] = int(ival)
+    except Exception as e:
+        logger.debug(f"[亲密度] 从proactive_server读取第二层失败: {e}")
+    
+    # 计算平均值
+    all_roles = set(list(layer1.keys()) + list(layer2.keys()))
+    avg = {}
+    for role in all_roles:
+        v1 = layer1.get(role, 0)
+        v2 = layer2.get(role, 0)
+        valid = [v for v in [v1, v2] if v > 0]
+        avg[role] = int(sum(valid) / len(valid)) if valid else 0
+    
+    return {
+        "success": True,
+        "username": username,
+        "layer1_basic": layer1,
+        "layer2_realtime": layer2,
+        "average": avg,
+        "note": "第一层=基础亲密度(userdb)，第二层=当下亲密度(proactive)，自拍判断取平均值"
+    }
+
+
 # -------------------------- P1 图像生成/自拍 --------------------------
 @app.post("/api/image/selfie")
 async def generate_selfie(request: Request):
@@ -1534,14 +1728,8 @@ async def qq_webhook(request: Request):
         from core.image_generator import is_selfie_request, get_selfie_system
         if is_selfie_request(text):
             logger.info(f"[QQ][自拍] 检测到自拍请求: {text[:50]}")
-            # 获取用户亲密度
-            user_intimacy = 0
-            try:
-                user_info = user_db.get_user(identity)
-                if user_info:
-                    user_intimacy = user_info.get("intimacy", {}).get("nianqi", 0)
-            except Exception:
-                pass
+            # P3 修复：获取用户亲密度（优先从proactive_server读取admin面板的数值）
+            user_intimacy = await _get_user_intimacy(identity, "nianqi")
 
             # 调用自拍系统生成
             selfie_system = get_selfie_system()
@@ -1720,14 +1908,8 @@ async def internal_proactive_push(request: Request, x_internal_token: str = Head
             image_url = ""
             if PROACTIVE_AUTO_IMAGE and role_id:
                 try:
-                    # 查询用户亲密度
-                    user_intimacy = 0
-                    try:
-                        user_info = user_db.get_user(user_id)
-                        if user_info:
-                            user_intimacy = user_info.get("intimacy", {}).get(role_id, 0)
-                    except Exception:
-                        pass
+                    # P3 修复：查询用户亲密度（优先从proactive_server读取admin面板的数值）
+                    user_intimacy = await _get_user_intimacy(user_id, role_id)
 
                     if user_intimacy >= PROACTIVE_IMAGE_INTIMACY_THRESHOLD:
                         logger.info(f"[主动发图] 亲密度{user_intimacy}≥阈值{PROACTIVE_IMAGE_INTIMACY_THRESHOLD}，开始生成自拍...")
