@@ -75,8 +75,24 @@ async def read_stream(name, stream):
             log(name, text)
 
 
+def is_port_in_use(port: int) -> bool:
+    """检测端口是否已被占用。"""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("0.0.0.0", port))
+            return False
+        except OSError:
+            return True
+
+
 async def run_service(name, script, port, env_overrides):
     """启动单个服务并监控其输出"""
+    # P3 修复：启动前检测端口是否已被占用，避免重复启动导致无限崩溃重启
+    if is_port_in_use(port):
+        log(name, f"端口 {port} 已被占用，跳过启动（服务可能已在运行）")
+        return None
+
     env = os.environ.copy()
     env["DATA_DIR"] = DATA_DIR
     env.update(env_overrides)
