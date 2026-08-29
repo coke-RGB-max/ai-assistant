@@ -48,9 +48,9 @@ SEEDREAM_MODEL = os.getenv("SEEDREAM_MODEL", "")  # 推理接入点Endpoint ID
 MAX_USER_IMAGES_PER_HOUR = int(os.getenv("MAX_USER_IMAGES_PER_HOUR", "5"))
 MAX_PROACTIVE_IMAGES_PER_DAY = int(os.getenv("MAX_PROACTIVE_IMAGES_PER_DAY", "2"))
 
-# 图片尺寸
-SELFIE_SIZE = os.getenv("SELFIE_SIZE", "768x1024")  # 3:4 竖版自拍
-LANDSCAPE_SIZE = os.getenv("LANDSCAPE_SIZE", "1024x768")  # 4:3 横版风景
+# 图片尺寸（P3修复：火山云Seedream 5.0要求至少368万像素，768x1024只有78万像素会400错误）
+SELFIE_SIZE = os.getenv("SELFIE_SIZE", "1728x2304")  # 3:4 竖版自拍，约398万像素
+LANDSCAPE_SIZE = os.getenv("LANDSCAPE_SIZE", "2304x1728")  # 4:3 横版风景，约398万像素
 
 # 数据目录
 DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -540,9 +540,9 @@ class SeedreamClient:
                 logger.error(f"[Seedream] HTTP{resp.status_code} 完整响应: {resp.text[:1000]}")
                 
                 # P3 修复：400错误时自动降级size到1024x1024重试一次
-                if resp.status_code == 400 and size != "1024x1024":
-                    logger.warning(f"[Seedream] 400错误，降级size到1024x1024重试...")
-                    fallback_payload = {**payload, "size": "1024x1024"}
+                if resp.status_code == 400 and size != "2048x2048":
+                    logger.warning(f"[Seedream] 400错误，降级size到2048x2048重试...")
+                    fallback_payload = {**payload, "size": "2048x2048"}
                     try:
                         async with httpx.AsyncClient(timeout=timeout) as client:
                             resp2 = await client.post(
@@ -557,7 +557,7 @@ class SeedreamClient:
                             data2 = resp2.json()
                             image_url2 = data2.get("data", [{}])[0].get("url", "")
                             if image_url2:
-                                logger.info(f"[Seedream] 降级重试成功 size=1024x1024 url={image_url2[:80]}...")
+                                logger.info(f"[Seedream] 降级重试成功 size=2048x2048 url={image_url2[:80]}...")
                                 return image_url2
                         else:
                             logger.error(f"[Seedream] 降级重试也失败 HTTP{resp2.status_code}: {resp2.text[:500]}")
