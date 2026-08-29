@@ -1,6 +1,8 @@
 # FlexiChrono 全栈后端 Docker 镜像
 # 包含：主后端 + 人格后端 + 记忆后端 + 主动后端 + 语音后端
 # 依赖：ffmpeg(语音转码) + edge-tts(语音合成) + Python 依赖
+# P0 架构改造：新增 characters/ common/ core/ 三个目录，必须显式复制进容器
+
 FROM python:3.10-slim
 
 # 避免 apt 交互式提示
@@ -22,8 +24,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 复制所有后端代码
+# 复制所有后端代码（P0改造：必须包含子目录，不能只用 COPY *.py）
 COPY *.py ./
+COPY index.html ./
+COPY characters/ ./characters/
+COPY common/ ./common/
+COPY core/ ./core/
 
 # 数据目录（SQLite / userdb.json 持久化挂载点）
 RUN mkdir -p /data

@@ -12,6 +12,7 @@ from typing import Optional, Dict, List
 from contextlib import asynccontextmanager
 from collections import deque
 import httpx
+from common.security import hash_password, verify_password
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Header
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -83,7 +84,7 @@ class UserDB:
                 json.dump({
                     "users": {
                         "admin": {
-                            "password": "admin123", "nickname": "管理员",
+                            "password": hash_password("admin123"), "nickname": "管理员",
                             "is_admin": True, "intimacy": {}, "session_id": None
                         }
                     },
@@ -103,8 +104,20 @@ class UserDB:
     def authenticate(self, username, password):
         data = self._read()
         user = data["users"].get(username)
-        if user and user["password"] == password:
-            return {
+        if not user:
+            return None
+        stored = user.get("password", "")
+        # 兼容旧明文密码：验证成功后自动升级为 bcrypt 哈希
+        if not stored.startswith("$2") and not stored.startswith("pbkdf2$"):
+            if stored == password:
+                user["password"] = hash_password(password)
+                self._write(data)
+                logger.info(f"[安全] 用户 {username} 的明文密码已自动升级为哈希")
+            else:
+                return None
+        elif not verify_password(password, stored):
+            return None
+        return {
                 "username": username, "nickname": user.get("nickname", username),
                 "is_admin": user.get("is_admin", False),
                 "intimacy": user.get("intimacy", {}),
@@ -124,7 +137,7 @@ class UserDB:
         if username in data["users"]:
             return False
         data["users"][username] = {
-            "password": password, "nickname": nickname or username,
+            "password": hash_password(password), "nickname": nickname or username,
             "is_admin": False, "intimacy": {}, "session_id": None
         }
         self._write(data)
@@ -179,7 +192,7 @@ class UserDB:
     def reset_password(self, username, new_password):
         data = self._read()
         if username in data["users"]:
-            data["users"][username]["password"] = new_password
+            data["users"][username]["password"] = hash_password(new_password)
             self._write(data)
             return True
         return False
@@ -223,7 +236,7 @@ class UserDB:
         data = self._read()
         if tmp_username not in data["users"]:
             data["users"][tmp_username] = {
-                "password": base64.b64encode(os.urandom(18)).decode(),
+                "password": hash_password(base64.b64encode(os.urandom(18)).decode()),
                 "nickname": f"QQ用户",
                 "is_admin": False, "intimacy": {}, "session_id": None,
                 "is_qq_tmp": True
@@ -1184,6 +1197,39 @@ async def get_roles():
     except Exception:
         pass
     return {}
+
+
+# -------------------------- P1 图像生成/自拍 --------------------------
+@app.post("/api/image/selfie")
+async def generate_selfie(request: Request):
+    """生成角色自拍（转发到人格服务器）"""
+    try:
+        body = await request.json()
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            r = await client.post(
+                f"{PERSONALITY_SERVER_URL}/api/image/selfie",
+                json=body,
+                timeout=90.0,
+            )
+            if r.status_code == 200:
+                return r.json()
+            return {"allowed": False, "message": "图像生成服务异常", "error": f"HTTP {r.status_code}"}
+    except Exception as e:
+        logger.error(f"[ImageAPI] 转发自拍请求失败: {e}")
+        return {"allowed": False, "message": "图像生成失败", "error": str(e)}
+
+
+@app.get("/api/image/status")
+async def image_status():
+    """获取图像生成系统状态"""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{PERSONALITY_SERVER_URL}/api/image/status")
+            if r.status_code == 200:
+                return r.json()
+    except Exception:
+        pass
+    return {"error": "图像生成服务不可用"}
 # -------------------------- NapCat QQ Webhook --------------------------
 @app.post("/api/qq/webhook")
 async def qq_webhook(request: Request):

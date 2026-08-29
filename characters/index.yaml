@@ -1,0 +1,13 @@
+version: '1.0'
+description: 角色配置索引，启动时自动加载此目录下所有角色
+roles:
+- id: nianqi
+  name: 念琦
+  file: nianqi.yaml
+- id: qinghe
+  name: 清禾
+  file: qinghe.yaml
+- id: jingwen
+  name: 璟雯
+  file: jingwen.yaml
+default_role: nianqi
