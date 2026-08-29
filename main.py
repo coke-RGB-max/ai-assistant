@@ -16,6 +16,7 @@ from common.security import hash_password, verify_password
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Header
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main_server")
 PERSONALITY_SERVER_URL = os.getenv("PERSONALITY_SERVER_URL", "http://127.0.0.1:8002")
