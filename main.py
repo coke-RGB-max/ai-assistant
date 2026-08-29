@@ -259,12 +259,10 @@ async def _get_user_intimacy(user_id: str, role_id: str) -> int:
     第二层：proactive_server 的 last_intimacy（当下实时好感度，随对话波动）
     取两层平均值，更全面地反映关系状态。
     """
-    # 1. 读取第一层：userdb.json 的基础亲密度
+    # 1. 读取第一层：userdb.json 的基础亲密度（用 get_intimacy 代替不存在的 get_user）
     intimacy_userdb = 0
     try:
-        user_info = user_db.get_user(user_id)
-        if user_info:
-            intimacy_userdb = int(user_info.get("intimacy", {}).get(role_id, 0))
+        intimacy_userdb = int(user_db.get_intimacy(user_id, role_id))
     except Exception:
         pass
     
@@ -1302,14 +1300,18 @@ async def admin_get_intimacy(username: str, request: Request):
     if not admin or not admin["is_admin"]:
         raise HTTPException(status_code=403, detail="无权限")
     
-    user_info = user_db.get_user(username)
-    if not user_info:
-        raise HTTPException(status_code=404, detail=f"用户 {username} 不存在")
+    # 用 get_all_intimacy 代替不存在的 get_user
+    intimacy = user_db.get_all_intimacy(username)
+    if not intimacy:
+        # 检查用户是否存在
+        all_users = user_db.get_all_users()
+        if not any(u.get("username") == username for u in all_users):
+            raise HTTPException(status_code=404, detail=f"用户 {username} 不存在")
     
     return {
         "success": True,
         "username": username,
-        "intimacy": user_info.get("intimacy", {}),
+        "intimacy": intimacy,
         "note": "这是第一层基础亲密度；第二层当下亲密度请查 proactive_server /api/status/{user_id}"
     }
 
@@ -1360,11 +1362,8 @@ async def admin_get_both_intimacy(username: str, request: Request):
     if not admin or not admin["is_admin"]:
         raise HTTPException(status_code=403, detail="无权限")
     
-    # 第一层
-    user_info = user_db.get_user(username)
-    layer1 = {}
-    if user_info:
-        layer1 = user_info.get("intimacy", {})
+    # 第一层（用 get_all_intimacy 代替不存在的 get_user）
+    layer1 = user_db.get_all_intimacy(username)
     
     # 第二层（从 proactive_server 读取）
     layer2 = {}
