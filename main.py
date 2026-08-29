@@ -1527,7 +1527,63 @@ async def qq_webhook(request: Request):
     except Exception as e:
         logger.error(f"[QQ] 消息处理失败: {e}", exc_info=True)
         reply_text = "抱歉，我刚才走神了，能再说一遍吗？"
-    sent = await send_qq_private_msg(qq_number, reply_text)
+
+    # P2/P3 修复：检测自拍请求，自动生成图片
+    selfie_image_url = ""
+    try:
+        from core.image_generator import is_selfie_request, get_selfie_system
+        if is_selfie_request(text):
+            logger.info(f"[QQ][自拍] 检测到自拍请求: {text[:50]}")
+            # 获取用户亲密度
+            user_intimacy = 0
+            try:
+                user_info = user_db.get_user(identity)
+                if user_info:
+                    user_intimacy = user_info.get("intimacy", {}).get("nianqi", 0)
+            except Exception:
+                pass
+
+            # 调用自拍系统生成
+            selfie_system = get_selfie_system()
+            if selfie_system.client.available:
+                from core.image_generator import detect_selfie_mode, extract_scene, extract_clothing, extract_expression
+                mode = detect_selfie_mode(text)
+                scene = extract_scene(text) or "indoor"
+                clothing = extract_clothing(text) or "casual"
+                expression = extract_expression(text) or "gentle smile"
+
+                selfie_result = await selfie_system.handle_selfie_request(
+                    user_id=identity,
+                    role_id="nianqi",
+                    intimacy=user_intimacy,
+                    scene=scene,
+                    expression=expression,
+                    clothing=clothing,
+                    mode=mode,
+                )
+
+                if selfie_result.get("allowed") and selfie_result.get("image_url"):
+                    selfie_image_url = selfie_result["image_url"]
+                    # 如果角色有开场白，替换掉默认回复
+                    if selfie_result.get("message"):
+                        reply_text = selfie_result["message"]
+                    logger.info(f"[QQ][自拍] 生成成功: {selfie_image_url[:60]}... 模式={mode.value}")
+                elif not selfie_result.get("allowed"):
+                    # 亲密度不够，用角色的拒绝理由回复
+                    if selfie_result.get("message"):
+                        reply_text = selfie_result["message"]
+                    logger.info(f"[QQ][自拍] 被拒绝: {selfie_result.get('error')} 理由={selfie_result.get('message', '')[:50]}")
+            else:
+                logger.warning("[QQ][自拍] 图像生成API不可用（未配置SEEDREAM_MODEL）")
+    except Exception as selfie_e:
+        logger.warning(f"[QQ][自拍] 处理异常: {type(selfie_e).__name__}: {selfie_e}")
+
+    # 发送消息（有图则图文一起发，无图则只发文本）
+    if selfie_image_url:
+        from core.napcat import send_private_image
+        sent = await send_private_image(qq_number, selfie_image_url, text=reply_text)
+    else:
+        sent = await send_qq_private_msg(qq_number, reply_text)
     if not sent and NAPCAT_HTTP_URL:
         logger.warning(f"[QQ] NapCat API 发送失败，回复放在响应体中")
     total_dur = time.perf_counter() - webhook_t0
