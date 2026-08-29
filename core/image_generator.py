@@ -510,6 +510,10 @@ class SeedreamClient:
 
         t0 = time.perf_counter()
         try:
+            # P3 修复：打印请求参数，方便排查400错误
+            logger.info(f"[Seedream] 请求参数: model={self.model} size={size} "
+                       f"response_format={payload.get('response_format')} watermark={payload.get('watermark')}")
+            
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(
                     f"{self.base_url}/images/generations",
@@ -529,10 +533,37 @@ class SeedreamClient:
                     logger.info(f"[Seedream] 生成成功 耗时={dur:.2f}s size={size} url={image_url[:80]}...")
                     return image_url
                 else:
-                    logger.warning(f"[Seedream] 响应中没有图片URL: {json.dumps(data)[:200]}")
+                    logger.warning(f"[Seedream] 响应中没有图片URL: {json.dumps(data)[:500]}")
                     return None
             else:
-                logger.warning(f"[Seedream] HTTP{resp.status_code}: {resp.text[:300]}")
+                # P3 修复：打印完整响应体，方便排查400错误
+                logger.error(f"[Seedream] HTTP{resp.status_code} 完整响应: {resp.text[:1000]}")
+                
+                # P3 修复：400错误时自动降级size到1024x1024重试一次
+                if resp.status_code == 400 and size != "1024x1024":
+                    logger.warning(f"[Seedream] 400错误，降级size到1024x1024重试...")
+                    fallback_payload = {**payload, "size": "1024x1024"}
+                    try:
+                        async with httpx.AsyncClient(timeout=timeout) as client:
+                            resp2 = await client.post(
+                                f"{self.base_url}/images/generations",
+                                headers={
+                                    "Authorization": f"Bearer {self.api_key}",
+                                    "Content-Type": "application/json",
+                                },
+                                json=fallback_payload,
+                            )
+                        if resp2.status_code == 200:
+                            data2 = resp2.json()
+                            image_url2 = data2.get("data", [{}])[0].get("url", "")
+                            if image_url2:
+                                logger.info(f"[Seedream] 降级重试成功 size=1024x1024 url={image_url2[:80]}...")
+                                return image_url2
+                        else:
+                            logger.error(f"[Seedream] 降级重试也失败 HTTP{resp2.status_code}: {resp2.text[:500]}")
+                    except Exception as e2:
+                        logger.warning(f"[Seedream] 降级重试异常: {type(e2).__name__}: {e2}")
+                
                 return None
 
         except httpx.TimeoutException:
