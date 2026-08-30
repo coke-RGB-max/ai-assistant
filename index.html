@@ -701,6 +701,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     ];
 
     let currentUser = null;
+    let adminUserContainers = {};  // v4.0.4: 管理员页面各用户的心理状态容器，用于实时刷新
     let currentConversationId = null;
     let conversationsByUser = {};
     let ws = null;
@@ -919,6 +920,19 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       } else if (msg.type === "proactive") {
         removeTypingIndicator();
         if (conv) appendAIMessage(conv, msg.content, msg.role_id);
+      } else if (msg.type === "admin_update") {
+        // v4.0.4: 管理员实时数据更新（亲密度变化等），自动刷新对应用户
+        if (currentUser && currentUser.role === "admin") {
+          const adminPanel = document.getElementById("admin-panel");
+          if (adminPanel && !adminPanel.classList.contains("hidden")) {
+            const username = msg.username;
+            const container = adminUserContainers[username];
+            if (container) {
+              container.innerHTML = '<div class="hint">刷新中...</div>';
+              loadUserPsych(username, container);
+            }
+          }
+        }
       } else if (msg.type === "error") {
         removeTypingIndicator();
         showToast(msg.message || "发生错误", "error");
@@ -1551,6 +1565,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     }
 
     async function loadUserPsych(username, container) {
+      adminUserContainers[username] = container;  // v4.0.4: 记录容器，用于实时刷新
       try {
         const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/users/${encodeURIComponent(username)}/psych`, {
           headers: { Authorization: `Bearer ${currentUser.token}` }
@@ -1776,6 +1791,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       $("#admin-back-btn").addEventListener("click", () => {
         $("#admin-panel").classList.add("hidden");
         $("#main-view").classList.remove("hidden");
+        adminUserContainers = {};  // v4.0.4: 退出管理员页面时清空容器引用
       });
       $("#header-admin-btn").addEventListener("click", () => {
         $("#main-view").classList.add("hidden");

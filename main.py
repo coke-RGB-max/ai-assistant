@@ -766,11 +766,44 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections = {}
         self.pending_messages = {}
-    async def connect(self, username, ws):
+        self.admin_connections = {}  # v4.0.4: 在线管理员连接，用于实时推送数据更新
+    async def connect(self, username, ws, is_admin=False):
         self.active_connections[username] = ws
+        if is_admin:
+            self.admin_connections[username] = ws
+            logger.info(f"[管理员推送] 管理员 {username} 已上线，已加入实时推送列表")
     def disconnect(self, username):
         self.active_connections.pop(username, None)
+        if username in self.admin_connections:
+            self.admin_connections.pop(username, None)
+            logger.info(f"[管理员推送] 管理员 {username} 已下线")
+    async def broadcast_admin_update(self, data: dict):
+        """v4.0.4: 向所有在线管理员推送数据更新（亲密度变化等）"""
+        if not self.admin_connections:
+            return
+        msg = json.dumps(data, ensure_ascii=False)
+        disconnected = []
+        for admin_name, ws in self.admin_connections.items():
+            try:
+                await ws.send_text(msg)
+            except Exception:
+                disconnected.append(admin_name)
+        for name in disconnected:
+            self.admin_connections.pop(name, None)
 manager = ConnectionManager()
+
+async def _notify_admin_intimacy_update(username: str, intimacy_map: dict):
+    """v4.0.4: 亲密度变化时通知在线管理员，触发管理员后台实时刷新"""
+    try:
+        await manager.broadcast_admin_update({
+            "type": "admin_update",
+            "event": "intimacy_changed",
+            "username": username,
+            "intimacy": intimacy_map,
+            "timestamp": time.time(),
+        })
+    except Exception as e:
+        logger.debug(f"[管理员推送] 推送亲密度更新失败: {e}")
 async def get_role_names(role_ids):
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -881,6 +914,9 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
     response_intimacy = dict(intimacy_map)
     response_intimacy.update(updated_intimacy)
     timer.mark("后处理")
+    # v4.0.4: 亲密度变化时通知在线管理员实时刷新
+    if updated_intimacy:
+        asyncio.create_task(_notify_admin_intimacy_update(identity, response_intimacy))
     # 后台记忆存储（不阻塞回复）
     mem_cand = result.get("memory_candidate")
     if mem_cand and mem_cand.get("remember") and mem_cand.get("content"):
@@ -1016,6 +1052,9 @@ async def process_voice_message(identity, audio_base64, role_ids=None, chat_hist
         user_db.set_session(identity, session_id)
     if not result.get("success") and not reply:
         reply = "抱歉，我没听清你说什么..."
+    # v4.0.4: 语音消息亲密度变化时通知在线管理员实时刷新
+    if result.get("success") and intimacy_map:
+        asyncio.create_task(_notify_admin_intimacy_update(identity, intimacy_map))
     # 更新聊天历史（用ASR识别出的文本）
     if asr_text:
         # v13.0: 如果有主动推送的消息还没纳入历史，先加进去
@@ -1410,10 +1449,15 @@ async def admin_set_intimacy(req: SetIntimacyRequest, request: Request,
     第二层亲密度（proactive_server 当下状态）在 admin 面板的心理状态编辑里设置。
     自拍判断时取两层平均值。
     """
-    # 简单鉴权：内部 token 或 admin 登录态
-    if x_internal_token != INTERNAL_TOKEN:
-        # TODO: 这里可以加 admin session 校验，暂时只允许内部 token
-        raise HTTPException(status_code=403, detail="需要内部令牌")
+    # 鉴权：内部 token 或 管理员登录态（二选一）
+    is_internal = (x_internal_token == INTERNAL_TOKEN)
+    is_admin = False
+    if not is_internal:
+        token = request.headers.get("Authorization", "").replace("Bearer ", "")
+        admin = user_db.authenticate_token(token)
+        is_admin = bool(admin and admin.get("is_admin"))
+    if not is_internal and not is_admin:
+        raise HTTPException(status_code=403, detail="需要内部令牌或管理员权限")
     
     value = max(0, min(100, int(req.value)))
     success = user_db.set_intimacy(req.username, req.role_id, value)
@@ -1504,12 +1548,13 @@ async def admin_get_both_intimacy(username: str, request: Request):
             resp = await client.get(f"{PROACTIVE_SERVER_URL}/api/status/{username}")
             if resp.status_code == 200:
                 data = resp.json()
-                if isinstance(data, list):
-                    for role_status in data:
-                        rid = role_status.get("role_id")
-                        ival = role_status.get("intimacy")
-                        if rid and ival is not None:
-                            layer2[rid] = int(ival)
+                # 兼容两种格式：dict（从 roles 字段读取）或 list（直接读取）
+                roles = data.get("roles", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+                for role_status in roles:
+                    rid = role_status.get("role_id")
+                    ival = role_status.get("intimacy")
+                    if rid and ival is not None:
+                        layer2[rid] = int(ival)
     except Exception as e:
         logger.debug(f"[亲密度] 从proactive_server读取第二层失败: {e}")
     
@@ -2241,7 +2286,8 @@ async def websocket_endpoint(websocket: WebSocket):
             return
         authenticated = True
         username = user_info["username"]
-        await manager.connect(username, websocket)
+        is_admin = bool(user_info.get("is_admin", False))
+        await manager.connect(username, websocket, is_admin=is_admin)
         qq_bound = user_db.get_qq_by_username(username) is not None
         await websocket.send_text(json.dumps({
             "type": "auth_ok", "username": username,
