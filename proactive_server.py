@@ -128,6 +128,12 @@ VECTOR_SERVER_URL = os.getenv("VECTOR_SERVER_URL", "http://127.0.0.1:8001")
 MAIN_SERVER_URL = os.getenv("MAIN_SERVER_URL", "http://127.0.0.1:8000")
 INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN", "change_me_internal_secret_2026")
 VECTOR_API_TOKEN = os.getenv("VECTOR_API_TOKEN", "change_me_strong_secret_key_123456")
+# ---- v14.0: 外接大模型配置（用于自圆其说等需要灵活生成的场景，OpenAI 兼容格式）----
+# 配置后优先直接调用大模型，传入完整对话上下文，生成更自然的收尾；未配置则降级到人格后端 proactive_generate
+PROACTIVE_LLM_API_KEY = os.getenv("PROACTIVE_LLM_API_KEY", "")
+PROACTIVE_LLM_BASE_URL = os.getenv("PROACTIVE_LLM_BASE_URL", "https://api.deepseek.com/v1")
+PROACTIVE_LLM_MODEL = os.getenv("PROACTIVE_LLM_MODEL", "deepseek-chat")
+PROACTIVE_LLM_TIMEOUT = float(os.getenv("PROACTIVE_LLM_TIMEOUT", "30"))
 DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(DATA_DIR, "proactive.db")
 
@@ -930,6 +936,44 @@ async def fetch_related_memory(user_id: str, role_id: str, query: str = "我们�
         logger.warning(f"检索记忆失败: {e}")
     return None
 
+async def call_llm_direct(system_prompt: str, user_prompt: str,
+                            temperature: float = 0.8, max_tokens: int = 200) -> Optional[str]:
+    """v14.0: 直接调用外接大模型 API（OpenAI 兼容格式），用于需要灵活生成的场景。
+    未配置 PROACTIVE_LLM_API_KEY 时返回 None，调用方应降级到其他生成方式。
+    """
+    if not PROACTIVE_LLM_API_KEY:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=PROACTIVE_LLM_TIMEOUT) as client:
+            resp = await client.post(
+                f"{PROACTIVE_LLM_BASE_URL.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {PROACTIVE_LLM_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": PROACTIVE_LLM_MODEL,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+                timeout=PROACTIVE_LLM_TIMEOUT,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                content = data["choices"][0]["message"]["content"].strip()
+                # 清理模型可能输出的引号
+                content = content.strip('"').strip("'").strip()
+                return content
+            else:
+                logger.warning(f"[直接LLM] 调用失败 HTTP {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        logger.warning(f"[直接LLM] 调用异常: {e}")
+    return None
+
 async def generate_proactive_message(
     role_id: str, reason_type: str, reason_detail: str,
     related_memory: Optional[Dict[str, Any]], idle_hours: float,
@@ -1261,8 +1305,69 @@ class TopicResumer:
             },
         )
 
-    async def _generate_self_close(self, role_id: str, intimacy: int, mood: str) -> Optional[str]:
-        """阶段2：自圆其说收尾——用户还是没回，AI给自己和对方找台阶"""
+    async def _generate_self_close(self, role_id: str, intimacy: int, mood: str,
+                                     recent_messages_json: str = "", last_topic: str = "") -> Optional[str]:
+        """阶段2：自圆其说收尾——用户还是没回，AI给自己和对方找台阶。
+        v14.0: 优先直接调用外接大模型，传入完整对话上下文+角色性格，生成更自然的收尾；
+        未配置大模型或调用失败时降级到人格后端 proactive_generate。
+        """
+        # ===== 优先：直接调用外接大模型，传入真实对话上下文 =====
+        if PROACTIVE_LLM_API_KEY:
+            try:
+                msgs = json.loads(recent_messages_json) if recent_messages_json else []
+            except Exception:
+                msgs = []
+            # 构建对话历史文本（最近6轮）
+            history_lines = []
+            for m in msgs[-6:]:
+                role = m.get("role", "user")
+                content = m.get("content", "").strip()
+                if not content:
+                    continue
+                if role == "user":
+                    history_lines.append(f"对方：{content}")
+                else:
+                    history_lines.append(f"你：{content}")
+            history_text = "\n".join(history_lines) if history_lines else "（无更早对话记录）"
+
+            # 角色性格设定
+            role_personality = {
+                "nianqi": "温柔依恋型，安全型依恋。说话温柔亲昵，会主动靠近和陪伴，但不卑微不讨好。被冷落时会有点失落但不会纠缠，会体贴地给对方找台阶。",
+                "qinghe": "温柔知性型，像大姐姐一样。说话温和体贴，有分寸感，善解人意。被冷落时会理解对方，淡淡地收尾，不追问。",
+                "jingwen": "傲娇型，嘴硬心软。说话带刺但实际在关心，不会直接表达想念或在意，被冷落时会嘴硬地找借口收尾，比如'切不说算了''随便你'。",
+            }.get(role_id, "温柔自然的性格，说话有分寸，不卑微不讨好。")
+
+            system_prompt = f"""你是一个{role_personality}的女生，正在和你喜欢的人用聊天软件聊天。
+
+刚才你主动发起了一个新话题，但对方一直没有回复。现在你需要自然地收尾，给自己和对方找台阶下。
+
+【核心原则】
+1. 给对方台阶：暗示对方可能在忙、有事、没看到，绝对不要质问、追问、发"你在吗""人呢"
+2. 给自己台阶：表现得像是随口一说、没事、不打扰了，不要显得很在意、很失落
+3. 绝对禁止：道歉、卑微、讨好、卖惨、追问、降低自己的姿态、发长文
+4. 要像真人发现对方没在看手机，然后自然收住一样，1-2句话即可
+5. 收尾要和你刚才说的话题内容有逻辑关联，不要突兀地切换
+6. 不要用"对了""话说""顺便说一下"这种刻意的开头
+7. 不要加任何表情符号、括号说明、舞台指示，只输出你要说的纯文本"""
+
+            user_prompt = f"""【最近的对话记录】
+{history_text}
+
+【你刚才主动发起的新话题】
+{last_topic if last_topic else "（基于上面的对话延伸了一个新话题）"}
+
+【当前情况】
+你发完上面的新话题后，对方已经沉默了{TOPIC_CLOSING_DELAY}秒，一直没回。
+
+请自然地收尾，给自己和对方找台阶下。只输出你要说的话，不要任何解释、标记或引号。"""
+
+            content = await call_llm_direct(system_prompt, user_prompt, temperature=0.8, max_tokens=150)
+            if content:
+                logger.info(f"[自圆其说-直接LLM] role={role_id} content={content[:50]}")
+                return content
+            logger.info("[自圆其说-直接LLM] 返回为空，降级到 proactive_generate")
+
+        # ===== 降级：使用原有的人格后端 proactive_generate =====
         reason_detail = (
             f"【自圆其说】AI主动发起新话题后用户又沉默了{TOPIC_CLOSING_DELAY}秒。"
             f"AI需要自然地收尾，同时给自己和对方找台阶下："
@@ -1373,7 +1478,16 @@ class TopicResumer:
                     if (now_ts - topic_sent_at) >= TOPIC_CLOSING_DELAY:
                         # 二次确认：用户在话题发出后确实没回复
                         if last_user < topic_sent_at:
-                            content = await self._generate_self_close(role_id, intimacy, mood)
+                            # v14.0: 查询刚才发起的话题内容，连同对话历史一起传给大模型生成自然收尾
+                            last_topic_msg = conn.execute(
+                                "SELECT content FROM proactive_messages WHERE user_id=? AND role_id=? AND reason_type='topic_continue' ORDER BY created_at DESC LIMIT 1",
+                                (user_id, role_id)
+                            ).fetchone()
+                            last_topic = last_topic_msg["content"] if last_topic_msg else ""
+                            content = await self._generate_self_close(
+                                role_id, intimacy, mood,
+                                recent_messages_json=row["recent_messages"] or "[]",
+                                last_topic=last_topic)
                             if content:
                                 msg_id = uuid.uuid4().hex
                                 delivered = await push_to_user(msg_id, user_id, role_id, content)
