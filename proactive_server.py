@@ -91,21 +91,84 @@ _intent_cache: Dict[str, float] = {}
 _INTENT_CACHE_TTL = 30 * 60  # 30分钟
 
 
-def _check_user_intent(user_id: str, user_message: str) -> bool:
+def _clean_expired_intents():
+    """清理过期的意图缓存"""
+    now = time.time()
+    expired = [uid for uid, ts in _intent_cache.items() if now - ts > _INTENT_CACHE_TTL]
+    for uid in expired:
+        del _intent_cache[uid]
+
+async def _check_user_intent(user_id: str, user_message: str) -> bool:
     """
     检查用户是否有终止对话的意图。
-    如果检测到高置信度意图，记录到缓存中，返回 True 表示应阻止主动消息。
-    同时清理过期缓存。
+    v14.0: 优先调用外接大模型做意图分类，识别更自然的表达（如"我去忙了""先这样吧""别吵我"）；
+    大模型不可用或调用失败时降级到关键词匹配。
+    如果检测到终止意图，记录到缓存中，返回 True 表示应阻止主动消息。
     """
+    if not user_message or not user_message.strip():
+        return False
+
+    # ===== 优先：外接大模型意图分类 =====
+    if PROACTIVE_LLM_API_KEY:
+        try:
+            system_prompt = """你是一个对话意图分类器。判断用户的这句话是否表达了"想要结束当前对话"的意图。
+
+【属于终止对话意图的情况】（包括但不限于）：
+- 直接告别：晚安、再见、拜拜、下次聊、改天聊、先这样吧、挂了、不说了、我走了、聊到这吧
+- 暗示要离开：我去忙了、我要睡觉了、我去吃饭了、我去洗澡了、我有点事先走了、有空再聊、我先去了
+- 不想继续聊：别烦我、别理我、不想聊了、没心情聊、你别说了、闭嘴、安静点、别吵了
+- 委婉结束：今天先到这里吧、聊到这吧、我累了、我要休息了、太晚了、不早了、该睡了
+
+【不属于终止对话意图的情况】：
+- 单纯情绪表达：我好累啊、好烦啊、好困啊（但没有要结束对话的意思）
+- 提问或继续话题：然后呢？、接下来呢？、你说什么？、真的吗？
+- 中性陈述：今天天气不错、我刚吃了饭、我在看电视
+- 表达想念或关心：我想你了、你吃饭了吗、你在干嘛
+
+判断标准：用户是否在暗示"我不想继续聊了，我要走了"。如果只是表达情绪但没有结束对话的意思，不算终止意图。
+
+只返回 JSON，格式：{"should_stop": true/false, "confidence": 0.0到1.0, "reason": "简短原因"}"""
+
+            user_prompt = f"""用户消息：「{user_message}」
+
+请判断是否表达了终止对话的意图，只返回JSON。"""
+
+            result_str = await call_llm_direct(system_prompt, user_prompt, temperature=0.3, max_tokens=120)
+            if result_str:
+                import json as _json
+                cleaned = result_str.strip()
+                # 清理 markdown 代码块标记
+                if cleaned.startswith("```"):
+                    cleaned = cleaned.strip("`")
+                    if cleaned.lower().startswith("json"):
+                        cleaned = cleaned[4:]
+                    cleaned = cleaned.strip()
+                json_start = cleaned.find("{")
+                json_end = cleaned.rfind("}")
+                if json_start >= 0 and json_end > json_start:
+                    result = _json.loads(cleaned[json_start:json_end+1])
+                    should_stop = result.get("should_stop", False)
+                    confidence = float(result.get("confidence", 0.0))
+                    reason = result.get("reason", "")
+                    if should_stop and confidence >= 0.6:
+                        now = time.time()
+                        _intent_cache[user_id] = now
+                        _clean_expired_intents()
+                        logger.info(f"[意图检测-LLM] user={user_id} 触发终止意图: confidence={confidence:.2f} reason={reason}")
+                        return True
+                    else:
+                        logger.debug(f"[意图检测-LLM] user={user_id} 未触发: should_stop={should_stop} confidence={confidence:.2f}")
+                        return False
+        except Exception as e:
+            logger.warning(f"[意图检测-LLM] 大模型调用失败，降级到关键词匹配: {e}")
+
+    # ===== 降级：关键词匹配 =====
     intent = ConversationIntentDetector.detect(user_message)
     if intent:
         now = time.time()
         _intent_cache[user_id] = now
-        # 清除过期缓存
-        expired = [uid for uid, ts in _intent_cache.items() if now - ts > _INTENT_CACHE_TTL]
-        for uid in expired:
-            del _intent_cache[uid]
-        logger.info(f"[意图检测] user={user_id} 触发终止意图: confidence={intent['confidence']} keyword={intent['keyword']}")
+        _clean_expired_intents()
+        logger.info(f"[意图检测-关键词] user={user_id} 触发终止意图: confidence={intent['confidence']} keyword={intent.get('keyword', '')}")
         return True
     return False
 
@@ -1645,11 +1708,46 @@ async def on_user_spoke(req: UserSpokeReport):
         conn.commit()
         # 检测用户是否有终止对话意图（防止 AI 继续主动找话题）
         if req.message:
-            if _check_user_intent(req.user_id, req.message):
+            if await _check_user_intent(req.user_id, req.message):
                 logger.info(f"[意图检测] 用户 {req.user_id} 触发终止意图，将阻止后续主动消息")
         return {"success": True}
     finally:
         conn.close()
+
+# ---------- v13.1: 晚安/终止对话意图上报（主后端 ConversationIntentDetector 检测到后调用） ----------
+class GoodbyeReport(BaseModel):
+    """用户表达终止对话意图（晚安/不聊了等）时上报"""
+    user_id: str
+    role_id: Optional[str] = None
+
+@app.post("/api/goodbye/report")
+async def on_goodbye_report(req: GoodbyeReport):
+    """
+    【主后端调用】当 ConversationIntentDetector 检测到用户说晚安/不聊了等终止意图时调用。
+    作用：立即设置意图缓存，30分钟内不再主动推送消息或发起话题延续。
+    """
+    _intent_cache[req.user_id] = time.time()
+    logger.info(f"[晚安上报] 用户 {req.user_id} 角色 {req.role_id} 表达终止意图，30分钟内不主动推送")
+    # 同时重置话题延续状态，取消待发的新话题
+    try:
+        conn = _get_db()
+        try:
+            if req.role_id:
+                topic_resumer._ensure_state(conn, req.user_id, req.role_id)
+                conn.execute(
+                    "UPDATE conversation_state SET topic_phase='idle' WHERE user_id=? AND role_id=?",
+                    (req.user_id, req.role_id))
+            else:
+                conn.execute(
+                    "UPDATE conversation_state SET topic_phase='idle' WHERE user_id=?",
+                    (req.user_id,))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"[晚安上报] 重置话题延续状态失败: {e}")
+    return {"success": True}
+
 
 @app.post("/api/mark_replied")
 async def mark_replied(req: MarkRepliedRequest):
@@ -1741,7 +1839,7 @@ async def mark_delivered(req: MarkDeliveredRequest):
         conn.commit()
         # 检测用户是否有终止对话意图（防止 AI 继续主动找话题）
         if req.message:
-            if _check_user_intent(req.user_id, req.message):
+            if await _check_user_intent(req.user_id, req.message):
                 logger.info(f"[意图检测] 用户 {req.user_id} 触发终止意图，将阻止后续主动消息")
         return {"success": True}
     finally:

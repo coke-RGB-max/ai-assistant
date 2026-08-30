@@ -709,8 +709,10 @@ async def call_proactive_migrate(old_user_id, new_user_id):
     return False
 
 # -------------------------- v13.0: 话题延续引擎调用 --------------------------
-async def call_proactive_user_spoke(user_id, role_id):
-    """用户发消息时调用：重置话题延续状态（取消待发的新话题和收尾）"""
+async def call_proactive_user_spoke(user_id, role_id, message: str = ""):
+    """用户发消息时调用：重置话题延续状态（取消待发的新话题和收尾）
+    v13.1: 传入用户消息文本，供主动后端检测终止对话意图（晚安/不聊了等）
+    """
     if _proactive_should_skip():
         return
     t0 = time.perf_counter()
@@ -718,7 +720,7 @@ async def call_proactive_user_spoke(user_id, role_id):
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.post(
                 f"{PROACTIVE_SERVER_URL}/api/conversation/user_spoke",
-                json={"user_id": user_id, "role_id": role_id}, timeout=8.0)
+                json={"user_id": user_id, "role_id": role_id, "message": message}, timeout=8.0)
             dur = time.perf_counter() - t0
             _log_port_timing("主动后端", "/api/conversation/user_spoke", dur, f"HTTP{resp.status_code}")
             if resp.status_code == 200:
@@ -818,7 +820,7 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
     _t.add_done_callback(background_tasks.discard)
     # v13.0: 单聊模式下，通知话题延续引擎用户发言了（重置状态）
     if mode == "single":
-        _ts = asyncio.create_task(call_proactive_user_spoke(identity, role_ids[0]))
+        _ts = asyncio.create_task(call_proactive_user_spoke(identity, role_ids[0], user_message))
         background_tasks.add(_ts)
         _ts.add_done_callback(background_tasks.discard)
     # 获取/创建 session
@@ -1000,6 +1002,12 @@ async def process_voice_message(identity, audio_base64, role_ids=None, chat_hist
     if not isinstance(result, dict):
         result = {"success": False, "reply": "语音服务返回异常..."}
     asr_text = result.get("asr_text", "") or ""
+
+    # v13.1: ASR完成后用识别文本上报用户发言，供主动后端检测终止对话意图（晚安等）
+    if mode == "single" and asr_text:
+        _ts_intent = asyncio.create_task(call_proactive_user_spoke(identity, role_ids[0], asr_text))
+        background_tasks.add(_ts_intent)
+        _ts_intent.add_done_callback(background_tasks.discard)
     reply = result.get("reply", "") or ""
     audio_out = result.get("audio_base64", "") or ""
     audio_out_fmt = result.get("audio_format", "mp3")
@@ -1154,6 +1162,33 @@ async def _download_voice_via_napcat(record_data: dict) -> Optional[bytes]:
                     logger.warning("[QQ] 语音转wav失败，尝试直接返回原始字节")
                     return raw_bytes
                 return None
+            # v4.0.4 修复：NapCat 返回的是本地文件路径（如 C:\Users\...\xxx.wav），
+            # 通过 NapCat 自身的 HTTP 文件服务接口 /file?path= 下载
+            if real_url and (":\\" in real_url or real_url.startswith("/") or "\\" in real_url):
+                import urllib.parse
+                encoded_path = urllib.parse.quote(real_url)
+                # NapCat HTTP 文件服务接口（需在 NapCat 配置中启用 http.enableFile）
+                file_download_url = f"{NAPCAT_HTTP_URL.rstrip('/')}/file?path={encoded_path}"
+                logger.info(f"[QQ] get_record 返回本地路径，尝试通过NapCat文件服务下载: {real_url[:80]}")
+                try:
+                    dl_headers = {}
+                    if NAPCAT_ACCESS_TOKEN:
+                        dl_headers["Authorization"] = f"Bearer {NAPCAT_ACCESS_TOKEN}"
+                    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as dl_client:
+                        dl_resp = await dl_client.get(file_download_url, headers=dl_headers)
+                    if dl_resp.status_code == 200 and len(dl_resp.content) > 100:
+                        logger.info(f"[QQ] 通过NapCat文件服务下载成功: {len(dl_resp.content)}字节")
+                        wav_bytes = await _ffmpeg_convert(
+                            dl_resp.content, "wav", sample_rate=16000, channels=1)
+                        if wav_bytes:
+                            return wav_bytes
+                        logger.warning("[QQ] 语音转wav失败，尝试直接返回原始字节")
+                        return dl_resp.content
+                    else:
+                        logger.error(f"[QQ] NapCat文件服务下载失败 HTTP{dl_resp.status_code}: {dl_resp.text[:200]}")
+                        logger.error("[QQ] 请确认 NapCat 配置中已启用 http.enableFile=true")
+                except Exception as dl_e:
+                    logger.error(f"[QQ] 通过NapCat文件服务下载异常: {dl_e}")
             # 有些版本直接返回 file 字段是本地路径，不可用
             logger.error(f"[QQ] get_record 返回无有效url: data={resp_data} 完整响应={raw_text[:200]}")
     except Exception as e:
