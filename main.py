@@ -1,3 +1,4 @@
+
 """
 主后端 v4.0 - 端口 8000
 对接人格后端 v11.0：session管理 / mode统一(single/group) / 限流处理 / 记忆直存 / 亲密度同步
@@ -13,12 +14,126 @@ from contextlib import asynccontextmanager
 from collections import deque
 import httpx
 from common.security import hash_password, verify_password
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Header
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main_server")
+
+# ============================================================
+# ConversationIntentDetector — 对话意图检测器
+# 当用户表达"不想聊了"等意图时，自动终止对话，防止 AI 强行延续话题
+# ============================================================
+class ConversationIntentDetector:
+    """
+    对话意图检测器：检测用户是否想结束对话。
+    两级强度：
+      - HIGH: 明确终止（"不聊了"、"晚安"、"别烦我"）→ 强制结束对话
+      - MEDIUM: 暗示终止（"有点困"、"想休息"、"改天聊"）→ 体贴建议休息
+    """
+    # 高置信度关键词（明确想结束）
+    HIGH_INTENT_KEYWORDS = [
+        "不聊了", "别聊了", "别说了", "别烦我", "别理我", "烦死了",
+        "晚安", "该睡了", "要睡了", "去睡了", "睡觉", "太晚了",
+        "不聊了", "再见", "拜拜", "走了", "滚", "闭嘴", "闭嘴吧",
+        "不想聊", "没空", "很忙", "在忙", "忙死了", "没心情",
+        "别跟我说话", "滚开", "滚蛋", "讨厌", "烦",
+    ]
+    # 中置信度关键词（暗示想结束）
+    MEDIUM_INTENT_KEYWORDS = [
+        "困了", "想睡", "想休息", "有点累", "累了", "好困",
+        "太困了", "犯困", "撑不住了", "改天聊", "下次聊",
+        "回头聊", "晚点聊", "有空再聊", "先不聊了", "先睡了",
+        "不早了", "太晚了", "该休息了", "想一个人待着",
+    ]
+
+    @classmethod
+    def detect(cls, user_message: str) -> Optional[Dict[str, Any]]:
+        """
+        检测用户消息的对话意图。
+        返回: {"intent": "end_conversation", "confidence": "high"/"medium", "keyword": "...", "goodbye_hint": "..."}
+        或 None（无终止意图）
+        """
+        msg = user_message.lower().strip()
+        if not msg:
+            return None
+
+        # 检查高置信度关键词
+        for kw in cls.HIGH_INTENT_KEYWORDS:
+            if kw in msg:
+                goodbye_hints = {
+                    "不聊了": "好吧，那就不聊了~ 你好好休息，晚安！",
+                    "别聊了": "嗯嗯，不聊了不聊了，你快去休息吧~",
+                    "别说了": "好好好，我不说了，你别生气嘛...",
+                    "别烦我": "对不起，我不打扰你了，你好好休息...",
+                    "别理我": "好...那我先不打扰你了，你开心点~",
+                    "烦死了": "别烦别烦，你好好休息，不烦你了~",
+                    "晚安": "晚安晚安！做个好梦，明天见~",
+                    "该睡了": "是有点晚了，你快去睡吧，晚安！",
+                    "要睡了": "好，快去睡吧，晚安晚安！",
+                    "去睡了": "好嘞，快去睡吧，明天聊~",
+                    "睡觉": "好好好，去睡觉去睡觉，晚安！",
+                    "太晚了": "确实太晚了，你快去休息吧，晚安！",
+                    "再见": "再见~ 随时来找你玩哦！",
+                    "拜拜": "拜拜拜！明天见~",
+                    "走了": "好嘞，路上小心，晚安！",
+                    "不想聊": "好吧好吧，那先不聊了，你休息吧~",
+                    "没空": "好，那你先忙，有空再聊~",
+                    "很忙": "好嘞不打扰你忙了，加油！",
+                    "在忙": "好，你先忙，忙完了再聊~",
+                    "没心情": "好，那先不聊了，你好好休息~",
+                    "不想聊了": "好，那先不聊了，你好好休息~",
+                }
+                hint = goodbye_hints.get(kw, f"好，那先不聊了，你好好休息~")
+                return {
+                    "intent": "end_conversation",
+                    "confidence": "high",
+                    "keyword": kw,
+                    "goodbye_hint": hint,
+                }
+
+        # 检查中置信度关键词
+        for kw in cls.MEDIUM_INTENT_KEYWORDS:
+            if kw in msg:
+                goodbye_hints = {
+                    "困了": "有点困了呀，快去睡吧，晚安~",
+                    "想睡": "想睡就去睡嘛，晚安晚安！",
+                    "想休息": "好，那你好好休息，不吵你了~",
+                    "有点累": "累了好好休息，晚安~",
+                    "累了": "辛苦啦，快去休息吧，晚安！",
+                    "好困": "困了就快去睡，晚安晚安！",
+                    "太困了": "太困了肯定撑不住了，快去睡吧！",
+                    "犯困": "犯困了就别硬撑了，快去睡吧~",
+                    "撑不住了": "好好好，不聊了不聊了，你快去休息！",
+                    "改天聊": "好嘞，改天聊，随时等你~",
+                    "下次聊": "好，下次聊，拜拜~",
+                    "回头聊": "好嘞回头聊，有空找你~",
+                    "晚点聊": "好，晚点聊，先休息吧~",
+                    "有空再聊": "好嘞有空再聊，晚安~",
+                    "先不聊了": "好，那先不聊了，你休息吧~",
+                    "先睡了": "好，先去睡吧，晚安！",
+                    "不早了": "确实不早了，你快去睡吧，晚安~",
+                    "太晚了": "是有点太晚了，快去休息吧，晚安！",
+                    "该休息了": "对，是该休息了，晚安晚安！",
+                    "想一个人待着": "好，那你一个人待会儿，不打扰你~",
+                }
+                hint = goodbye_hints.get(kw, "好，那先不聊了，你好好休息~")
+                return {
+                    "intent": "end_conversation",
+                    "confidence": "medium",
+                    "keyword": kw,
+                    "goodbye_hint": hint,
+                }
+
+        return None
+
+
+# 用户对话终止意图缓存：{user_id: timestamp}
+# 用户说"晚安"后 30 分钟内不再强行延续话题
+_intent_cache: Dict[str, float] = {}
+_INTENT_CACHE_TTL = 30 * 60  # 30分钟
+
 PERSONALITY_SERVER_URL = os.getenv("PERSONALITY_SERVER_URL", "http://127.0.0.1:8002")
 VECTOR_SERVER_URL = os.getenv("VECTOR_SERVER_URL", "http://127.0.0.1:8001")
 PROACTIVE_SERVER_URL = os.getenv("PROACTIVE_SERVER_URL", "http://127.0.0.1:8003")
@@ -251,6 +366,14 @@ class UserDB:
             }
             self._write(data)
         return True
+    def set_user_field(self, username, field, value):
+        """设置用户的任意字段（如 disabled），用户不存在时返回 False"""
+        data = self._read()
+        if username in data["users"]:
+            data["users"][username][field] = value
+            self._write(data)
+            return True
+        return False
 user_db = UserDB()
 
 async def _get_user_intimacy(user_id: str, role_id: str) -> int:
@@ -625,16 +748,19 @@ async def call_proactive_migrate(old_user_id, new_user_id):
     return False
 
 # -------------------------- v13.0: 话题延续引擎调用 --------------------------
-async def call_proactive_user_spoke(user_id, role_id):
+async def call_proactive_user_spoke(user_id, role_id, message=""):
     """用户发消息时调用：重置话题延续状态（取消待发的新话题和收尾）"""
     if _proactive_should_skip():
         return
     t0 = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
+            payload = {"user_id": user_id, "role_id": role_id}
+            if message:
+                payload["message"] = message
             resp = await client.post(
                 f"{PROACTIVE_SERVER_URL}/api/conversation/user_spoke",
-                json={"user_id": user_id, "role_id": role_id}, timeout=8.0)
+                json=payload, timeout=8.0)
             dur = time.perf_counter() - t0
             _log_port_timing("主动后端", "/api/conversation/user_spoke", dur, f"HTTP{resp.status_code}")
             if resp.status_code == 200:
@@ -734,7 +860,7 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
     _t.add_done_callback(background_tasks.discard)
     # v13.0: 单聊模式下，通知话题延续引擎用户发言了（重置状态）
     if mode == "single":
-        _ts = asyncio.create_task(call_proactive_user_spoke(identity, role_ids[0]))
+        _ts = asyncio.create_task(call_proactive_user_spoke(identity, role_ids[0], user_message))
         background_tasks.add(_ts)
         _ts.add_done_callback(background_tasks.discard)
     # 获取/创建 session
@@ -750,6 +876,33 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
     # 向量记忆检索
     memory_context = await call_vector_search(identity, user_message, role_id=mem_role_id)
     timer.mark("记忆检索")
+    # ========== 对话意图检测：用户想结束对话时，直接返回温暖告别，不调用 LLM ==========
+    intent_result = ConversationIntentDetector.detect(user_message)
+    if intent_result:
+        now = time.time()
+        _intent_cache[identity] = now
+        # 清除过期的缓存
+        expired = [uid for uid, ts in _intent_cache.items() if now - ts > _INTENT_CACHE_TTL]
+        for uid in expired:
+            del _intent_cache[uid]
+        goodbye_hint = intent_result["goodbye_hint"]
+        logger.info(f"[意图检测] user={identity} 触发终止意图: confidence={intent_result['confidence']} keyword={intent_result['keyword']} goodbye={goodbye_hint[:30]}")
+        # 如果是高置信度，直接返回告别，不调用 LLM
+        if intent_result["confidence"] == "high":
+            timer.mark("意图检测(高置信度)")
+            return {
+                "reply": goodbye_hint,
+                "role_ids": role_ids,
+                "mode": mode,
+                "intimacy": response_intimacy,
+                "session_id": session_id,
+                "used_llm_analysis": False,
+            }
+        # 中置信度：将 goodbye_hint 注入系统提示词，让 LLM 知道用户想结束对话
+        # 通过在 user_message 前追加提示，让 LLM 以角色性格方式温暖告别
+        enhanced_message = f"[系统提示：用户已经明确表达了想结束对话的意愿。请用符合角色性格的方式温暖地告别，不要强行延续话题，不要问新问题，不要提出新的聊天请求。简短、体贴、自然。]" + user_message
+    else:
+        enhanced_message = user_message
     # 人格引擎生成（最耗时：LLM调用）
     result = await call_personality_generate(
         role_ids=role_ids, user_message=user_message,
@@ -883,7 +1036,7 @@ async def process_voice_message(identity, audio_base64, role_ids=None, chat_hist
     _t.add_done_callback(background_tasks.discard)
     # v13.0: 单聊模式下，通知话题延续引擎用户发言了（重置状态）
     if mode == "single":
-        _ts = asyncio.create_task(call_proactive_user_spoke(identity, role_ids[0]))
+        _ts = asyncio.create_task(call_proactive_user_spoke(identity, role_ids[0], user_message))
         background_tasks.add(_ts)
         _ts.add_done_callback(background_tasks.discard)
     # 获取/创建 session
@@ -1273,7 +1426,8 @@ class SetIntimacyRequest(BaseModel):
     value: int  # 0-100
 
 @app.post("/api/admin/set_intimacy")
-async def admin_set_intimacy(req: SetIntimacyRequest, request: Request):
+async def admin_set_intimacy(req: SetIntimacyRequest, request: Request,
+                             x_internal_token: str = Header(None)):
     """P3 新增：管理员设置第一层亲密度（userdb.json 的基础好感度）。
     第二层亲密度（proactive_server 当下状态）在 admin 面板的心理状态编辑里设置。
     自拍判断时取两层平均值。
@@ -1570,14 +1724,30 @@ async def _call_personality_for_qq(
     """
     调用人格后端生成回复（供QQ私聊/群聊共用）。
     从现有 process_qq_message 中提取的核心逻辑。
+    注意：契约必须与人格后端 GenerateRequest 一致（role_ids/user_message），
+    否则 Pydantic 校验直接 422。
     """
     try:
+        # 对话意图检测：用户想结束对话时，直接返回温暖告别
+        qq_intent = ConversationIntentDetector.detect(message)
+        if qq_intent:
+            now = time.time()
+            _intent_cache[identity] = now
+            expired = [uid for uid, ts in _intent_cache.items() if now - ts > _INTENT_CACHE_TTL]
+            for uid in expired:
+                del _intent_cache[uid]
+            goodbye_hint = qq_intent["goodbye_hint"]
+            logger.info(f"[意图检测] user={identity}(QQ) 触发终止意图: confidence={qq_intent['confidence']} keyword={qq_intent['keyword']} goodbye={goodbye_hint[:30]}")
+            if qq_intent["confidence"] == "high":
+                return goodbye_hint
+            # 中置信度：注入提示词
+            message = f"[系统提示：用户已经明确表达了想结束对话的意愿。请用符合角色性格的方式温暖地告别，不要强行延续话题，不要问新问题，不要提出新的聊天请求。简短、体贴、自然。]" + message
         payload = {
-            "user_id": identity,
-            "role_id": role_id,
-            "message": message,
             "mode": mode,
-            "stream": False,
+            "role_ids": [role_id],
+            "user_message": message,
+            "chat_history": [],
+            "return_debug": False,
         }
         async with httpx.AsyncClient(timeout=60.0) as client:
             r = await client.post(
@@ -1983,13 +2153,6 @@ async def reset_password(request: Request):
         return {"success": True}
     return JSONResponse({"success": False, "error": "用户不存在"}, status_code=404)
 # -------------------------- 管理员接口 --------------------------
-@app.get("/api/admin/users")
-async def admin_get_users(request: Request):
-    token = request.headers.get("Authorization", "").replace("Bearer ", "")
-    user = user_db.authenticate_token(token)
-    if not user or not user["is_admin"]:
-        return JSONResponse({"error": "无权限"}, status_code=403)
-    return {"users": user_db.get_all_users()}
 @app.post("/api/admin/users")
 async def admin_create_user(request: Request):
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
@@ -2000,17 +2163,6 @@ async def admin_create_user(request: Request):
     if user_db.admin_create_user(body.get("username", ""), body.get("password", ""), body.get("nickname")):
         return {"success": True}
     return JSONResponse({"success": False, "error": "用户已存在"}, status_code=400)
-@app.post("/api/admin/users/{username}/intimacy")
-async def admin_set_intimacy(username: str, request: Request):
-    """保留兼容：旧版亲密度设置接口"""
-    token = request.headers.get("Authorization", "").replace("Bearer ", "")
-    admin = user_db.authenticate_token(token)
-    if not admin or not admin["is_admin"]:
-        return JSONResponse({"error": "无权限"}, status_code=403)
-    body = await request.json()
-    if user_db.admin_set_intimacy(username, body.get("role_id", ""), body.get("value", 30)):
-        return {"success": True}
-    return JSONResponse({"success": False, "error": "用户不存在"}, status_code=404)
 @app.get("/api/admin/users/{username}/psych")
 async def admin_get_user_psych(username: str, request: Request):
     """获取指定用户与所有角色的实时心理状态"""
@@ -2493,15 +2645,22 @@ app.mount("/pet", pet_app)
 # ============================================================
 
 def _require_admin(request: Request):
-    """验证管理员权限（简单实现：检查用户是否在管理员列表中）。"""
+    """验证管理员权限，兼容两种凭证：
+    1. 静态 ADMIN_TOKEN（admin.html 面板使用）
+    2. 管理员账号登录后的 base64 token（index.html 网页端使用）
+    """
     try:
         token = request.headers.get("Authorization", "").replace("Bearer ", "")
         if not token:
             return None, JSONResponse({"error": "unauthorized"}, status_code=401)
-        # 简单的token验证（实际应该用用户系统）
+        # 方式1：静态 ADMIN_TOKEN
         admin_token = os.getenv("ADMIN_TOKEN", "flexichrono_admin_2026")
-        if token == admin_token:
+        if hmac.compare_digest(token, admin_token):
             return {"username": "admin", "is_admin": True}, None
+        # 方式2：管理员账号的 base64 登录 token
+        user = user_db.authenticate_token(token)
+        if user and user.get("is_admin"):
+            return user, None
         return None, JSONResponse({"error": "forbidden"}, status_code=403)
     except Exception:
         return None, JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -2521,15 +2680,18 @@ async def admin_list_users(request: Request, page: int = 1, page_size: int = 50)
         start = (page - 1) * page_size
         end = start + page_size
         page_users = users[start:end]
-        # 简化用户信息（不返回密码哈希）
+        # 简化用户信息（不返回密码哈希）；同时包含 index.html（qq/is_admin）
+        # 与 admin.html（qq_bound/is_qq_tmp/disabled）两个前端需要的字段
         simplified = []
         for u in page_users:
             simplified.append({
                 "username": u.get("username"),
                 "nickname": u.get("nickname", ""),
+                "is_admin": u.get("is_admin", False),
+                "qq": u.get("qq"),
                 "created_at": u.get("created_at", ""),
                 "is_qq_tmp": u.get("is_qq_tmp", False),
-                "qq_bound": u.get("qq_bound", False),
+                "qq_bound": u.get("qq") is not None,
                 "intimacy": u.get("intimacy", {}),
                 "disabled": u.get("disabled", False),
             })

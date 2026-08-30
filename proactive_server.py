@@ -1,3 +1,4 @@
+
 """
 主动消息后端 v13.0 - 端口 8003
 对接人格后端 v11.0：动机引擎 / 内部事件生成 / 防骚扰策略 / 后台调度
@@ -26,6 +27,101 @@ logger = logging.getLogger("proactive_server")
 # ============================================================
 # 配置
 # ============================================================
+
+# ============================================================
+# ConversationIntentDetector — 对话意图检测器
+# 当用户表达"不想聊了"等意图时，阻止 AI 主动找话题
+# ============================================================
+class ConversationIntentDetector:
+    """
+    对话意图检测器：检测用户是否想结束对话。
+    用于主动消息层面拦截：当用户刚表示不想聊时，阻止 AI 主动推送消息。
+    """
+    # 高置信度关键词（明确想结束）
+    HIGH_INTENT_KEYWORDS = [
+        "不聊了", "别聊了", "别说了", "别烦我", "别理我", "烦死了",
+        "晚安", "该睡了", "要睡了", "去睡了", "睡觉", "太晚了",
+        "再见", "拜拜", "走了", "滚", "闭嘴", "闭嘴吧",
+        "不想聊", "没空", "很忙", "在忙", "忙死了", "没心情",
+        "别跟我说话", "滚开", "滚蛋", "讨厌", "烦",
+    ]
+    # 中置信度关键词（暗示想结束）
+    MEDIUM_INTENT_KEYWORDS = [
+        "困了", "想睡", "想休息", "有点累", "累了", "好困",
+        "太困了", "犯困", "撑不住了", "改天聊", "下次聊",
+        "回头聊", "晚点聊", "有空再聊", "先不聊了", "先睡了",
+        "不早了", "太晚了", "该休息了", "想一个人待着",
+    ]
+
+    @classmethod
+    def detect(cls, user_message: str) -> Optional[Dict[str, Any]]:
+        """
+        检测用户消息的对话意图。
+        返回: {"intent": "end_conversation", "confidence": "high"/"medium", "keyword": "..."}
+        或 None（无终止意图）
+        """
+        msg = user_message.lower().strip()
+        if not msg:
+            return None
+
+        # 检查高置信度关键词
+        for kw in cls.HIGH_INTENT_KEYWORDS:
+            if kw in msg:
+                return {
+                    "intent": "end_conversation",
+                    "confidence": "high",
+                    "keyword": kw,
+                }
+
+        # 检查中置信度关键词
+        for kw in cls.MEDIUM_INTENT_KEYWORDS:
+            if kw in msg:
+                return {
+                    "intent": "end_conversation",
+                    "confidence": "medium",
+                    "keyword": kw,
+                }
+
+        return None
+
+
+# 用户对话终止意图缓存：{user_id: timestamp}
+# 用户说"晚安"后 30 分钟内不再主动推送消息
+_intent_cache: Dict[str, float] = {}
+_INTENT_CACHE_TTL = 30 * 60  # 30分钟
+
+
+def _check_user_intent(user_id: str, user_message: str) -> bool:
+    """
+    检查用户是否有终止对话的意图。
+    如果检测到高置信度意图，记录到缓存中，返回 True 表示应阻止主动消息。
+    同时清理过期缓存。
+    """
+    intent = ConversationIntentDetector.detect(user_message)
+    if intent:
+        now = time.time()
+        _intent_cache[user_id] = now
+        # 清除过期缓存
+        expired = [uid for uid, ts in _intent_cache.items() if now - ts > _INTENT_CACHE_TTL]
+        for uid in expired:
+            del _intent_cache[uid]
+        logger.info(f"[意图检测] user={user_id} 触发终止意图: confidence={intent['confidence']} keyword={intent['keyword']}")
+        return True
+    return False
+
+
+def _is_intent_active(user_id: str) -> bool:
+    """检查用户是否最近表达了终止对话的意图（缓存是否有效）"""
+    now = time.time()
+    if user_id in _intent_cache:
+        if now - _intent_cache[user_id] <= _INTENT_CACHE_TTL:
+            return True
+        else:
+            # 过期，清除
+            del _intent_cache[user_id]
+    return False
+
+
 PORT = int(os.getenv("PROACTIVE_PORT", "8003"))
 PERSONALITY_SERVER_URL = os.getenv("PERSONALITY_SERVER_URL", "http://127.0.0.1:8002")
 VECTOR_SERVER_URL = os.getenv("VECTOR_SERVER_URL", "http://127.0.0.1:8001")
@@ -965,6 +1061,11 @@ class ProactiveScheduler:
                 if idle_hours < 3:
                     continue
 
+                # ========== 对话意图拦截：用户刚表示不想聊，阻止主动推送 ==========
+                if _is_intent_active(user_id):
+                    logger.info(f"[意图拦截] 用户 {user_id} 最近表达了终止意图，跳过主动消息")
+                    continue
+
                 # v13.0: 从数据库读取 session_id，透传给 LongingEngine 拉取真实欲望状态
                 session_id = row["session_id"] if "session_id" in row.keys() else ""
 
@@ -1239,6 +1340,11 @@ class TopicResumer:
                         if not ok:
                             logger.debug(f"[TopicResumer] 跳过话题延续 {user_id}/{role_id}: {reason}")
                             continue
+
+                        # 对话意图拦截：用户最近表达了终止意图，不发起话题延续
+                        if _is_intent_active(user_id):
+                            logger.info(f"[意图拦截] 用户 {user_id} 最近表达了终止意图，跳过话题延续")
+                            continue
                         content = await self._generate_topic_continue(
                             role_id, row["recent_messages"] or "[]", intimacy, mood)
                         if content:
@@ -1423,6 +1529,10 @@ async def on_user_spoke(req: UserSpokeReport):
             (now_ts, req.user_id, req.role_id)
         )
         conn.commit()
+        # 检测用户是否有终止对话意图（防止 AI 继续主动找话题）
+        if req.message:
+            if _check_user_intent(req.user_id, req.message):
+                logger.info(f"[意图检测] 用户 {req.user_id} 触发终止意图，将阻止后续主动消息")
         return {"success": True}
     finally:
         conn.close()
@@ -1515,6 +1625,10 @@ async def mark_delivered(req: MarkDeliveredRequest):
     try:
         conn.execute("UPDATE proactive_messages SET delivered=1 WHERE id=?", (req.message_id,))
         conn.commit()
+        # 检测用户是否有终止对话意图（防止 AI 继续主动找话题）
+        if req.message:
+            if _check_user_intent(req.user_id, req.message):
+                logger.info(f"[意图检测] 用户 {req.user_id} 触发终止意图，将阻止后续主动消息")
         return {"success": True}
     finally:
         conn.close()
