@@ -17,6 +17,9 @@ import httpx
 from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
+# Import all config constants from core.config (RATE_LIMIT_PER_MINUTE, ROLE_CONCURRENCY_LOCK, PORT, CORS_ORIGINS, KIMI_API_KEY, etc.)
+# Required after module split from personality_server.py, otherwise NameError at module load time
+from core.config import *
 
 logger = logging.getLogger("core")
 

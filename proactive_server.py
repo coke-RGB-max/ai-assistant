@@ -1638,6 +1638,7 @@ class UserSpokeReport(BaseModel):
     """用户发消息时上报：重置话题延续状态"""
     user_id: str
     role_id: str
+    message: Optional[str] = None  # 用户消息文本，用于终止对话意图检测（晚安/不聊了等）
 
 # ---------- 接口 ----------
 @app.get("/health")

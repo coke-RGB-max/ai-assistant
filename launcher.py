@@ -537,16 +537,30 @@ ENV_PATH = SCRIPT_DIR / ".env"
 SKIP_SETUP = "--no-setup" in sys.argv
 FORCE_SETUP = "--setup" in sys.argv
 
+# 检测是否为交互终端（Railway / Docker / CI 等非交互环境 stdin 不是 tty）
+IS_INTERACTIVE = sys.stdin.isatty()
+
 # 如果强制设置，或者 .env 不存在且没有跳过设置，则运行向导
 if FORCE_SETUP or (not ENV_PATH.exists() and not SKIP_SETUP):
-    try:
-        success = run_setup_wizard(ENV_PATH)
-        if not success:
-            print("  配置未完成，退出。")
-            sys.exit(1)
-    except KeyboardInterrupt:
-        print("\n  已取消配置。")
-        sys.exit(0)
+    # 非交互环境自动跳过向导，防止 input() 抛出 EOFError 导致容器崩溃重启
+    if not IS_INTERACTIVE and not FORCE_SETUP:
+        print("=" * 60)
+        print("  WARNING: Non-interactive environment detected (Railway/Docker/CI)")
+        print("  Skipping setup wizard automatically.")
+        print("  Configure all parameters via environment variables:")
+        print("    DOUBAO_API_KEY, DOUBAO_MODEL, INTERNAL_TOKEN, ADMIN_DEFAULT_PASSWORD")
+        print("  DATA_DIR should point to a persistent volume (e.g. /data)")
+        print("  For interactive setup, run locally: python3 launcher.py --setup")
+        print("=" * 60)
+    else:
+        try:
+            success = run_setup_wizard(ENV_PATH)
+            if not success:
+                print("  配置未完成，退出。")
+                sys.exit(1)
+        except KeyboardInterrupt:
+            print("\n  已取消配置。")
+            sys.exit(0)
 
 # 加载 .env（向导生成后或已存在）
 load_dotenv(ENV_PATH)
