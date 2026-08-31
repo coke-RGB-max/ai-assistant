@@ -1060,6 +1060,16 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         const bubble = document.createElement("div");
         bubble.className = "bubble";
         bubble.textContent = msg.content || "";
+        // P4: 支持图片消息（自拍/照片生成）
+        if (msg.imageUrl) {
+          const img = document.createElement("img");
+          img.src = msg.imageUrl;
+          img.alt = "角色照片";
+          img.loading = "lazy";
+          img.style.cssText = "max-width:100%;border-radius:10px;margin-top:8px;display:block;cursor:pointer;";
+          img.addEventListener("click", () => window.open(msg.imageUrl, "_blank"));
+          bubble.appendChild(img);
+        }
         row.appendChild(bubble);
         box.appendChild(row);
         msg._element = bubble;
@@ -1073,6 +1083,15 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       appendMessageToDOM(aiMsg, conv);
       renderConversationList();
       await typeWriter(aiMsg._element, content);
+    }
+
+    // ===== P4: 图片消息（自拍/照片生成）=====
+    function appendImageMessage(conv, imageUrl, text, roleId) {
+      const aiMsg = createMessage("ai", text || "");
+      aiMsg.imageUrl = imageUrl;
+      conv.messages.push(aiMsg);
+      appendMessageToDOM(aiMsg, conv);
+      renderConversationList();
     }
 
     function scrollToBottom() {
@@ -1126,6 +1145,39 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       appendMessageToDOM(userMsg, conv);
       renderConversationList();
       input.value = "";
+
+      // ===== P4: 自拍/照片请求自动检测 =====
+      const roleId = conv.roleId || (conv.roleIds && conv.roleIds[0]);
+      const intimacy = conv.intimacy || (currentUser && currentUser.intimacy && currentUser.intimacy[roleId]) || 50;
+      try {
+        const selfieResp = await fetch(`${CONFIG.HTTP_BASE}/api/image/selfie_from_message`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            user_id: currentUser ? currentUser.username : "guest",
+            role_id: roleId,
+            message: content,
+            intimacy: intimacy,
+            psych_states: null,
+          }),
+        });
+        const selfieData = await selfieResp.json();
+        if (selfieData.is_selfie_request) {
+          addTypingIndicator();
+          if (selfieData.allowed && selfieData.image_url) {
+            removeTypingIndicator();
+            appendImageMessage(conv, selfieData.image_url, selfieData.message || "", roleId);
+          } else {
+            removeTypingIndicator();
+            const rejectText = selfieData.message || "现在不太方便拍照呢，下次吧～";
+            appendAIMessage(conv, rejectText, roleId);
+          }
+          return;
+        }
+      } catch (e) {
+        console.warn("[自拍检测] 接口调用失败，正常发送消息:", e);
+      }
+
       if (sendWS({ action: "chat", message: content, role_ids: conv.roleIds || [conv.roleId] })) {
         addTypingIndicator();
         return;

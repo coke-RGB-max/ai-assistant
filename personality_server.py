@@ -257,8 +257,9 @@ def get_role_definition(role_id: str) -> dict:
 
 def reload_role_definitions() -> dict:
     """热重载角色配置（管理员调用）。"""
-    global ROLES_DEFINITION
+    global ROLES_DEFINITION, _PERSONA_CACHE
     ROLES_DEFINITION = _reload_roles()
+    _PERSONA_CACHE.clear()
     return ROLES_DEFINITION
 
 EVENT_CATEGORY = {
@@ -301,8 +302,16 @@ VIRTUAL_GIFTS = {
 # v8.1: 固定人格Prompt缓存
 # ============================================================
 _PERSONA_CACHE: Dict[str, str] = {}
+def _resolve_stage_key(intimacy):
+    """五段关系阶段划分，与全局关系阶段口径一致。"""
+    if intimacy <= 30: return "0-30"
+    if intimacy <= 50: return "31-50"
+    if intimacy <= 70: return "51-70"
+    if intimacy <= 85: return "71-85"
+    return "86-100"
+
 def get_cached_persona(rid, intimacy):
-    stage_key = "0-50" if intimacy<=50 else ("51-80" if intimacy<=80 else "81-100")
+    stage_key = _resolve_stage_key(intimacy)
     cache_key = f"{rid}:{stage_key}"
     if cache_key in _PERSONA_CACHE:
         return _PERSONA_CACHE[cache_key]
@@ -310,15 +319,136 @@ def get_cached_persona(rid, intimacy):
     if not role: return ""
     parts = [
         f"你是{role['name']}，{role['age']}{role['gender']}生。{role['description']}",
-        role["intimacy_prompts"][stage_key],
-        f"核心特质：{'、'.join(role.get('core_traits',[]))}",
-        f"你看重：{'、'.join(role.get('values',[]))}",
     ]
+    # === 关系定位（核心）===
+    rel = role.get("relationship", {})
+    if rel:
+        rel_type = rel.get("type", "")
+        if rel_type:
+            parts.append(f"【你与对方的关系】{rel_type}")
+        core_dynamic = rel.get("core_dynamic", "")
+        if core_dynamic:
+            parts.append(f"【关系基调】{core_dynamic}")
+        stage_info = rel.get("stages", {}).get(stage_key, {})
+        if stage_info:
+            label = stage_info.get("label", "")
+            distance = stage_info.get("distance", "")
+            behavior = stage_info.get("behavior", "")
+            if label:
+                parts.append(f"【当前关系阶段】{label}（亲密度{intimacy}/100）")
+            if distance:
+                parts.append(f"【你们之间的距离感】{distance}")
+            if behavior:
+                parts.append(f"【你在这个阶段的行为边界】{behavior}")
+        hard_boundaries = rel.get("hard_boundaries", [])
+        if hard_boundaries:
+            parts.append(f"【关系红线（任何阶段都不可逾越）】{'；'.join(hard_boundaries)}")
+    else:
+        # 兼容旧的三段式 intimacy_prompts（未配置 relationship 字段时回退）
+        old_key = "0-50" if intimacy<=50 else ("51-80" if intimacy<=80 else "81-100")
+        old_prompt = role.get("intimacy_prompts", {}).get(old_key, "")
+        if old_prompt:
+            parts.append(old_prompt)
+    # === 依恋类型 ===
+    att = role.get("attachment_type", "")
+    if att:
+        parts.append(f"【依恋类型】{att}")
+    # === 核心信念 ===
+    beliefs = role.get("core_beliefs", [])
+    if beliefs:
+        parts.append(f"【核心信念】{'；'.join(beliefs)}")
+    # === 当前表达能力阶段 ===
+    expr_stage = role.get("expression_stage", "")
+    if expr_stage:
+        parts.append(f"【当前表达能力】{expr_stage}")
+    # === 秘密揭露阶段（兼容不同角色的字段名：画室/故事集/树洞）===
+    secret_stage = (role.get("studio_reveal_stage") or role.get("story_reveal_stage") 
+                    or role.get("blog_reveal_stage") or "")
+    if secret_stage:
+        parts.append(f"【秘密阶段】{secret_stage}")
+    # === 软肋（特定场景下的反差破防点）===
+    soft = role.get("soft_spots", [])
+    if soft:
+        soft_lines = []
+        for i, s in enumerate(soft, 1):
+            t = s.get("trigger", "")
+            r = s.get("reaction", "")
+            if t and r:
+                soft_lines.append(f"{i}. 触发：{t} → 反应：{r}")
+        if soft_lines:
+            parts.append("【软肋（遇到这些场景会破防）】\n" + "\n".join(soft_lines))
+    # === 激怒/触动点 ===
+    hb = role.get("hot_buttons", {})
+    if hb:
+        anger = hb.get("anger", [])
+        if anger:
+            anger_lines = []
+            for i, a in enumerate(anger, 1):
+                t = a.get("trigger", "")
+                r = a.get("reaction", "")
+                if t and r:
+                    anger_lines.append(f"{i}. 触发：{t} → 反应：{r}")
+            if anger_lines:
+                parts.append("【激怒点（遇到这些会生气/冷脸）】\n" + "\n".join(anger_lines))
+        touch = hb.get("touch", [])
+        if touch:
+            touch_lines = []
+            for i, t in enumerate(touch, 1):
+                trig = t.get("trigger", "")
+                reac = t.get("reaction", "")
+                if trig and reac:
+                    touch_lines.append(f"{i}. 触发：{trig} → 反应：{reac}")
+            if touch_lines:
+                parts.append("【正面触动点（遇到这些会感动/破防）】\n" + "\n".join(touch_lines))
+    # === 行为模式（默认反应）===
+    bp = role.get("behavior_patterns", {})
+    if bp:
+        bp_lines = []
+        for key, label in [("injured", "受伤时"), ("praised", "被夸奖时"), ("rejected", "被拒绝时"), ("needed", "被需要时")]:
+            val = bp.get(key, "")
+            if val:
+                bp_lines.append(f"{label}：{val}")
+        if bp_lines:
+            parts.append("【行为模式（默认反应）】\n" + "\n".join(bp_lines))
+    # === 人格基础 ===
+    parts.append(f"核心特质：{'、'.join(role.get('core_traits',[]))}")
+    parts.append(f"你看重：{'、'.join(role.get('values',[]))}")
     tb = role.get("taboos", [])
     if tb: parts.append(f"逆鳞：{'、'.join(tb)}——触碰时你会明显不悦")
     result = "\n".join(parts)
     _PERSONA_CACHE[cache_key] = result
     return result
+
+# ============================================================
+# v13.0: 触发式记忆（对话涉及特定话题时动态注入背景片段）
+# ============================================================
+def get_triggered_memories(role_id: str, user_message: str) -> str:
+    """
+    扫描用户消息，命中角色 YAML 中 triggered_memories 的 trigger 关键词时，
+    返回对应的背景记忆片段，用于动态追加到 system prompt。
+    未命中任何 trigger 时返回空字符串。
+    """
+    role = ROLES_DEFINITION.get(role_id, {})
+    if not role:
+        return ""
+    memories = role.get("triggered_memories", [])
+    if not memories:
+        return ""
+    msg_lower = user_message.lower()
+    hit_contents = []
+    for mem in memories:
+        triggers = mem.get("trigger", [])
+        content = mem.get("content", "")
+        if not triggers or not content:
+            continue
+        # 任意一个 trigger 关键词出现在用户消息中即命中
+        for trig in triggers:
+            if trig.lower() in msg_lower:
+                hit_contents.append(content)
+                break  # 同一条记忆只加一次
+    if not hit_contents:
+        return ""
+    return "【相关背景记忆】\n" + "\n".join(f"- {c}" for c in hit_contents)
 
 # ============================================================
 # CorePersonality
@@ -3075,6 +3205,11 @@ class PersonalityEngine:
             growth_text, scene_text, gift_text, knowledge_text,
             alter_text, intent_text,
         ] if s]
+
+        # v13.0: 触发式记忆——扫描用户消息，命中关键词则动态注入相关背景片段
+        triggered_mem = get_triggered_memories(rid, msg)
+        if triggered_mem:
+            core_text = core_text + "\n\n" + triggered_mem
 
         system_prompt = PromptBuilder.build(
             identity, core_text, psych_text, rel_text, mem_text, stim_text,

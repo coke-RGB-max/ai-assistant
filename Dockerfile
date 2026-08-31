@@ -27,9 +27,21 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 复制所有后端代码（P0改造：必须包含子目录，不能只用 COPY *.py）
 COPY *.py ./
 COPY index.html ./
+COPY admin.html ./
 COPY characters/ ./characters/
 COPY common/ ./common/
 COPY core/ ./core/
+# P4 模块拆分 + 插件系统：以下目录不存在时会自动降级，不影响核心功能
+COPY plugins/ ./plugins/
+COPY api/ ./api/
+COPY emotion/ ./emotion/
+COPY psych/ ./psych/
+COPY memory/ ./memory/
+COPY knowledge/ ./knowledge/
+COPY group/ ./group/
+COPY quality/ ./quality/
+COPY topic/ ./topic/
+COPY scene/ ./scene/
 
 # 数据目录（SQLite / userdb.json 持久化挂载点）
 RUN mkdir -p /data
