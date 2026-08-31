@@ -244,6 +244,10 @@ import sys as _sys
 import os as _os
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from characters.loader import load_all_roles, get_role as _get_role, reload_roles as _reload_roles
+from dynamic_conversation import DynamicConversationEngine
+
+# 动态对话引擎全局单例（剧情状态需要在多次对话间保持）
+_DYNAMIC_ENGINE = DynamicConversationEngine()
 
 # 启动时加载所有角色配置
 _roles_data = load_all_roles()
@@ -3205,6 +3209,20 @@ class PersonalityEngine:
             growth_text, scene_text, gift_text, knowledge_text,
             alter_text, intent_text,
         ] if s]
+
+        # v14.0: 动态对话引擎——主动性/情绪记忆/节奏控制/剧情推进
+        dynamic_ctx = await _DYNAMIC_ENGINE.generate(
+            role_id=rid,
+            role_config=ROLES_DEFINITION.get(rid, {}),
+            user_message=msg,
+            conversation_history=history,
+            affection=new_intimacy,
+            emotion=emotion.value,
+            memories=memories,
+            user_id=self.session_id or "default",
+        )
+        if dynamic_ctx:
+            extra_sections.append(dynamic_ctx)
 
         # v13.0: 触发式记忆——扫描用户消息，命中关键词则动态注入相关背景片段
         triggered_mem = get_triggered_memories(rid, msg)

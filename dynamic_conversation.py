@@ -17,6 +17,9 @@ dynamic_conversation.py — 动态对话引擎
 
 import random
 import re
+import os
+import json
+import httpx
 from typing import Optional
 
 
@@ -26,19 +29,34 @@ from typing import Optional
 class InitiativeDecider:
     """决定角色是否主动以及主动什么。
 
+    决策流程：简单规则粗筛 → LLM 分析聊天语境做最终决策 → 失败时降级到规则+概率。
     主动性程度随好感度增长，但不同角色的主动方式不同（由 YAML 配置）。
+    复用 PROACTIVE_LLM_* 环境变量调用外接模型。
     """
 
     # 通用主动类型（角色可以在 YAML 中启用/禁用某些类型）
     INITIATIVE_TYPES = {
         "follow_up": "主动追问：问他一个关于他自己的问题，比如他最近在忙什么、今天过得怎么样、那件事后来怎么样了",
-        "change_topic": "转移话题：不说当前这个话题了，主动提起一件你今天遇到的事、一个你看到的东西、或者一个你突然想到的问题",
+        "change_topic": "转移话题：如果当前话题不合适或快结束了，主动提起一件你今天遇到的事、一个你看到的东西、或者一个你突然想到的问题",
         "reverse": "反客为主：突然抛出一个你自己的问题或感受，让他来回应你、安慰你、或者了解你",
     }
 
-    def decide(self, dynamic_config: dict, user_message: str,
-               conversation_history: list, affection: int) -> Optional[str]:
-        """生成主动性指令文本，不需要主动时返回 None。"""
+    def __init__(self):
+        # 复用 proactive_server 的 LLM 配置
+        self.api_key = os.getenv("PROACTIVE_LLM_API_KEY", "")
+        self.base_url = os.getenv("PROACTIVE_LLM_BASE_URL", "https://api.deepseek.com/v1")
+        self.model = os.getenv("PROACTIVE_LLM_MODEL", "deepseek-chat")
+        self.timeout = float(os.getenv("PROACTIVE_LLM_TIMEOUT", "15"))
+
+    async def decide(self, dynamic_config: dict, user_message: str,
+                     conversation_history: list, affection: int) -> Optional[str]:
+        """生成主动性指令文本，不需要主动时返回 None。
+
+        决策流程：
+        1. 简单规则粗筛（配置检查、明显不适合主动的情况）
+        2. 有 API key 时调用 LLM 分析语境做最终决策
+        3. 没有 API key 或 LLM 调用失败时降级到规则+概率
+        """
         initiative_cfg = dynamic_config.get("initiative", {})
         if not initiative_cfg.get("enabled", True):
             return None
@@ -47,26 +65,162 @@ class InitiativeDecider:
         if not style:
             return None
 
-        # 计算主动性程度（0-1）
+        # 粗筛：用户刚问了一个明显需要回答的问题，先回答问题，不主动
+        if self._is_question_needs_answer(user_message):
+            return None
+
+        # 有 API key 时用 LLM 决策
+        if self.api_key:
+            try:
+                result = await self._llm_decide(initiative_cfg, style, user_message,
+                                                  conversation_history, affection)
+                if result is not None:
+                    return result
+            except Exception:
+                pass  # LLM 调用失败，降级
+
+        # 降级：规则+概率（原来的实现）
+        return self._fallback_decide(initiative_cfg, style, user_message, affection)
+
+    def _is_question_needs_answer(self, user_message: str) -> bool:
+        """粗筛：判断用户消息是否是一个明显需要回答的问题。"""
+        msg = user_message.strip()
+        if not msg:
+            return False
+        # 以问号结尾
+        if msg.endswith("？") or msg.endswith("?"):
+            return True
+        # 包含明显的疑问词
+        question_words = ["为什么", "怎么", "什么", "哪", "谁", "吗", "呢", "是不是", "能不能", "可不可以", "要不要"]
+        for w in question_words:
+            if w in msg and len(msg) < 30:
+                return True
+        return False
+
+    async def _llm_decide(self, initiative_cfg: dict, style: str,
+                           user_message: str, conversation_history: list,
+                           affection: int) -> Optional[str]:
+        """调用 LLM 分析聊天语境，决定是否主动以及怎么主动。"""
+        level = self._calc_level(affection, initiative_cfg)
+        enabled_types = initiative_cfg.get("types", ["follow_up", "change_topic", "reverse"])
+
+        system_prompt = f"""你是一个对话主动性分析器。根据聊天语境和角色性格，判断角色是否应该主动说话，以及用什么方式主动。
+
+角色的主动风格：
+{style}
+
+角色当前好感度：{affection}/100（主动性倾向：{level:.2f}，0=完全被动，1=非常主动）
+
+可选的主动方式：
+- follow_up（主动追问）：问他一个关于他自己的问题
+- change_topic（转移话题）：如果当前话题不合适或快结束了，主动提起新话题
+- reverse（反客为主）：抛出你自己的问题或感受，让他来回应你
+
+你需要输出 JSON 格式：
+{{"should_initiate": true/false, "type": "follow_up/change_topic/reverse/none", "reason": "简短原因"}}
+
+判断规则：
+- 如果用户刚问了一个需要回答的问题，先回答问题，不要主动
+- 如果用户消息很短很敷衍（"哦""嗯""好"），可以主动
+- 如果当前话题很严肃或用户情绪不好，不要转移话题
+- 如果对话已经很流畅，不需要主动
+- 主动方式要符合角色性格和当前关系程度
+- 不要每次都主动，自然一点
+"""
+
+        # 构造最近对话历史
+        recent_history = conversation_history[-6:] if conversation_history else []
+        history_text = ""
+        for msg in recent_history:
+            if isinstance(msg, dict):
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+            else:
+                role = "user"
+                content = str(msg)
+            if role == "user":
+                history_text += f"他说：{content}\n"
+            else:
+                history_text += f"你说：{content}\n"
+
+        user_prompt = f"""最近的对话：
+{history_text}
+
+他刚才说：{user_message}
+
+请分析当前语境，决定你是否应该主动说话。只输出 JSON。"""
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await client.post(
+                f"{self.base_url.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 200,
+                },
+            )
+            if resp.status_code != 200:
+                return None
+
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"].strip()
+
+            # 解析 JSON
+            try:
+                result = json.loads(content)
+            except json.JSONDecodeError:
+                match = re.search(r'\{.*\}', content, re.DOTALL)
+                if match:
+                    try:
+                        result = json.loads(match.group())
+                    except json.JSONDecodeError:
+                        return None
+                else:
+                    return None
+
+            if not result.get("should_initiate", False):
+                return None
+
+            init_type = result.get("type", "none")
+            if init_type == "none" or init_type not in enabled_types:
+                return None
+
+            type_desc = self.INITIATIVE_TYPES.get(init_type, self.INITIATIVE_TYPES["follow_up"])
+            reason = result.get("reason", "")
+
+            return (
+                f"【主动性指令】\n"
+                f"{style}\n\n"
+                f"根据当前聊天语境，你可以{type_desc}。\n"
+                f"原因：{reason}\n\n"
+                f"注意：先回应他刚才说的话，再自然地过渡到主动。不要太刻意。"
+            )
+
+    def _fallback_decide(self, initiative_cfg: dict, style: str,
+                          user_message: str, affection: int) -> Optional[str]:
+        """降级方案：规则+概率（原来的实现）。"""
         level = self._calc_level(affection, initiative_cfg)
         if level < 0.15:
             return None
 
-        # 判断是否应该主动
-        if not self._should_initiate(user_message, conversation_history, level):
+        if not self._should_initiate(user_message, level):
             return None
 
-        # 选择主动类型
         enabled_types = initiative_cfg.get("types", ["follow_up", "change_topic", "reverse"])
         if level < 0.35:
-            # 低主动性：只敢小心翼翼追问
             chosen_type = "follow_up" if "follow_up" in enabled_types else None
         elif level < 0.65:
-            # 中主动性：可以追问或转移话题
             pool = [t for t in ["follow_up", "change_topic"] if t in enabled_types]
             chosen_type = random.choice(pool) if pool else None
         else:
-            # 高主动性：三种都可以
             pool = [t for t in enabled_types if t in self.INITIATIVE_TYPES]
             chosen_type = random.choice(pool) if pool else None
 
@@ -83,16 +237,13 @@ class InitiativeDecider:
 
     def _calc_level(self, affection: int, cfg: dict) -> float:
         """根据好感度计算主动性程度。"""
-        # 基础曲线：好感度越高越主动
         base = min(affection / 100.0, 1.0)
-        # 角色可以调整主动性系数（比如害羞的角色系数低，外向的角色系数高）
         multiplier = cfg.get("multiplier", 1.0)
         return min(base * multiplier, 1.0)
 
-    def _should_initiate(self, user_message: str, history: list, level: float) -> bool:
-        """判断本次是否应该主动。"""
+    def _should_initiate(self, user_message: str, level: float) -> bool:
+        """判断本次是否应该主动（降级方案用）。"""
         msg = user_message.strip()
-        # 用户消息越短/越敷衍，越可能主动
         if len(msg) < 4:
             base_prob = 0.55
         elif len(msg) < 12:
@@ -101,8 +252,6 @@ class InitiativeDecider:
             base_prob = 0.20
         else:
             base_prob = 0.10
-
-        # 结合主动性程度
         prob = base_prob * (0.5 + level)
         return random.random() < min(prob, 0.65)
 
@@ -359,10 +508,10 @@ class DynamicConversationEngine:
         self.rhythm = RhythmController()
         self.plot = PlotEngine()
 
-    def generate(self, role_id: str, role_config: dict,
-                 user_message: str, conversation_history: list,
-                 affection: int, emotion: str = "neutral",
-                 memories: list = None, user_id: str = "default") -> str:
+    async def generate(self, role_id: str, role_config: dict,
+                       user_message: str, conversation_history: list,
+                       affection: int, emotion: str = "neutral",
+                       memories: list = None, user_id: str = "default") -> str:
         """生成动态对话上下文，注入到 system prompt 中。
 
         Args:
@@ -384,8 +533,8 @@ class DynamicConversationEngine:
 
         parts = []
 
-        # 1. 主动性
-        initiative_text = self.initiative.decide(
+        # 1. 主动性（LLM 分析语境决策，异步调用）
+        initiative_text = await self.initiative.decide(
             dynamic_config, user_message, conversation_history, affection)
         if initiative_text:
             parts.append(initiative_text)
