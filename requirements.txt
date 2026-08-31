@@ -1,20 +1,27 @@
-# FlexiChrono Backend Python Dependencies
-# P0: pyyaml (character config), bcrypt (password hashing)
-# Web Framework
+# ============================================================
+# FlexiChrono P4 - Python Dependencies
+# 适用于 Railway / Docker / 本地部署
+# Python >= 3.10 推荐（代码使用了 match/case 等新语法需 3.10+）
+# ============================================================
+
+# ---- Web 框架与 ASGI 服务器 ----
 fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-python-multipart>=0.0.6
-# HTTP Client (internal services + external APIs)
+uvicorn[standard]>=0.24.0          # [standard] 含 uvloop/httptools 性能优化；Railway 上可用
+python-multipart>=0.0.6            # FastAPI UploadFile/File 表单文件上传必需（语音消息/图片上传）
+
+# ---- HTTP 客户端（内部服务间调用 + 外部 LLM/API 请求）----
 httpx>=0.25.0
-# Data Validation
-pydantic>=2.0.0
-# P0: YAML config loader for characters/*.yaml
-pyyaml>=6.0
-# P0: bcrypt password hashing for UserDB
-bcrypt>=4.0
-# TTS (edge-tts free Microsoft TTS)
-edge-tts>=6.1.0
-# Async HTTP (edge-tts dependency, explicit for version compat)
-aiohttp>=3.9.0
-# Chinese tokenizer (optional, MemoryDecaySystem, auto-fallback to 2-gram if missing)
-jieba>=0.42.1
+
+# ---- 数据验证 ----
+pydantic>=2.0.0                    # 代码使用了 pydantic v2 语法（field_validator 等），不可降级到 v1
+
+# ---- 配置与安全 ----
+pyyaml>=6.0                         # characters/*.yaml 角色配置加载 + image_generator 提示词模板
+bcrypt>=4.0                         # 管理员密码哈希；4.x 有预编译 wheel，Railway 构建无需 Rust 工具链
+
+# ---- TTS 语音合成 ----
+edge-tts>=6.1.0                     # 微软免费 TTS，默认引擎；函数内延迟导入
+aiohttp>=3.9.0                       # edge-tts 底层依赖，显式锁定避免传递依赖版本漂移
+
+# ---- 中文分词（可选，缺失时自动降级为 2-gram）----
+jieba>=0.42.1                        # personality_server 记忆衰减系统中文分词；try/except 延迟导入

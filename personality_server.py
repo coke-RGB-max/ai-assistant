@@ -28,6 +28,16 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+# P4 序号5：插件系统导入
+try:
+    from plugins import init_plugins, get_plugin_manager
+    PLUGINS_AVAILABLE = True
+except ImportError as e:
+    PLUGINS_AVAILABLE = False
+    init_plugins = None
+    get_plugin_manager = None
+    logging.getLogger("personality_server").warning(f"插件系统导入失败: {e}，插件功能将不可用")
+
 # 可选依赖：jieba 中文分词（MemoryDecaySystem._is_correction 使用，未安装则降级到2-gram）
 try:
     import jieba
@@ -51,6 +61,27 @@ from core.utils import *
 # LLM 调用（已迁移到 core/llm.py）
 # ============================================================
 from core.llm import *
+
+# P4 序号1：人格服务器业务类拆分 —— 模块导入（可选，原类定义保留以保证向后兼容）
+# 类已按功能拆分到 emotion/psych/memory/knowledge/group/quality/topic/scene/core/api 模块
+# 外部代码可选择从模块导入：from emotion import EmotionEngine
+# 此处尝试导入模块，失败则使用本文件中的原类定义（不影响功能）
+try:
+    from emotion import *  # noqa: F401,F403
+    from psych import *  # noqa: F401,F403
+    from memory import *  # noqa: F401,F403
+    from knowledge import *  # noqa: F401,F403
+    from group import *  # noqa: F401,F403
+    from quality import *  # noqa: F401,F403
+    from topic import *  # noqa: F401,F403
+    from scene import *  # noqa: F401,F403
+    from core import *  # noqa: F401,F403
+    from api.models import *  # noqa: F401,F403
+    MODULE_SPLIT_ENABLED = True
+except Exception as _module_split_error:
+    MODULE_SPLIT_ENABLED = False
+    logging.getLogger("personality_server").warning(f"模块拆分导入失败，使用内联类定义: {_module_split_error}")
+
 # SQLite Session 持久化
 # ============================================================
 def _get_db():
@@ -3143,7 +3174,14 @@ async def lifespan(app):
     global _memory_decay_task
     init_db()
     _memory_decay_task = asyncio.create_task(memory_decay_worker())
-    logger.info(f"🧠 人格引擎 v11.0 启动 - 端口 {PORT} | CORS={CORS_ORIGINS} | 知识路由={'开' if KNOWLEDGE_ROUTER_ENABLED else '关'} | Kimi={'已配置' if KIMI_API_KEY else '未配置'} | 记忆衰减={MEMORY_DECAY_INTERVAL_HOURS}h")
+    # P4 序号5：初始化插件系统
+    if PLUGINS_AVAILABLE and init_plugins:
+        try:
+            plugin_count = init_plugins()
+            logger.info(f"🧩 插件系统已启动，加载了 {plugin_count} 个插件")
+        except Exception as e:
+            logger.warning(f"🧩 插件系统初始化失败: {e}，插件功能将不可用")
+    logger.info(f"🧠 人格引擎 v12.2 启动 - 端口 {PORT} | CORS={CORS_ORIGINS} | 知识路由={'开' if KNOWLEDGE_ROUTER_ENABLED else '关'} | Kimi={'已配置' if KIMI_API_KEY else '未配置'} | 记忆衰减={MEMORY_DECAY_INTERVAL_HOURS}h")
     if not DOUBAO_API_KEY:
         logger.warning("⚠️ DOUBAO_API_KEY 未配置！LLM 对话将无法工作，请在 .env 中设置 DOUBAO_API_KEY")
     if not DOUBAO_MODEL:
@@ -3265,6 +3303,45 @@ async def get_roles():
             if k in role}
     return result
 
+# ============================================================
+# P4 序号5：插件管理 API
+# ============================================================
+@app.get("/api/plugins")
+async def list_plugins():
+    """列出所有插件及其状态。"""
+    if not PLUGINS_AVAILABLE or not get_plugin_manager:
+        return {"enabled": False, "plugins": [], "message": "插件系统不可用"}
+    manager = get_plugin_manager()
+    return manager.get_status()
+
+@app.get("/api/plugins/status")
+async def plugins_status():
+    """获取插件系统状态。"""
+    if not PLUGINS_AVAILABLE or not get_plugin_manager:
+        return {"enabled": False, "message": "插件系统不可用"}
+    manager = get_plugin_manager()
+    return manager.get_status()
+
+@app.post("/api/plugins/{plugin_name}/enable")
+async def enable_plugin(plugin_name: str):
+    """启用指定插件。"""
+    if not PLUGINS_AVAILABLE or not get_plugin_manager:
+        raise HTTPException(status_code=503, detail="插件系统不可用")
+    manager = get_plugin_manager()
+    if manager.enable_plugin(plugin_name):
+        return {"success": True, "message": f"插件 {plugin_name} 已启用"}
+    raise HTTPException(status_code=404, detail=f"插件 {plugin_name} 不存在")
+
+@app.post("/api/plugins/{plugin_name}/disable")
+async def disable_plugin(plugin_name: str):
+    """禁用指定插件。"""
+    if not PLUGINS_AVAILABLE or not get_plugin_manager:
+        raise HTTPException(status_code=503, detail="插件系统不可用")
+    manager = get_plugin_manager()
+    if manager.disable_plugin(plugin_name):
+        return {"success": True, "message": f"插件 {plugin_name} 已禁用"}
+    raise HTTPException(status_code=404, detail=f"插件 {plugin_name} 不存在")
+
 @app.post("/api/session/create")
 async def create_session_endpoint():
     sid = create_session()
@@ -3299,6 +3376,32 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
         role_ids = request.role_ids[:3]
         if not role_ids:
             return GenerateResponse(success=False, error="没有指定角色", rate_limit_remaining=remaining)
+
+        # P4 序号5：插件拦截 —— 插件可以直接处理特定命令（如天气、笑话、报时），不走LLM
+        if PLUGINS_AVAILABLE and get_plugin_manager:
+            try:
+                plugin_context = {
+                    "session_id": request.session_id,
+                    "role_ids": role_ids,
+                    "user_id": getattr(request, "user_id", None),
+                    "mode": request.mode.value,
+                    "intimacy_map": request.intimacy_map,
+                }
+                plugin_reply = await get_plugin_manager().process_message(request.user_message, plugin_context)
+                if plugin_reply:
+                    logger.info(f"[插件拦截] 消息被插件处理: {request.user_message[:30]}")
+                    return GenerateResponse(
+                        success=True,
+                        reply=plugin_reply,
+                        session_id=request.session_id,
+                        role_ids=role_ids,
+                        emotion="calm",
+                        debug_info={"plugin_intercepted": True},
+                        rate_limit_remaining=remaining,
+                    )
+            except Exception as e:
+                logger.warning(f"[插件拦截] 插件处理失败，继续正常流程: {e}")
+
         timer = StepTimer(f"{request.mode.value}|{'+'.join(role_ids)}")
         # v11.0: 获取角色级并发锁（防止同角色多会话状态冲突 + 费用控制）
         _lock_ctx = role_lock_manager.acquire(role_ids)
@@ -3411,6 +3514,19 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
             return GenerateResponse(success=False, error="豆包 API 返回为空", rate_limit_remaining=remaining)
         reply = clean_reply(reply)
         timer.mark("主回复LLM生成")
+
+        # P4 序号5：插件后处理 —— 插件可以修改LLM生成的回复
+        if PLUGINS_AVAILABLE and get_plugin_manager:
+            try:
+                plugin_context = {
+                    "session_id": request.session_id,
+                    "role_ids": role_ids,
+                    "emotion": debug.get("emotion"),
+                    "mode": request.mode.value,
+                }
+                reply = await get_plugin_manager().process_after_generate(reply, plugin_context)
+            except Exception as e:
+                logger.warning(f"[插件后处理] 失败，使用原始回复: {e}")
 
         # 记忆分析
         mem_cand = None
