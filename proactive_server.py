@@ -1623,6 +1623,7 @@ class MarkRepliedRequest(BaseModel):
 
 class MarkDeliveredRequest(BaseModel):
     message_id: str
+    message: Optional[str] = None  # 消息文本，用于终止对话意图检测（晚安/不聊了等）
 
 class TriggerCheckRequest(BaseModel):
     user_id: Optional[str] = None  # 可选，只检查某用户
