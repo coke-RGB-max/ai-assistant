@@ -941,7 +941,8 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
         memory_context=memory_context, chat_history=chat_history,
         session_id=session_id, intimacy_map=intimacy_map,
         goodbye_hint=goodbye_hint,
-        enable_bystander=(mode == "single"),
+        # v13.0修复：仅群聊启用旁观者插话，私聊默认禁用（避免私聊中串角色）
+        enable_bystander=(mode == "group"),
         active_role_id=role_ids[0] if mode == "single" else None
     )
     timer.mark("人格生成(LLM)")
@@ -2545,9 +2546,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             )
 
                             if selfie_result.get("allowed") and selfie_result.get("image_url"):
-                                # 图片生成成功，发送图片消息
+                                # 图片生成成功，发送图片消息（带文字标记，确保用户能看到消息气泡）
                                 await websocket.send_text(json.dumps({
-                                    "type": "reply", "content": "",
+                                    "type": "reply", "content": "📷 照片来啦～",
                                     "role_ids": [selfie_role], "mode": "single",
                                     "intimacy": {}, "session_id": "",
                                     "imageUrl": selfie_result["image_url"],
