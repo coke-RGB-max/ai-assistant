@@ -2252,7 +2252,19 @@ class BystanderEngine:
         )
         if not content:
             return None
-        return safe_json_parse(content)
+        # v13.0修复：直接使用json.loads，避免safe_json_parse内部作用域问题
+        try:
+            return json.loads(content)
+        except (json.JSONDecodeError, ValueError):
+            # 尝试提取JSON部分
+            import re as _re
+            match = _re.search(r'\{.*\}', content, _re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group())
+                except:
+                    pass
+            return None
 
     def _calculate_interjection_probability(self, signals, analysis):
         if self._in_cooldown():

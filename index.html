@@ -978,7 +978,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         showToast("已连接", "success");
       } else if (msg.type === "reply") {
         removeTypingIndicator();
-        if (conv) appendAIMessage(conv, msg.content, msg.role_ids?.[0]);
+        if (conv) appendAIMessage(conv, msg.content, msg.role_ids?.[0], msg.imageUrl);
         if (msg.intimacy) {
           Object.entries(msg.intimacy).forEach(([rid, score]) => {
             updateIntimacyData(rid, score);
@@ -1171,14 +1171,15 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       if (scroll) scrollToBottom();
     }
 
-    async function appendAIMessage(conv, content, roleId) {
+    async function appendAIMessage(conv, content, roleId, imageUrl) {
       const aiMsg = createMessage("ai", content);
       if (roleId) aiMsg.roleId = roleId;
+      if (imageUrl) aiMsg.imageUrl = imageUrl;
       conv.messages.push(aiMsg);
       appendMessageToDOM(aiMsg, conv);
       renderConversationList();
       if (currentUser) saveConversationsToLocal(currentUser.username);
-      await typeWriter(aiMsg._element, content);
+      if (content) await typeWriter(aiMsg._element, content);
     }
 
     // ===== P4: 图片消息（自拍/照片生成）=====

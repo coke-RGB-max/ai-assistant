@@ -2499,6 +2499,76 @@ async def websocket_endpoint(websocket: WebSocket):
                     role_ids = ["nianqi"]
                 logger.info(f"[{username}] 对话: roles={role_ids}")
                 ws_msg_id = msg.get("message_id") or f"ws_{username}_{int(time.time()*1000)}_{id(msg)}"
+
+                # ============================================================
+                # v13.0: WebSocket自拍快速响应流程（网页端发自拍请求时）
+                # ============================================================
+                try:
+                    from core.image_generator import is_selfie_request, get_selfie_system, detect_selfie_mode, extract_scene, extract_clothing, extract_expression
+                    if is_selfie_request(user_message):
+                        logger.info(f"[{username}][自拍] 检测到自拍请求（WebSocket快速响应）: {user_message[:50]}")
+                        selfie_role = role_ids[0] if role_ids else "nianqi"
+                        user_intimacy = await _get_user_intimacy(username, selfie_role)
+                        selfie_system = get_selfie_system()
+
+                        if selfie_system.client.available:
+                            mode = detect_selfie_mode(user_message)
+                            scene = extract_scene(user_message) or "indoor"
+                            clothing = extract_clothing(user_message) or "casual"
+                            expression = extract_expression(user_message) or "gentle smile"
+
+                            # 第一步：快速判断同意/拒绝（毫秒级响应）
+                            is_allowed, selfie_msg = selfie_system.judger.judge(selfie_role, user_intimacy)
+
+                            if not is_allowed:
+                                # 拒绝：立即发送拒绝消息，跳过正常聊天流程
+                                logger.info(f"[{username}][自拍] 拒绝（立即返回）: {selfie_msg[:50]}")
+                                await websocket.send_text(json.dumps({
+                                    "type": "reply", "content": selfie_msg,
+                                    "role_ids": [selfie_role], "mode": "single",
+                                    "intimacy": {}, "session_id": "",
+                                }, ensure_ascii=False))
+                                continue
+
+                            # 同意：立即发送接受消息（用户秒收到文字回应）
+                            logger.info(f"[{username}][自拍] 同意，先发接受消息: {selfie_msg[:50]}")
+                            await websocket.send_text(json.dumps({
+                                "type": "reply", "content": selfie_msg,
+                                "role_ids": [selfie_role], "mode": "single",
+                                "intimacy": {}, "session_id": "",
+                            }, ensure_ascii=False))
+
+                            # 第二步：生成图片（耗时操作，用户已收到文字回应）
+                            selfie_result = await selfie_system.handle_selfie_request(
+                                user_id=username, role_id=selfie_role, intimacy=user_intimacy,
+                                scene=scene, expression=expression, clothing=clothing, mode=mode,
+                            )
+
+                            if selfie_result.get("allowed") and selfie_result.get("image_url"):
+                                # 图片生成成功，发送图片消息
+                                await websocket.send_text(json.dumps({
+                                    "type": "reply", "content": "",
+                                    "role_ids": [selfie_role], "mode": "single",
+                                    "intimacy": {}, "session_id": "",
+                                    "imageUrl": selfie_result["image_url"],
+                                }, ensure_ascii=False))
+                                logger.info(f"[{username}][自拍] 图片发送成功: {selfie_result['image_url'][:60]}")
+                            else:
+                                # 图片生成失败，发送失败说明
+                                fail_msg = selfie_result.get("message", "图片生成失败了，稍后再试好不好？")
+                                await websocket.send_text(json.dumps({
+                                    "type": "reply", "content": fail_msg,
+                                    "role_ids": [selfie_role], "mode": "single",
+                                    "intimacy": {}, "session_id": "",
+                                }, ensure_ascii=False))
+                                logger.info(f"[{username}][自拍] 图片生成失败: {fail_msg[:50]}")
+                            continue  # 自拍流程完成，跳过正常聊天流程
+                except Exception as selfie_e:
+                    logger.warning(f"[{username}][自拍] WebSocket快速响应异常，降级到正常聊天流程: {type(selfie_e).__name__}: {selfie_e}")
+
+                # ============================================================
+                # 正常聊天流程（非自拍请求，或自拍快速响应失败降级）
+                # ============================================================
                 result = await identity_queue.submit(
                     username, ws_msg_id,
                     lambda: process_chat_message(username, user_message, role_ids, chat_history)
