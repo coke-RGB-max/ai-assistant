@@ -938,4 +938,4 @@ if __name__ == "__main__":
         sys.exit(0)
 
     import uvicorn
-    uvicorn.run("vector_server_pinecone:app", host=HOST, port=PORT, workers=1, log_level="info")
+    uvicorn.run("vector_server:app", host=HOST, port=PORT, workers=1, log_level="info")
