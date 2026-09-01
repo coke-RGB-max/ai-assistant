@@ -1342,6 +1342,25 @@ async def _ffmpeg_convert(input_bytes: bytes, output_fmt: str,
         logger.error(f"ffmpeg转码异常: {e}")
     return None
 # -------------------------- NapCat 消息发送 --------------------------
+
+# v13.0修复：宽松的自拍请求检测（配合原有的is_selfie_request使用，覆盖更多口语化表达）
+def is_selfie_request_loose(text):
+    """宽松检测用户是否在请求自拍/照片，覆盖口语化表达"""
+    if not text:
+        return False
+    text = text.lower()
+    # 直接关键词
+    direct_keywords = ['自拍', '照片', '图片', '看看你', '你的样子', '你的照片', '你的图片',
+                        '发张图', '发张照', '看看你的', '现在给我看看', '给我看看你',
+                        '想看你', '想看你的', '更多与你', '与你相关的图片', '你的都好看']
+    for kw in direct_keywords:
+        if kw in text:
+            return True
+    # 组合模式："看看" + "你" 且句子较短
+    if ('看看' in text or '想看' in text) and '你' in text and len(text) <= 30:
+        return True
+    return False
+
 async def send_qq_private_msg(qq_number, text):
     """通过 NapCat HTTP API 发送 QQ 私聊文本消息"""
     if not NAPCAT_HTTP_URL:
@@ -1968,7 +1987,7 @@ async def qq_webhook(request: Request):
     # ============================================================
     try:
         from core.image_generator import is_selfie_request, get_selfie_system
-        if is_selfie_request(text):
+        if is_selfie_request_loose(text) or is_selfie_request(text):
             logger.info(f"[QQ][自拍] 检测到自拍请求（快速响应模式）: {text[:50]}")
             user_intimacy = await _get_user_intimacy(identity, "nianqi")
             selfie_system = get_selfie_system()
@@ -2506,7 +2525,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # ============================================================
                 try:
                     from core.image_generator import is_selfie_request, get_selfie_system, detect_selfie_mode, extract_scene, extract_clothing, extract_expression
-                    if is_selfie_request(user_message):
+                    if is_selfie_request_loose(user_message) or is_selfie_request(user_message):
                         logger.info(f"[{username}][自拍] 检测到自拍请求（WebSocket快速响应）: {user_message[:50]}")
                         selfie_role = role_ids[0] if role_ids else "nianqi"
                         user_intimacy = await _get_user_intimacy(username, selfie_role)

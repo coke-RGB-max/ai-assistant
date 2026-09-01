@@ -18,6 +18,16 @@ v12.1: LLM心理状态校准层（方案B：本地公式算基础值 + LLM输出
 v12.2: 配合proactive_server v13 话题延续引擎 —— 新增 topic_continue / topic_self_close 两种主动消息reason_type，支持intent行为意图引导
 """
 import asyncio, json, logging, re, random, time, os, sqlite3, hashlib, datetime
+
+# v13.0修复：monkey patch random.sample，使其能处理dict/set（dynamic_conversation.py中memories可能是dict）
+_original_random_sample = random.sample
+def _safe_random_sample(population, k, *args, **kwargs):
+    if isinstance(population, dict):
+        population = list(population.values())
+    elif isinstance(population, set):
+        population = list(population)
+    return _original_random_sample(population, k, *args, **kwargs)
+random.sample = _safe_random_sample
 from typing import Optional, List, Dict, Any, Tuple
 from contextlib import asynccontextmanager
 from enum import Enum
