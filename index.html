@@ -978,7 +978,21 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         showToast("已连接", "success");
       } else if (msg.type === "reply") {
         removeTypingIndicator();
-        if (conv) appendAIMessage(conv, msg.content, msg.role_ids?.[0], msg.imageUrl);
+        if (conv) {
+          // v13.0修复：直接在消息处理层设置imageUrl，不依赖appendAIMessage的参数传递
+          if (msg.imageUrl) {
+            const aiMsg = createMessage("ai", msg.content || "");
+            aiMsg.roleId = msg.role_ids?.[0];
+            aiMsg.imageUrl = msg.imageUrl;
+            conv.messages.push(aiMsg);
+            appendMessageToDOM(aiMsg, conv);
+            renderConversationList();
+            if (currentUser) saveConversationsToLocal(currentUser.username);
+            if (msg.content) typeWriter(aiMsg._element, msg.content);
+          } else {
+            appendAIMessage(conv, msg.content, msg.role_ids?.[0]);
+          }
+        }
         if (msg.intimacy) {
           Object.entries(msg.intimacy).forEach(([rid, score]) => {
             updateIntimacyData(rid, score);
