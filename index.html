@@ -549,6 +549,7 @@
               </div>
             </div>
             <div class="header-right">
+              <button id="clear-chat-btn" class="ghost-btn" type="button" title="清空当前会话的本地聊天记录">清空记录</button>
               <button id="header-admin-btn" class="ghost-btn hidden" type="button">管理后台</button>
             </div>
           </header>
@@ -759,6 +760,67 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
 
     const getRole = (id) => ROLES.find(r => r.id === id) || ROLES[0];
 
+    // ===== 本地聊天历史缓存（localStorage）=====
+    const LOCAL_HISTORY_PREFIX = "flexichrono_chat_";
+    const LOCAL_HISTORY_MAX_MSGS = 200;  // 每个会话最多缓存200条消息，防止localStorage超限
+
+    function getLocalHistoryKey(username) {
+      return LOCAL_HISTORY_PREFIX + username;
+    }
+
+    function serializeMessage(msg) {
+      // 只序列化纯数据，去掉DOM元素引用等运行时字段
+      return {
+        id: msg.id,
+        role: msg.role,
+        content: msg.content,
+        timestamp: msg.timestamp,
+        imageUrl: msg.imageUrl || undefined,
+        isVoice: msg.isVoice || undefined,
+        voiceDuration: msg.voiceDuration || undefined
+      };
+    }
+
+    function saveConversationsToLocal(username) {
+      try {
+        const convs = conversationsByUser[username];
+        if (!convs) return;
+        const data = {};
+        Object.values(convs).forEach(conv => {
+          data[conv.id] = {
+            name: conv.name,
+            type: conv.type,
+            roleId: conv.roleId,
+            roleIds: conv.roleIds,
+            lastMessageAt: conv.lastMessageAt,
+            messages: (conv.messages || []).slice(-LOCAL_HISTORY_MAX_MSGS).map(serializeMessage)
+          };
+        });
+        localStorage.setItem(getLocalHistoryKey(username), JSON.stringify(data));
+      } catch (e) {
+        console.warn("[本地缓存] 保存失败:", e);
+      }
+    }
+
+    function loadConversationsFromLocal(username) {
+      try {
+        const raw = localStorage.getItem(getLocalHistoryKey(username));
+        if (!raw) return null;
+        return JSON.parse(raw);
+      } catch (e) {
+        console.warn("[本地缓存] 读取失败:", e);
+        return null;
+      }
+    }
+
+    function clearLocalHistory(username) {
+      try {
+        localStorage.removeItem(getLocalHistoryKey(username));
+      } catch (e) {
+        console.warn("[本地缓存] 清空失败:", e);
+      }
+    }
+
     function ensureConversations(username) {
       if (!conversationsByUser[username]) {
         conversationsByUser[username] = {};
@@ -769,6 +831,29 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
             messages: [], lastMessageAt: null, intimacy: CONFIG.DEFAULT_INTIMACY
           };
         });
+        // 从 localStorage 恢复本地缓存的聊天历史
+        const localData = loadConversationsFromLocal(username);
+        if (localData) {
+          Object.entries(localData).forEach(([convId, convData]) => {
+            if (conversationsByUser[username][convId]) {
+              // 已有会话（单聊），恢复消息和最后消息时间
+              conversationsByUser[username][convId].messages = convData.messages || [];
+              conversationsByUser[username][convId].lastMessageAt = convData.lastMessageAt || null;
+            } else {
+              // 本地缓存的群聊，恢复整个会话
+              conversationsByUser[username][convId] = {
+                id: convId,
+                type: convData.type || "group",
+                name: convData.name || "群聊",
+                roleId: convData.roleId || (convData.roleIds && convData.roleIds[0]),
+                roleIds: convData.roleIds || [],
+                messages: convData.messages || [],
+                lastMessageAt: convData.lastMessageAt || null,
+                intimacy: CONFIG.DEFAULT_INTIMACY
+              };
+            }
+          });
+        }
       }
       return conversationsByUser[username];
     }
@@ -1082,6 +1167,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       conv.messages.push(aiMsg);
       appendMessageToDOM(aiMsg, conv);
       renderConversationList();
+      if (currentUser) saveConversationsToLocal(currentUser.username);
       await typeWriter(aiMsg._element, content);
     }
 
@@ -1092,6 +1178,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       conv.messages.push(aiMsg);
       appendMessageToDOM(aiMsg, conv);
       renderConversationList();
+      if (currentUser) saveConversationsToLocal(currentUser.username);
     }
 
     function scrollToBottom() {
@@ -1145,6 +1232,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       appendMessageToDOM(userMsg, conv);
       renderConversationList();
       input.value = "";
+      if (currentUser) saveConversationsToLocal(currentUser.username);
 
       // ===== P4: 自拍/照片请求自动检测 =====
       const roleId = conv.roleId || (conv.roleIds && conv.roleIds[0]);
@@ -1273,6 +1361,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         conv.messages.push(voiceMsg);
         appendMessageToDOM(voiceMsg, conv);
         renderConversationList();
+        if (currentUser) saveConversationsToLocal(currentUser.username);
         addTypingIndicator();
         if (!sendWS({
           action: "voice_chat",
@@ -1519,6 +1608,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       };
       $("#group-modal").classList.add("hidden");
       switchConversation(id);
+      if (currentUser) saveConversationsToLocal(currentUser.username);
       showToast("群聊已创建", "success");
     }
 
@@ -1804,6 +1894,19 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       setButtonLoading(btn, false);
     }
 
+    // ===== 清空当前会话本地聊天记录 =====
+    function clearCurrentChat() {
+      const conv = getCurrentConversation();
+      if (!conv) return;
+      if (!confirm(`确定要清空与「${conv.name}」的本地聊天记录吗？\n（仅清除本设备浏览器中的缓存，不影响云端记忆）`)) return;
+      conv.messages = [];
+      conv.lastMessageAt = null;
+      renderMessages();
+      renderConversationList();
+      if (currentUser) saveConversationsToLocal(currentUser.username);
+      showToast("本地聊天记录已清空", "success");
+    }
+
     // ===== 退出 =====
     function logout() {
       if (ws) { ws.onclose = null; ws.close(); }
@@ -1840,6 +1943,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
 
       $("#logout-btn").addEventListener("click", logout);
       $("#admin-logout-btn").addEventListener("click", logout);
+      $("#clear-chat-btn").addEventListener("click", clearCurrentChat);
       $("#admin-back-btn").addEventListener("click", () => {
         $("#admin-panel").classList.add("hidden");
         $("#main-view").classList.remove("hidden");

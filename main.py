@@ -645,6 +645,53 @@ async def call_vector_migrate(old_user_id, new_user_id):
     except Exception as e:
         logger.error(f"向量记忆迁移失败: {e}")
     return {"success": False, "migrated": 0}
+
+
+async def call_vector_insert_session(user_id, conversation_id, role, text):
+    """写入会话片段到 Pinecone 会话库（7天自动过期，后台调用不阻塞）"""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            payload = {
+                "username": user_id,
+                "conversation_id": conversation_id,
+                "role": role,
+                "text": text
+            }
+            resp = await client.post(
+                f"{VECTOR_SERVER_URL}/api/vector/insert_session_vector",
+                json=payload, timeout=30.0)
+            return resp.status_code == 200 and resp.json().get("ok")
+    except Exception as e:
+        logger.debug(f"会话片段写入失败: {e}")
+        return False
+
+
+async def call_vector_search_session(user_id, conversation_id, query, top_k=3):
+    """检索短期会话历史（最近相关的对话片段），返回格式化文本"""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            payload = {
+                "username": user_id,
+                "conversation_id": conversation_id,
+                "query_text": query,
+                "top_k": top_k
+            }
+            resp = await client.post(
+                f"{VECTOR_SERVER_URL}/api/vector/search_session_history",
+                json=payload, timeout=30.0)
+            if resp.status_code == 200 and resp.json().get("ok"):
+                items = resp.json().get("data", [])
+                parts = []
+                for item in items:
+                    role = item.get("role", "user")
+                    text = item.get("text", "")
+                    if text:
+                        role_label = "用户" if role == "user" else "AI"
+                        parts.append(f"{role_label}: {text}")
+                return "\n".join(parts)
+    except Exception as e:
+        logger.debug(f"会话历史检索失败: {e}")
+    return ""
 # -------------------------- 主动消息后端对接（带熔断） --------------------------
 async def call_proactive_report(user_id, role_id, intimacy, attachment=None, psych=None, session_id=None):
     if _proactive_should_skip():
@@ -866,8 +913,14 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
     timer.mark("session")
     # 读取亲密度
     intimacy_map = {rid: user_db.get_intimacy(identity, rid) for rid in role_ids}
-    # 向量记忆检索
+    # 向量记忆检索：长期记忆（摘要）+ 短期会话历史（原文）
     memory_context = await call_vector_search(identity, user_message, role_id=mem_role_id)
+    session_context = await call_vector_search_session(identity, session_id or "", user_message, top_k=3)
+    # 合并上下文：会话历史放前面（更贴近当前话题），长期记忆放后面
+    if session_context and memory_context:
+        memory_context = f"【最近对话片段】\n{session_context}\n\n【长期记忆】\n{memory_context}"
+    elif session_context:
+        memory_context = f"【最近对话片段】\n{session_context}"
     timer.mark("记忆检索")
     # 人格引擎生成（最耗时：LLM调用）
     # 对话意图检测：判断用户是否想结束对话
@@ -904,6 +957,15 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
     chat_history.append({"role": "assistant", "content": reply})
     if len(chat_history) > 20:
         del chat_history[:-20]
+    # 后台写入会话片段到 Pinecone（用户消息 + AI回复各一条，7天自动过期）
+    _sess_task1 = asyncio.create_task(call_vector_insert_session(
+        identity, session_id or "", "user", user_message))
+    background_tasks.add(_sess_task1)
+    _sess_task1.add_done_callback(background_tasks.discard)
+    _sess_task2 = asyncio.create_task(call_vector_insert_session(
+        identity, session_id or "", "assistant", reply))
+    background_tasks.add(_sess_task2)
+    _sess_task2.add_done_callback(background_tasks.discard)
     # 提取并写入亲密度
     updated_intimacy = extract_intimacy_from_debug(result, role_ids)
     for rid, val in updated_intimacy.items():
