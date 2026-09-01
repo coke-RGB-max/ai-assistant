@@ -1005,6 +1005,13 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       } else if (msg.type === "proactive") {
         removeTypingIndicator();
         if (conv) appendAIMessage(conv, msg.content, msg.role_id);
+      } else if (msg.type === "bystander_reply") {
+        // v13.0: 旁观者插话（其他角色旁听用户与当前角色对话后主动插话）
+        removeTypingIndicator();
+        if (conv) {
+          const brContent = msg.role_name ? `${msg.role_name}：${msg.content}` : msg.content;
+          appendAIMessage(conv, brContent, msg.role_id);
+        }
       } else if (msg.type === "admin_update") {
         // v4.0.4: 管理员实时数据更新（亲密度变化等），自动刷新对应用户
         if (currentUser && currentUser.role === "admin") {
@@ -1133,10 +1140,12 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
           const av = document.createElement("div");
           av.className = "avatar ai-avatar";
           av.style.cssText = "width:32px;height:32px;border-radius:10px;";
-          if (conv.type === "group") {
+          // v13.0: 支持消息级别的角色ID（旁观者插话使用不同角色头像）
+          const msgRoleId = msg.roleId || conv.roleId;
+          if (conv.type === "group" && !msg.roleId) {
             av.textContent = "👥";
           } else {
-            const role = getRole(conv.roleId);
+            const role = getRole(msgRoleId);
             av.textContent = role.emoji;
             av.style.background = `linear-gradient(135deg, ${role.color}88, ${role.color})`;
           }
@@ -1164,6 +1173,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
 
     async function appendAIMessage(conv, content, roleId) {
       const aiMsg = createMessage("ai", content);
+      if (roleId) aiMsg.roleId = roleId;
       conv.messages.push(aiMsg);
       appendMessageToDOM(aiMsg, conv);
       renderConversationList();

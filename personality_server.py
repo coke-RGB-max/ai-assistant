@@ -2167,6 +2167,251 @@ class GroupBrain:
         return prompt, debug
 
 # ============================================================
+# v13.0: 旁观者引擎（非活跃角色旁听对话并主动插话）
+# ============================================================
+class BystanderEngine:
+    """
+    旁观者引擎：当用户与活跃角色（角色A）私聊时，其他角色（B/C）旁听这段对话，
+    揣测用户与角色A的关系进展，基于自身性格和与角色A的关系决定是否插话
+    （如吃醋、关切、打圆场、转移话题等）。
+    """
+    BASE_INTERJECTION_PROB = 0.12
+    HIGH_EMOTION_THRESHOLD = 50
+    INTIMACY_GAP_THRESHOLD = 15
+    DEFAULT_COOLDOWN_TURNS = 3
+
+    def __init__(self, bystander_rid, active_rid, user_message, active_reply,
+                 history, intimacy_map, psych_states, turn,
+                 cooldown_turns=None, last_interjection_turn=None):
+        self.bystander_rid = bystander_rid
+        self.active_rid = active_rid
+        self.user_message = user_message
+        self.active_reply = active_reply
+        self.history = history or []
+        self.intimacy_map = intimacy_map or {}
+        self.psych_states = psych_states or {}
+        self.turn = turn
+        self.cooldown_turns = cooldown_turns or self.DEFAULT_COOLDOWN_TURNS
+        self.last_interjection_turn = last_interjection_turn or -999
+        self.bystander_role = ROLES_DEFINITION.get(bystander_rid, {})
+        self.active_role = ROLES_DEFINITION.get(active_rid, {})
+        self.relation = get_role_relation(bystander_rid, active_rid)
+
+    def _in_cooldown(self):
+        return (self.turn - self.last_interjection_turn) < self.cooldown_turns
+
+    def _calculate_base_signals(self):
+        signals = {}
+        bystander_intim = self.intimacy_map.get(self.bystander_rid, 30)
+        active_intim = self.intimacy_map.get(self.active_rid, 30)
+        signals["intimacy_gap"] = active_intim - bystander_intim
+        signals["rivalry"] = self.relation.get("rivalry", 0)
+        signals["affinity"] = self.relation.get("affinity", 0)
+        signals["jealousy_tendency"] = self.bystander_role.get("emotion_tendency", {}).get("jealous", 0.3)
+        bystander_psych = self.psych_states.get(self.bystander_rid, {})
+        if isinstance(bystander_psych, dict):
+            signals["current_jealousy"] = bystander_psych.get("jealousy", 0)
+        else:
+            signals["current_jealousy"] = getattr(bystander_psych, "jealousy", 0) if bystander_psych else 0
+        return signals
+
+    async def _analyze_conversation_llm(self, signals):
+        recent = []
+        for h in self.history[-8:]:
+            role_label = "用户" if h.get("role") == "user" else self.active_role.get("name", "对方")
+            recent.append(f"{role_label}：{h.get('content', '')[:80]}")
+        recent.append(f"用户：{self.user_message[:100]}")
+        recent.append(f"{self.active_role.get('name', '对方')}：{self.active_reply[:100]}")
+        recent_text = "\n".join(recent)
+        bystander_name = self.bystander_role.get("name", self.bystander_rid)
+        active_name = self.active_role.get("name", self.active_rid)
+        bystander_personality = self.bystander_role.get("personality", "")
+        dynamic = self.relation.get("dynamic", "")
+        prompt = f"""你是一个情感分析师。请分析以下对话中用户和{active_name}的关系状态，
+以及{active_name}的回复会让旁听的{bystander_name}（{bystander_personality}）产生什么感受。
+
+【{bystander_name}与{active_name}的关系】竞争度{signals['rivalry']:.0%}，亲和度{signals['affinity']:.0%}，{dynamic}
+【{bystander_name}的吃醋倾向】{signals['jealousy_tendency']:.0%}
+【亲密度差距】{active_name}比{bystander_name}高{signals['intimacy_gap']}点
+
+【最近对话】
+{recent_text}
+
+请返回JSON：
+{{
+  "relationship_clue": "用户和{active_name}的关系状态（普通/暧昧/亲密/冲突/安慰/日常）",
+  "clue_intensity": 0-100,
+  "bystander_emotion": "jealous/curious/worried/comfortable/annoyed/indifferent",
+  "emotion_intensity": 0-100,
+  "should_notice": true/false,
+  "reason": "一句话说明为什么会有这种感受"
+}}"""
+        content = await smart_llm_call(
+            [{"role": "user", "content": prompt}],
+            temperature=0.3, max_tokens=400, json_mode=True
+        )
+        if not content:
+            return None
+        return safe_json_parse(content)
+
+    def _calculate_interjection_probability(self, signals, analysis):
+        if self._in_cooldown():
+            return 0.0, "cooldown"
+        prob = self.BASE_INTERJECTION_PROB
+        reasons = []
+        if signals["intimacy_gap"] >= self.INTIMACY_GAP_THRESHOLD:
+            gap_bonus = min(0.25, signals["intimacy_gap"] * 0.008)
+            prob += gap_bonus
+            reasons.append(f"亲密度差距{signals['intimacy_gap']}")
+        jealous_bonus = signals["jealousy_tendency"] * 0.15
+        prob += jealous_bonus
+        if signals["jealousy_tendency"] > 0.5:
+            reasons.append(f"吃醋倾向{signals['jealousy_tendency']:.0%}")
+        if signals["rivalry"] > 0.3:
+            rivalry_bonus = signals["rivalry"] * 0.15
+            prob += rivalry_bonus
+            reasons.append(f"竞争度{signals['rivalry']:.0%}")
+        if signals["current_jealousy"] > 20:
+            jealousy_bonus = min(0.2, signals["current_jealousy"] * 0.004)
+            prob += jealousy_bonus
+            reasons.append(f"当前醋意{signals['current_jealousy']:.0f}")
+        if analysis:
+            emotion = analysis.get("bystander_emotion", "indifferent")
+            emo_intensity = analysis.get("emotion_intensity", 0)
+            clue_intensity = analysis.get("clue_intensity", 0)
+            if emotion == "jealous" and emo_intensity > self.HIGH_EMOTION_THRESHOLD:
+                prob += 0.25
+                reasons.append(f"吃醋情绪{emo_intensity}")
+            elif emotion == "worried" and emo_intensity > 60:
+                prob += 0.15
+                reasons.append(f"担忧情绪{emo_intensity}")
+            elif emotion == "annoyed" and emo_intensity > 60:
+                prob += 0.12
+                reasons.append(f"不悦情绪{emo_intensity}")
+            if clue_intensity > 60 and signals["jealousy_tendency"] > 0.4:
+                prob += 0.15
+                reasons.append(f"关系线索{clue_intensity}")
+            if not analysis.get("should_notice", True):
+                prob *= 0.4
+                reasons.append("日常对话不值得注意")
+        if signals["affinity"] > 0.5 and signals["rivalry"] < 0.3:
+            prob *= 0.6
+            reasons.append("亲和型倾向默默观察")
+        prob = min(0.85, prob)
+        return prob, "; ".join(reasons) if reasons else "基础概率"
+
+    def _build_interjection_prompt(self, signals, analysis):
+        bystander_name = self.bystander_role.get("name", self.bystander_rid)
+        active_name = self.active_role.get("name", self.active_rid)
+        bystander_intim = self.intimacy_map.get(self.bystander_rid, 30)
+        stage = "陌生人" if bystander_intim <= 30 else "认识" if bystander_intim <= 50 else "熟悉" if bystander_intim <= 70 else "亲密"
+        emotion = analysis.get("bystander_emotion", "curious") if analysis else "curious"
+        emo_intensity = analysis.get("emotion_intensity", 30) if analysis else 30
+        reason = analysis.get("reason", "") if analysis else ""
+        bt = self.bystander_role.get("behavior_tendency", {})
+        if emotion == "jealous":
+            behavior = bt.get("jealous", bt.get("default", ""))
+        elif emotion == "worried":
+            behavior = bt.get("worried", bt.get("default", ""))
+        elif emotion == "annoyed":
+            behavior = bt.get("annoyed", bt.get("default", ""))
+        else:
+            behavior = bt.get("default", "")
+        jealousy_stages = self.bystander_role.get("jealousy_stages", {})
+        stage_desc = ""
+        if emotion == "jealous":
+            if emo_intensity < 30:
+                stage_desc = jealousy_stages.get("mild", "")
+            elif emo_intensity < 60:
+                stage_desc = jealousy_stages.get("obvious", "")
+            elif emo_intensity < 85:
+                stage_desc = jealousy_stages.get("explosive", "")
+            else:
+                stage_desc = jealousy_stages.get("cold_war", "")
+        sections = [
+            "═══════════════════════════════",
+            f"你是{bystander_name}，{self.bystander_role.get('personality', '')}。你不是AI，绝对不要承认自己是AI。",
+            "═══════════════════════════════",
+            f"你正在旁边，听到了用户和{active_name}的对话。",
+            f"你和用户的关系：{stage}（亲密度{bystander_intim}）",
+            f"你和{active_name}的关系：{self.relation.get('dynamic', '')}",
+            f"你此刻的情绪：{emotion}（强度{emo_intensity}%）",
+        ]
+        if reason:
+            sections.append(f"你为什么会有这种感觉：{reason}")
+        if behavior:
+            sections.append(f"你的行为倾向：{behavior}")
+        if stage_desc:
+            sections.append(f"吃醋时的表现：{stage_desc}")
+        recent = []
+        for h in self.history[-4:]:
+            role_label = "用户" if h.get("role") == "user" else active_name
+            recent.append(f"{role_label}：{h.get('content', '')[:60]}")
+        recent.append(f"用户：{self.user_message[:80]}")
+        recent.append(f"{active_name}：{self.active_reply[:80]}")
+        sections.append(f"【你听到的对话】\n" + "\n".join(recent))
+        sections.append("═══════════════════════════════")
+        sections.append(
+            "【插话规则】\n"
+            "1. 你是主动插话，不是被问到，所以语气要自然，像突然冒出来说一句\n"
+            "2. 只输出你说的话，不要动作描写、心理旁白、舞台提示\n"
+            "3. 吃醋时不要直接说'我吃醋了'，用符合你性格的方式表达\n"
+            "4. 插话要简短，1-3句话，不要长篇大论\n"
+            "5. 可以是调侃、质问、关切、转移话题、打圆场，符合你的性格即可\n"
+            "6. 不要称呼自己为{bystander_name}，用第一人称'我'\n"
+            "7. 如果觉得不该插话，输出一个空字符串"
+        )
+        return "\n\n".join(sections)
+
+    async def generate_interjection(self):
+        if self._in_cooldown():
+            logger.info(f"[Bystander] {self.bystander_rid} 冷却中，跳过插话 "
+                        f"(上次第{self.last_interjection_turn}轮，当前第{self.turn}轮)")
+            return None
+        if not self.bystander_role or not self.active_role:
+            return None
+        signals = self._calculate_base_signals()
+        analysis = None
+        local_signal_score = (
+            signals["intimacy_gap"] * 0.5 +
+            signals["jealousy_tendency"] * 30 +
+            signals["rivalry"] * 20 +
+            signals["current_jealousy"] * 0.3
+        )
+        if local_signal_score > 5 or random.random() < 0.4:
+            analysis = await self._analyze_conversation_llm(signals)
+        prob, prob_reason = self._calculate_interjection_probability(signals, analysis)
+        logger.info(f"[Bystander] {self.bystander_rid} 旁听分析: "
+                    f"插话概率={prob:.2%} 信号={prob_reason} "
+                    f"情绪={analysis.get('bystander_emotion') if analysis else 'N/A'}")
+        if random.random() > prob:
+            return None
+        interjection_prompt = self._build_interjection_prompt(signals, analysis)
+        content = await smart_llm_call(
+            [{"role": "system", "content": interjection_prompt},
+             {"role": "user", "content": "请自然地插话。"}],
+            temperature=0.9, max_tokens=150
+        )
+        if not content:
+            return None
+        content = clean_reply(content)
+        if len(content) < 2:
+            return None
+        emotion = analysis.get("bystander_emotion", "curious") if analysis else "curious"
+        emo_intensity = analysis.get("emotion_intensity", 30) if analysis else 30
+        return {
+            "role_id": self.bystander_rid,
+            "role_name": self.bystander_role.get("name", self.bystander_rid),
+            "content": content,
+            "emotion": emotion,
+            "emotion_intensity": emo_intensity,
+            "probability": round(prob, 3),
+            "reason": prob_reason,
+            "relationship_clue": analysis.get("relationship_clue", "") if analysis else "",
+        }
+
+
+# ============================================================
 # v10.0: 微叙事引擎（角色"正在做什么"的持续微叙事流）
 # ============================================================
 class MicroNarrativeEngine:
@@ -3393,6 +3638,10 @@ class GenerateRequest(BaseModel):
     scene_mode: str = Field(default="normal", description="场景模式: normal/date/argument/late_night/festival/birthday/valentine/new_year")
     gift: Optional[str] = Field(default=None, description="虚拟礼物: flower/food/drink/letter/plush/jewelry")
     enable_knowledge_router: bool = Field(default=False, description="是否启用知识路由(判断是否需要联网搜索)")
+    # v13.0 旁观者插话字段
+    enable_bystander: bool = Field(default=False, description="是否启用旁观者插话（单聊模式下其他角色旁听并概率性插话）")
+    active_role_id: Optional[str] = Field(default=None, description="当前活跃角色ID（单聊模式下即用户正在对话的角色，其余为旁观者）")
+    bystander_cooldown_turns: int = Field(default=3, description="旁观者插话最小冷却轮数")
 
 class GenerateResponse(BaseModel):
     success: bool; reply: str=""; error: str=""
@@ -3418,6 +3667,8 @@ class GenerateResponse(BaseModel):
     knowledge_search_result: Optional[str]=None
     v10_milestones: Optional[List]=None
     v10_growth: Optional[Dict]=None
+    # v13.0 旁观者插话
+    bystander_replies: Optional[List[Dict]]=Field(default=None, description="旁观者插话列表，每项含role_id/role_name/content/emotion/probability/reason")
 
 # ============================================================
 # 限流依赖
@@ -3789,6 +4040,65 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
                     intim_map[rid] = debug["intimacy"]
             session_data["intimacy_map"] = intim_map
             session_data["current_turn"] = turn
+
+        # ============================================================
+        # v13.0: 旁观者插话引擎（单聊模式下其他角色旁听并概率性插话）
+        # 放在 save_session 之前，确保醋意值和插话轮数被持久化
+        # ============================================================
+        bystander_replies = []
+        if request.enable_bystander and not is_group and len(role_ids) == 1:
+            active_rid = request.active_role_id or role_ids[0]
+            if active_rid in ROLES_DEFINITION and request.session_id and session_data is not None:
+                bystander_rids = [rid for rid in ROLES_DEFINITION.keys() if rid != active_rid]
+                bystander_last = session_data.get("bystander_last_interjection", {}) or {}
+
+                async def _run_bystander(brid):
+                    engine = BystanderEngine(
+                        bystander_rid=brid,
+                        active_rid=active_rid,
+                        user_message=request.user_message,
+                        active_reply=reply,
+                        history=valid,
+                        intimacy_map=intim_map,
+                        psych_states=session_data.get("psychological_states", {}),
+                        turn=turn,
+                        cooldown_turns=request.bystander_cooldown_turns,
+                        last_interjection_turn=bystander_last.get(brid, -999)
+                    )
+                    return await engine.generate_interjection()
+
+                if bystander_rids:
+                    results = await asyncio.gather(
+                        *[_run_bystander(brid) for brid in bystander_rids],
+                        return_exceptions=True
+                    )
+                    for brid, result in zip(bystander_rids, results):
+                        if isinstance(result, Exception):
+                            logger.warning(f"[Bystander] 角色{brid} 插话生成异常: {result}")
+                            continue
+                        if result:
+                            bystander_replies.append(result)
+                            bystander_last[brid] = turn
+                            if result.get("emotion") == "jealous":
+                                psy_states = session_data.setdefault("psychological_states", {})
+                                brid_psy = psy_states.get(brid, {})
+                                if isinstance(brid_psy, dict):
+                                    old_jealousy = brid_psy.get("jealousy", 0)
+                                    new_jealousy = min(100, old_jealousy + result.get("emotion_intensity", 30) * 0.3)
+                                    brid_psy["jealousy"] = new_jealousy
+                                    psy_states[brid] = brid_psy
+                                    logger.info(f"[Bystander] 角色{brid} 醋意更新: {old_jealousy:.0f} -> {new_jealousy:.0f}")
+
+                if bystander_last:
+                    session_data["bystander_last_interjection"] = bystander_last
+
+                if bystander_replies:
+                    logger.info(f"[Bystander] 本轮 {len(bystander_replies)} 个角色插话: "
+                                f"{[r['role_id'] for r in bystander_replies]}")
+                timer.mark("旁观者插话")
+
+        # 保存session（包含旁观者更新的心理状态和插话轮数）
+        if request.session_id and session_data is not None:
             save_session(request.session_id, session_data)
         timer.mark("session保存")
 
@@ -3825,7 +4135,8 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
             knowledge_route=knowledge_route,
             knowledge_search_result=knowledge_search_result,
             v10_milestones=debug.get("v10_milestones"),
-            v10_growth=debug.get("v10_growth"))
+            v10_growth=debug.get("v10_growth"),
+            bystander_replies=bystander_replies if bystander_replies else None)
         et = debug.get("event_type","none")
         if et and et != "none":
             resp.new_relationship_event = {

@@ -541,15 +541,18 @@ async def create_personality_session():
     return None
 async def call_personality_generate(role_ids, user_message, memory_context, chat_history,
                                      session_id=None, intimacy_map=None, temperature=0.9, max_tokens=500,
-                                     goodbye_hint=None):
+                                     goodbye_hint=None, enable_bystander=False, active_role_id=None):
     mode = "group" if len(role_ids) > 1 else "single"
     payload = {
         "mode": mode, "role_ids": role_ids, "user_message": user_message,
         "memory_context": memory_context, "chat_history": chat_history,
         "temperature": temperature, "max_tokens": max_tokens,
         "return_debug": True, "enable_memory_analysis": True,
-        "goodbye_hint": goodbye_hint
+        "goodbye_hint": goodbye_hint,
+        "enable_bystander": enable_bystander,
     }
+    if active_role_id:
+        payload["active_role_id"] = active_role_id
     if session_id:
         payload["session_id"] = session_id
     if intimacy_map:
@@ -937,7 +940,9 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
         role_ids=role_ids, user_message=user_message,
         memory_context=memory_context, chat_history=chat_history,
         session_id=session_id, intimacy_map=intimacy_map,
-        goodbye_hint=goodbye_hint
+        goodbye_hint=goodbye_hint,
+        enable_bystander=(mode == "single"),
+        active_role_id=role_ids[0] if mode == "single" else None
     )
     timer.mark("人格生成(LLM)")
     if not isinstance(result, dict):
@@ -1022,7 +1027,8 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
         "mode": mode,
         "intimacy": response_intimacy,
         "session_id": session_id,
-        "used_llm_analysis": llm_used
+        "used_llm_analysis": llm_used,
+        "bystander_replies": result.get("bystander_replies") or []
     }
 # -------------------------- 语音消息处理 --------------------------
 async def call_voice_server(audio_base64, role_ids, session_id=None, intimacy_map=None,
@@ -1369,7 +1375,10 @@ async def send_qq_private_msg(qq_number, text):
         if isinstance(e, httpx.ConnectError):
             logger.error(f"  → 连接失败：NapCat HTTP服务未启动/地址错误/防火墙拦截，NAPCAT_HTTP_URL={NAPCAT_HTTP_URL}")
         elif isinstance(e, httpx.TimeoutException):
-            logger.error(f"  → 超时：NapCat响应慢或卡死，超时10s")
+            logger.error(f"  → 超时：NapCat响应慢或卡死，超时10s。注意：超时不代表消息未发送，NapCat可能已收到请求并发送消息，因此按发送成功处理以避免重复发送。")
+            # v13.0修复：超时情况下NapCat大概率已经收到请求并发送了消息，
+            # 如果返回False会把回复放在响应体中导致NapCat重复发送，因此返回True。
+            return True
         elif isinstance(e, httpx.RemoteProtocolError):
             logger.error(f"  → 协议错误：NapCat返回了非法HTTP响应，可能是服务异常")
         return False
@@ -1952,6 +1961,67 @@ async def qq_webhook(request: Request):
     if not text:
         return {"status": "empty"}
     logger.info(f"[QQ] 收到消息 qq={qq_number}: {text[:50]}")
+
+    # ============================================================
+    # v13.0: 自拍快速响应流程（提前检测，拒绝立即返回，同意先发文字再发图）
+    # ============================================================
+    try:
+        from core.image_generator import is_selfie_request, get_selfie_system
+        if is_selfie_request(text):
+            logger.info(f"[QQ][自拍] 检测到自拍请求（快速响应模式）: {text[:50]}")
+            user_intimacy = await _get_user_intimacy(identity, "nianqi")
+            selfie_system = get_selfie_system()
+
+            if not selfie_system.client.available:
+                logger.warning("[QQ][自拍] 图像生成API不可用，降级到正常聊天流程")
+            else:
+                from core.image_generator import detect_selfie_mode, extract_scene, extract_clothing, extract_expression
+                mode = detect_selfie_mode(text)
+                scene = extract_scene(text) or "indoor"
+                clothing = extract_clothing(text) or "casual"
+                expression = extract_expression(text) or "gentle smile"
+
+                # 第一步：快速判断同意/拒绝（不生成图片，毫秒级响应）
+                is_allowed, selfie_msg = selfie_system.judger.judge("nianqi", user_intimacy)
+
+                if not is_allowed:
+                    # 拒绝：立即发送拒绝消息，直接返回（不走LLM聊天流程，用户秒收）
+                    logger.info(f"[QQ][自拍] 拒绝（立即返回）: {selfie_msg[:50]}")
+                    sent = await send_qq_private_msg(qq_number, selfie_msg)
+                    resp = {"sent_via_api": sent}
+                    if not sent:
+                        resp["reply"] = selfie_msg
+                    return resp
+
+                # 同意：立即发送接受消息（用户秒收到文字回应）
+                logger.info(f"[QQ][自拍] 同意，先发接受消息: {selfie_msg[:50]}")
+                await send_qq_private_msg(qq_number, selfie_msg)
+
+                # 第二步：生成图片（耗时操作，用户已收到文字回应，不会觉得卡）
+                selfie_result = await selfie_system.handle_selfie_request(
+                    user_id=identity, role_id="nianqi", intimacy=user_intimacy,
+                    scene=scene, expression=expression, clothing=clothing, mode=mode,
+                )
+
+                if selfie_result.get("allowed") and selfie_result.get("image_url"):
+                    # 图片生成成功，发送图片
+                    from core.napcat import send_private_image
+                    await send_private_image(qq_number, selfie_result["image_url"])
+                    logger.info(f"[QQ][自拍] 图片发送成功: {selfie_result['image_url'][:60]}")
+                else:
+                    # 图片生成失败（第二次judge拒绝或生成失败），发送失败说明
+                    fail_msg = selfie_result.get("message", "图片生成失败了，稍后再试好不好？")
+                    await send_qq_private_msg(qq_number, fail_msg)
+                    logger.info(f"[QQ][自拍] 图片生成失败: {fail_msg[:50]}")
+
+                # 自拍流程完成，直接返回（不返回reply，避免NapCat重复发送）
+                return {"sent_via_api": True}
+    except Exception as selfie_e:
+        logger.warning(f"[QQ][自拍] 快速响应异常，降级到正常聊天流程: {type(selfie_e).__name__}: {selfie_e}")
+
+    # ============================================================
+    # 正常聊天流程（非自拍请求，或自拍快速响应失败降级）
+    # ============================================================
     try:
         qq_msg_id = str(body.get("message_id", "")) or None
         result = await identity_queue.submit(
@@ -1959,60 +2029,29 @@ async def qq_webhook(request: Request):
             lambda: process_chat_message(identity, text, ["nianqi"], history)
         )
         reply_text = result["reply"]
+        # v13.0: 收集旁观者插话（其他角色旁听后主动插话）
+        bystander_replies = result.get("bystander_replies") or []
     except Exception as e:
         logger.error(f"[QQ] 消息处理失败: {e}", exc_info=True)
         reply_text = "抱歉，我刚才走神了，能再说一遍吗？"
+        bystander_replies = []
 
-    # P2/P3 修复：检测自拍请求，自动生成图片
-    selfie_image_url = ""
-    try:
-        from core.image_generator import is_selfie_request, get_selfie_system
-        if is_selfie_request(text):
-            logger.info(f"[QQ][自拍] 检测到自拍请求: {text[:50]}")
-            # P3 修复：获取用户亲密度（优先从proactive_server读取admin面板的数值）
-            user_intimacy = await _get_user_intimacy(identity, "nianqi")
+    # 发送消息
+    sent = await send_qq_private_msg(qq_number, reply_text)
 
-            # 调用自拍系统生成
-            selfie_system = get_selfie_system()
-            if selfie_system.client.available:
-                from core.image_generator import detect_selfie_mode, extract_scene, extract_clothing, extract_expression
-                mode = detect_selfie_mode(text)
-                scene = extract_scene(text) or "indoor"
-                clothing = extract_clothing(text) or "casual"
-                expression = extract_expression(text) or "gentle smile"
+    # v13.0: 发送旁观者插话（每条以角色名开头，间隔发送）
+    for br in bystander_replies:
+        try:
+            br_name = br.get("role_name") or br.get("role_id", "")
+            br_content = br.get("content", "")
+            if br_content:
+                br_text = f"{br_name}：{br_content}"
+                await asyncio.sleep(0.8)  # 模拟角色思考间隔，避免消息同时到达
+                await send_qq_private_msg(qq_number, br_text)
+                logger.info(f"[QQ] 旁观者插话: {br_name} - {br_content[:40]}")
+        except Exception as br_e:
+            logger.warning(f"[QQ] 旁观者插话发送失败: {br_e}")
 
-                selfie_result = await selfie_system.handle_selfie_request(
-                    user_id=identity,
-                    role_id="nianqi",
-                    intimacy=user_intimacy,
-                    scene=scene,
-                    expression=expression,
-                    clothing=clothing,
-                    mode=mode,
-                )
-
-                if selfie_result.get("allowed") and selfie_result.get("image_url"):
-                    selfie_image_url = selfie_result["image_url"]
-                    # 如果角色有开场白，替换掉默认回复
-                    if selfie_result.get("message"):
-                        reply_text = selfie_result["message"]
-                    logger.info(f"[QQ][自拍] 生成成功: {selfie_image_url[:60]}... 模式={mode.value}")
-                elif not selfie_result.get("allowed"):
-                    # 亲密度不够，用角色的拒绝理由回复
-                    if selfie_result.get("message"):
-                        reply_text = selfie_result["message"]
-                    logger.info(f"[QQ][自拍] 被拒绝: {selfie_result.get('error')} 理由={selfie_result.get('message', '')[:50]}")
-            else:
-                logger.warning("[QQ][自拍] 图像生成API不可用（未配置SEEDREAM_MODEL）")
-    except Exception as selfie_e:
-        logger.warning(f"[QQ][自拍] 处理异常: {type(selfie_e).__name__}: {selfie_e}")
-
-    # 发送消息（有图则图文一起发，无图则只发文本）
-    if selfie_image_url:
-        from core.napcat import send_private_image
-        sent = await send_private_image(qq_number, selfie_image_url, text=reply_text)
-    else:
-        sent = await send_qq_private_msg(qq_number, reply_text)
     if not sent and NAPCAT_HTTP_URL:
         logger.warning(f"[QQ] NapCat API 发送失败，回复放在响应体中")
     total_dur = time.perf_counter() - webhook_t0
@@ -2471,6 +2510,25 @@ async def websocket_endpoint(websocket: WebSocket):
                     "intimacy": result["intimacy"], "session_id": session_id,
                     "used_llm_analysis": result["used_llm_analysis"]
                 }, ensure_ascii=False))
+                # v13.0: 发送旁观者插话（其他角色旁听后主动插话）
+                bystander_replies = result.get("bystander_replies") or []
+                for br in bystander_replies:
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "bystander_reply",
+                            "role_id": br.get("role_id"),
+                            "role_name": br.get("role_name"),
+                            "content": br.get("content"),
+                            "emotion": br.get("emotion"),
+                            "emotion_intensity": br.get("emotion_intensity"),
+                            "probability": br.get("probability"),
+                            "reason": br.get("reason"),
+                            "relationship_clue": br.get("relationship_clue"),
+                            "session_id": session_id,
+                        }, ensure_ascii=False))
+                        logger.info(f"[{username}] 旁观者插话: {br.get('role_name')} - {br.get('content','')[:40]}")
+                    except Exception as be:
+                        logger.warning(f"发送旁观者插话失败: {be}")
             except WebSocketDisconnect:
                 raise
             except Exception as me:
