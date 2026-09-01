@@ -19,6 +19,9 @@ pydantic>=2.0.0                    # 代码使用了 pydantic v2 语法（field_
 pyyaml>=6.0                         # characters/*.yaml 角色配置加载 + image_generator 提示词模板
 bcrypt>=4.0                         # 管理员密码哈希；4.x 有预编译 wheel，Railway 构建无需 Rust 工具链
 
+# ---- 向量数据库（Pinecone，v3.0 新增）----
+pinecone>=5.0.0                     # Pinecone 官方 SDK，vector_server.py 记忆存储/检索用
+
 # ---- TTS 语音合成 ----
 edge-tts>=6.1.0                     # 微软免费 TTS，默认引擎；函数内延迟导入
 aiohttp>=3.9.0                       # edge-tts 底层依赖，显式锁定避免传递依赖版本漂移
