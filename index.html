@@ -185,6 +185,81 @@
       min-width: 0; min-height: 100dvh; display: flex; flex-direction: column;
       background: var(--bg);
     }
+    /* ===== Live2D 形象窗口 ===== */
+    .live2d-stage {
+      position: relative;
+      width: 100%;
+      height: 260px;
+      background: linear-gradient(180deg, #e8ecf1 0%, #f0f2f5 100%);
+      border-bottom: 1px solid var(--border);
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    .live2d-stage canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    .live2d-placeholder {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .live2d-placeholder .ph-icon {
+      font-size: 48px;
+      opacity: 0.5;
+    }
+    .live2d-status {
+      position: absolute;
+      top: 10px;
+      left: 14px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      background: rgba(255,255,255,0.85);
+      border-radius: 999px;
+      font-size: 12px;
+      color: var(--text-soft);
+      backdrop-filter: blur(4px);
+      z-index: 2;
+    }
+    .live2d-status .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+    .live2d-status.listening .status-dot { background: var(--success); animation: pulse-dot 1s infinite; }
+    .live2d-status.speaking .status-dot { background: var(--primary); animation: pulse-dot 0.6s infinite; }
+    .live2d-status.thinking .status-dot { background: var(--warning); animation: pulse-dot 1.2s infinite; }
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(1.3); }
+    }
+    .live2d-toggle {
+      position: absolute;
+      top: 10px;
+      right: 14px;
+      width: 32px; height: 32px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.85);
+      border: 1px solid var(--border-soft);
+      color: var(--text-soft);
+      font-size: 14px;
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+      z-index: 2;
+      backdrop-filter: blur(4px);
+    }
+    .live2d-toggle:hover { color: var(--primary); border-color: var(--primary); }
+    .live2d-stage.collapsed { height: 0; border-bottom: none; }
     .chat-header {
       height: 60px; padding: 0 18px; display: flex; align-items: center; gap: 12px;
       border-bottom: 1px solid var(--border); background: var(--panel);
@@ -420,6 +495,9 @@
       .admin-panel { padding: 14px; }
     }
   </style>
+  <!-- Live2D 渲染库 -->
+  <script src="https://cdn.jsdelivr.net/npm/pixi.js@7.4.0/dist/pixi.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
 </head>
 <body>
   <div id="app">
@@ -553,6 +631,18 @@
               <button id="header-admin-btn" class="ghost-btn hidden" type="button">管理后台</button>
             </div>
           </header>
+          <!-- Live2D 形象窗口 -->
+          <div id="live2d-stage" class="live2d-stage">
+            <div id="live2d-status" class="live2d-status">
+              <span class="status-dot"></span>
+              <span id="live2d-status-text">待机中</span>
+            </div>
+            <button id="live2d-toggle" class="live2d-toggle" type="button" title="收起/展开形象">▾</button>
+            <div id="live2d-placeholder" class="live2d-placeholder">
+              <span class="ph-icon">🎭</span>
+              <span>形象加载中...</span>
+            </div>
+          </div>
           <div id="messages" class="messages"></div>
           <footer class="composer">
             <button id="voice-btn" class="icon-btn voice-btn" type="button" title="按住说话">🎤</button>
@@ -720,6 +810,38 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     let recordingTimerInterval = null;
     let recordingCancelled = false;
     let currentAudio = null;  // 当前播放的语音
+    // ===== Live2D 形象配置 =====
+    const LIVE2D_CONFIG = {
+      // 每个角色的模型路径（相对 index.html 的路径）
+      // 念琦→Hiyori(温柔)  清禾→Haru(知性学姐)  璟雯→Epsilon(活泼傲娇)
+      models: {
+        nianqi:  "models/hiyori/hiyori_free/runtime/hiyori_free_t08.model3.json",
+        qinghe:  "models/haru/runtime/haru.model3.json",
+        jingwen: "models/epsilon/epsilon_free/runtime/Epsilon_free.model3.json",
+      },
+      // 模型显示缩放（三个模型尺寸不同，可分别调整，统一用一个值先跑通）
+      scale: 0.15,
+      // 模型垂直偏移（正数向下）
+      yOffset: 50,
+      // 自动眨眼间隔范围（毫秒）
+      blinkIntervalMin: 2500,
+      blinkIntervalMax: 6000,
+      // 眨眼持续时间（毫秒）
+      blinkDuration: 150,
+    };
+    // Live2D 运行时状态
+    let live2dApp = null;        // PIXI 应用
+    let live2dModel = null;      // 当前加载的模型
+    let live2dCurrentRole = null; // 当前角色ID
+    let live2dInitialized = false; // 是否已初始化
+    let live2dMouthValue = 0;    // 当前嘴部开合度（口型同步用）
+    let live2dBlinkTimer = null; // 眨眼定时器
+    let live2dBlinking = false;  // 是否正在眨眼
+    let live2dBlinkStart = 0;    // 眨眼开始时间
+    let live2dCollapsed = false; // 形象窗口是否收起
+    let live2dLipsyncRAF = null;  // 口型同步的 requestAnimationFrame ID
+    let live2dAudioCtx = null;     // 口型同步用的 AudioContext
+    let live2dAnalyser = null;     // 口型同步用的 AnalyserNode
 
     const $ = (s) => document.querySelector(s);
     const $$ = (s) => Array.from(document.querySelectorAll(s));
@@ -919,6 +1041,10 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       renderQQBindStatus();
       ensureConversations(currentUser.username);
       switchConversation(`single-${ROLES[0].id}`);
+      // 普通用户登录后初始化 Live2D 形象（管理员后台不需要）
+      if (currentUser.role !== "admin" && !goAdmin) {
+        setTimeout(() => initLive2D(), 300);
+      }
       if (!currentUser.nickname || currentUser.nickname === currentUser.username) {
         openNicknameModal(true);
       }
@@ -978,6 +1104,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         showToast("已连接", "success");
       } else if (msg.type === "reply") {
         removeTypingIndicator();
+        setLive2DStatus("idle", "待机中");
         if (conv) {
           // v13.0修复：直接在消息处理层设置imageUrl，不依赖appendAIMessage的参数传递
           if (msg.imageUrl) {
@@ -1000,6 +1127,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         }
       } else if (msg.type === "voice_reply") {
         removeTypingIndicator();
+        setLive2DStatus("idle", "待机中");
         if (conv) {
           appendAIMessage(conv, msg.content, msg.role_ids?.[0]);
           // 如果有语音，在文本气泡后追加语音气泡
@@ -1097,6 +1225,16 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       renderConversationList();
       renderChatHeader();
       renderMessages();
+      // 切换单聊角色时，联动切换 Live2D 模型
+      const conv = convs[convId];
+      if (conv && conv.type === "single" && conv.roleId && live2dInitialized) {
+        if (live2dCurrentRole !== conv.roleId) {
+          loadLive2DModel(conv.roleId);
+        }
+      } else if (conv && conv.type === "group") {
+        // 群聊时保持第一个角色的模型，状态显示群聊
+        setLive2DStatus("idle", "群聊中");
+      }
     }
 
     function renderChatHeader() {
@@ -1293,11 +1431,288 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
 
       if (sendWS({ action: "chat", message: content, role_ids: conv.roleIds || [conv.roleId] })) {
         addTypingIndicator();
+        setLive2DStatus("thinking", "思考中");
         return;
       }
       showToast("未连接到服务器", "error");
     }
 
+    // ===== Live2D 形象核心 =====
+    async function initLive2D() {
+      if (live2dInitialized) return;
+      const stage = $("#live2d-stage");
+      if (!stage) return;
+      // 检测 WebGL 支持
+      try {
+        const testCanvas = document.createElement("canvas");
+        const gl = testCanvas.getContext("webgl2") || testCanvas.getContext("webgl");
+        if (!gl) {
+          console.warn("[Live2D] 浏览器不支持 WebGL");
+          const ph = $("#live2d-placeholder");
+          if (ph) {
+            ph.querySelector(".ph-icon").textContent = "⚠️";
+            ph.querySelector("span:last-child").textContent = "当前浏览器不支持 WebGL，无法显示形象";
+          }
+          return;
+        }
+      } catch (e) {
+        console.warn("[Live2D] WebGL 检测失败:", e);
+      }
+      try {
+        // 让 PIXI 自己创建 canvas（兼容性更好）
+        live2dApp = new PIXI.Application({
+          width: stage.clientWidth || 800,
+          height: stage.clientHeight || 260,
+          backgroundAlpha: 0,
+          antialias: true,
+          autoStart: true,
+          powerPreference: "high-performance",
+        });
+        live2dApp.view.style.display = "block";
+        live2dApp.view.style.width = "100%";
+        live2dApp.view.style.height = "100%";
+        stage.insertBefore(live2dApp.view, stage.firstChild);
+        // 窗口大小变化时调整渲染尺寸
+        window.addEventListener("resize", () => {
+          if (live2dApp && !live2dCollapsed) {
+            live2dApp.renderer.resize(stage.clientWidth, stage.clientHeight);
+            if (live2dModel) {
+              live2dModel.x = stage.clientWidth / 2;
+              live2dModel.y = stage.clientHeight - LIVE2D_CONFIG.yOffset;
+            }
+          }
+        });
+        // 加载默认角色模型
+        const defaultRole = ROLES[0]?.id || "nianqi";
+        await loadLive2DModel(defaultRole);
+        // 启动动画循环
+        startLive2DAnimationLoop();
+        // 启动自动眨眼
+        scheduleNextBlink();
+        live2dInitialized = true;
+        setLive2DStatus("idle", "待机中");
+        // 隐藏占位符
+        const ph = $("#live2d-placeholder");
+        if (ph) ph.style.display = "none";
+      } catch (e) {
+        console.error("[Live2D] 初始化失败:", e);
+        const ph = $("#live2d-placeholder");
+        if (ph) {
+          ph.querySelector(".ph-icon").textContent = "⚠️";
+          ph.querySelector("span:last-child").textContent = "形象加载失败，请检查网络";
+        }
+      }
+    }
+    async function loadLive2DModel(roleId) {
+      if (!live2dApp) return;
+      const modelUrl = LIVE2D_CONFIG.models[roleId] || LIVE2D_CONFIG.models.nianqi;
+      try {
+        // 销毁旧模型
+        if (live2dModel) {
+          live2dApp.stage.removeChild(live2dModel);
+          live2dModel.destroy({ children: true });
+          live2dModel = null;
+        }
+        // 显示加载中
+        const ph = $("#live2d-placeholder");
+        if (ph) {
+          ph.style.display = "flex";
+          ph.querySelector(".ph-icon").textContent = "🎭";
+          ph.querySelector("span:last-child").textContent = "形象加载中...";
+        }
+        // 加载新模型
+        const model = await PIXI.live2d.Live2DModel.from(modelUrl);
+        setupLive2DModel(model);
+        live2dApp.stage.addChild(model);
+        live2dModel = model;
+        live2dCurrentRole = roleId;
+        // 隐藏占位符
+        if (ph) ph.style.display = "none";
+        console.log(`[Live2D] 模型加载成功: ${roleId}`);
+      } catch (e) {
+        console.error(`[Live2D] 模型加载失败 (${roleId}):`, e);
+        const ph = $("#live2d-placeholder");
+        if (ph) {
+          ph.querySelector(".ph-icon").textContent = "⚠️";
+          ph.querySelector("span:last-child").textContent = "模型加载失败";
+        }
+      }
+    }
+    function setupLive2DModel(model) {
+      const stage = $("#live2d-stage");
+      const stageW = stage?.clientWidth || 800;
+      const stageH = stage?.clientHeight || 260;
+      // 设置缩放
+      model.scale.set(LIVE2D_CONFIG.scale);
+      // Live2D 模型原点在底部中心，直接对齐舞台底部中心
+      model.x = stageW / 2;
+      model.y = stageH - LIVE2D_CONFIG.yOffset;
+      // 初始嘴闭合
+      setLive2DParameter(model, "ParamMouthOpenY", 0);
+      setLive2DParameter(model, "ParamMouthForm", 0);
+      // 眼睛睁开
+      setLive2DParameter(model, "ParamEyeLOpen", 1);
+      setLive2DParameter(model, "ParamEyeROpen", 1);
+      // 点击模型触发随机表情
+      model.interactive = true;
+      model.on("pointerdown", () => {
+        const expressions = ["ParamBrowLY", "ParamBrowRY"];
+        expressions.forEach(p => {
+          const cur = getLive2DParameter(model, p) || 0;
+          setLive2DParameter(model, p, cur + (Math.random() - 0.5) * 0.5);
+        });
+        setTimeout(() => {
+          expressions.forEach(p => setLive2DParameter(model, p, 0));
+        }, 500);
+      });
+    }
+    // 参数名别名解析：同时支持驼峰(ParamMouthOpenY)和大写下划线(PARAM_MOUTH_OPEN_Y)
+    function getParamAliases(paramId) {
+      const aliases = [paramId];
+      // 驼峰转大写下划线：ParamMouthOpenY → PARAM_MOUTH_OPEN_Y
+      if (/^Param[A-Z]/.test(paramId)) {
+        const upper = paramId.replace(/([A-Z])/g, '_$1').toUpperCase();
+        aliases.push(upper);
+      }
+      // 大写下划线转驼峰：PARAM_MOUTH_OPEN_Y → ParamMouthOpenY
+      if (/^PARAM_/.test(paramId)) {
+        const camel = paramId.toLowerCase().replace(/_([a-z])/g, (_, c) => c.toUpperCase()).replace(/^param/, 'Param');
+        aliases.push(camel);
+      }
+      return [...new Set(aliases)];
+    }
+    function resolveParamId(core, paramId) {
+      // 遍历所有别名，返回模型实际支持的参数名
+      const aliases = getParamAliases(paramId);
+      for (const alias of aliases) {
+        try {
+          const idx = core.getParameterIndex(alias);
+          if (idx >= 0) return alias;
+        } catch (_) {}
+      }
+      return null;
+    }
+    function setLive2DParameter(model, paramId, value) {
+      if (!model?.internalModel?.coreModel) return;
+      const core = model.internalModel.coreModel;
+      const actualId = resolveParamId(core, paramId);
+      if (!actualId) return;
+      try {
+        // 优先用 byId API
+        if (typeof core.setParameterValueById === "function") {
+          core.setParameterValueById(actualId, value);
+        } else {
+          const idx = core.getParameterIndex(actualId);
+          if (idx >= 0) core.setParameterValue(idx, value);
+        }
+      } catch (_) {}
+    }
+    function getLive2DParameter(model, paramId) {
+      if (!model?.internalModel?.coreModel) return 0;
+      const core = model.internalModel.coreModel;
+      const actualId = resolveParamId(core, paramId);
+      if (!actualId) return 0;
+      try {
+        if (typeof core.getParameterValueById === "function") {
+          return core.getParameterValueById(actualId);
+        }
+        const idx = core.getParameterIndex(actualId);
+        if (idx >= 0) return core.getParameterValue(idx);
+        return 0;
+      } catch (e) {
+        return 0;
+      }
+    }
+    function startLive2DAnimationLoop() {
+      if (!live2dApp) return;
+      let time = 0;
+      live2dApp.ticker.add(() => {
+        time += 1 / 60;
+        if (!live2dModel) return;
+        // 呼吸（身体轻微起伏）
+        const breath = Math.sin(time * 1.2) * 0.015;
+        setLive2DParameter(live2dModel, "ParamBreath", breath + 0.5);
+        // 头部轻微左右摆动
+        const headX = Math.sin(time * 0.7) * 0.08;
+        setLive2DParameter(live2dModel, "ParamBodyAngleX", headX);
+        // 头部轻微上下
+        const headY = Math.sin(time * 0.5 + 1) * 0.04;
+        setLive2DParameter(live2dModel, "ParamBodyAngleY", headY);
+        // 视线微动
+        const eyeX = Math.sin(time * 0.9) * 0.15;
+        const eyeY = Math.sin(time * 0.6 + 2) * 0.1;
+        setLive2DParameter(live2dModel, "ParamEyeBallX", eyeX);
+        setLive2DParameter(live2dModel, "ParamEyeBallY", eyeY);
+        // 眨眼处理
+        updateBlink();
+        // 嘴部平滑（口型同步）
+        const targetMouth = live2dMouthValue;
+        const curMouth = getLive2DParameter(live2dModel, "ParamMouthOpenY") || 0;
+        const smoothMouth = curMouth + (targetMouth - curMouth) * 0.3;
+        setLive2DParameter(live2dModel, "ParamMouthOpenY", smoothMouth);
+        // 说话时轻微摇头
+        if (live2dMouthValue > 0.1) {
+          const talkHead = Math.sin(time * 8) * 0.03;
+          setLive2DParameter(live2dModel, "ParamBodyAngleX", headX + talkHead);
+        }
+      });
+    }
+    function scheduleNextBlink() {
+      const delay = LIVE2D_CONFIG.blinkIntervalMin +
+        Math.random() * (LIVE2D_CONFIG.blinkIntervalMax - LIVE2D_CONFIG.blinkIntervalMin);
+      live2dBlinkTimer = setTimeout(() => {
+        triggerBlink();
+        scheduleNextBlink();
+      }, delay);
+    }
+    function triggerBlink() {
+      live2dBlinking = true;
+      live2dBlinkStart = performance.now();
+    }
+    function updateBlink() {
+      if (!live2dBlinking || !live2dModel) return;
+      const elapsed = performance.now() - live2dBlinkStart;
+      const dur = LIVE2D_CONFIG.blinkDuration;
+      if (elapsed >= dur) {
+        live2dBlinking = false;
+        setLive2DParameter(live2dModel, "ParamEyeLOpen", 1);
+        setLive2DParameter(live2dModel, "ParamEyeROpen", 1);
+        return;
+      }
+      // 眨眼曲线：先闭眼再睁眼
+      let openness;
+      if (elapsed < dur / 2) {
+        openness = 1 - (elapsed / (dur / 2));
+      } else {
+        openness = (elapsed - dur / 2) / (dur / 2);
+      }
+      setLive2DParameter(live2dModel, "ParamEyeLOpen", openness);
+      setLive2DParameter(live2dModel, "ParamEyeROpen", openness);
+    }
+    function setLive2DMouth(value) {
+      // 口型同步：设置目标嘴部开合度，动画循环里会平滑过渡
+      live2dMouthValue = Math.max(0, Math.min(1, value));
+    }
+    function setLive2DStatus(status, text) {
+      const el = $("#live2d-status");
+      const textEl = $("#live2d-status-text");
+      if (!el) return;
+      el.className = `live2d-status ${status}`;
+      if (textEl && text) textEl.textContent = text;
+    }
+    function toggleLive2DStage() {
+      const stage = $("#live2d-stage");
+      const btn = $("#live2d-toggle");
+      if (!stage) return;
+      live2dCollapsed = !live2dCollapsed;
+      stage.classList.toggle("collapsed", live2dCollapsed);
+      if (btn) btn.textContent = live2dCollapsed ? "▴" : "▾";
+      // 收起时暂停渲染以节省性能
+      if (live2dApp) {
+        if (live2dCollapsed) live2dApp.stop();
+        else live2dApp.start();
+      }
+    }
     // ===== 语音录音 =====
     async function startRecording() {
       if (isRecording || isTyping) return;
@@ -1329,6 +1744,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       recordingStartTime = Date.now();
       $("#voice-btn").classList.add("recording");
       $("#recording-overlay").classList.remove("hidden");
+      setLive2DStatus("listening", "聆听中");
       updateRecordingTimer();
       recordingTimerInterval = setInterval(updateRecordingTimer, 200);
       setTimeout(() => { if (isRecording) stopRecording(false); }, 60000);
@@ -1341,6 +1757,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       clearInterval(recordingTimerInterval);
       $("#voice-btn").classList.remove("recording");
       $("#recording-overlay").classList.add("hidden");
+      if (cancelled) setLive2DStatus("idle", "待机中");
       if (mediaRecorder && mediaRecorder.state !== "inactive") {
         mediaRecorder.stop();
       }
@@ -1388,6 +1805,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         renderConversationList();
         if (currentUser) saveConversationsToLocal(currentUser.username);
         addTypingIndicator();
+        setLive2DStatus("thinking", "思考中");
         if (!sendWS({
           action: "voice_chat",
           audio: base64,
@@ -1395,6 +1813,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
           role_ids: conv.roleIds || [conv.roleId]
         })) {
           removeTypingIndicator();
+          setLive2DStatus("idle", "待机中");
           showToast("未连接到服务器", "error");
         }
       };
@@ -1438,11 +1857,8 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     }
 
     function playVoice(bubbleEl, audioBase64, audioFormat, durEl) {
-      if (currentAudio) {
-        currentAudio.pause();
-        currentAudio = null;
-        document.querySelectorAll(".voice-msg.playing").forEach(el => el.classList.remove("playing"));
-      }
+      // 停止上一个语音和口型同步
+      stopVoicePlayback();
       const mime = audioFormat === "mp3" ? "audio/mpeg" : `audio/${audioFormat}`;
       const byteChars = atob(audioBase64);
       const byteNumbers = new Array(byteChars.length);
@@ -1451,11 +1867,42 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       const url = URL.createObjectURL(blob);
       currentAudio = new Audio(url);
       bubbleEl.classList.add("playing");
+      // 初始化 AudioContext 和 Analyser（只创建一次）
+      if (!live2dAudioCtx) {
+        try {
+          live2dAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          live2dAnalyser = live2dAudioCtx.createAnalyser();
+          live2dAnalyser.fftSize = 256;
+          live2dAnalyser.smoothingTimeConstant = 0.5;
+        } catch (e) {
+          console.warn("[口型同步] AudioContext 创建失败:", e);
+        }
+      }
+      // 连接音频到分析器
+      if (live2dAudioCtx && live2dAnalyser && currentAudio) {
+        try {
+          const source = live2dAudioCtx.createMediaElementSource(currentAudio);
+          source.connect(live2dAnalyser);
+          live2dAnalyser.connect(live2dAudioCtx.destination);
+        } catch (e) {
+          console.warn("[口型同步] 音频连接失败:", e);
+        }
+      }
+      // 恢复 AudioContext（浏览器自动暂停策略）
+      if (live2dAudioCtx && live2dAudioCtx.state === "suspended") {
+        live2dAudioCtx.resume();
+      }
+      // 启动口型同步循环
+      startLipsyncLoop();
+      setLive2DStatus("speaking", "说话中");
       currentAudio.onended = () => {
         bubbleEl.classList.remove("playing");
         URL.revokeObjectURL(url);
         currentAudio = null;
         if (durEl) durEl.textContent = "点击播放";
+        stopLipsyncLoop();
+        setLive2DMouth(0);
+        setLive2DStatus("idle", "待机中");
       };
       currentAudio.ontimeupdate = () => {
         if (durEl && currentAudio && isFinite(currentAudio.duration)) {
@@ -1467,7 +1914,50 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         showToast("语音播放失败", "error");
         bubbleEl.classList.remove("playing");
         URL.revokeObjectURL(url);
+        stopLipsyncLoop();
+        setLive2DMouth(0);
+        setLive2DStatus("idle", "待机中");
       });
+    }
+    function stopVoicePlayback() {
+      if (currentAudio) {
+        currentAudio.pause();
+        currentAudio = null;
+      }
+      document.querySelectorAll(".voice-msg.playing").forEach(el => el.classList.remove("playing"));
+      stopLipsyncLoop();
+      setLive2DMouth(0);
+    }
+    function startLipsyncLoop() {
+      stopLipsyncLoop();
+      const dataArray = new Uint8Array(live2dAnalyser ? live2dAnalyser.frequencyBinCount : 128);
+      function tick() {
+        if (!live2dAnalyser || !currentAudio) {
+          stopLipsyncLoop();
+          setLive2DMouth(0);
+          return;
+        }
+        live2dAnalyser.getByteFrequencyData(dataArray);
+        // 计算低频段平均音量（人声主要在低频）
+        let sum = 0;
+        const lowEnd = Math.floor(dataArray.length * 0.4);
+        for (let i = 0; i < lowEnd; i++) sum += dataArray[i];
+        const avg = sum / lowEnd / 255; // 归一化 0-1
+        // 音量映射：加阈值和增益，让嘴型更明显
+        const threshold = 0.05;
+        const gain = 2.2;
+        let mouth = Math.max(0, (avg - threshold) * gain);
+        mouth = Math.min(1, mouth);
+        setLive2DMouth(mouth);
+        live2dLipsyncRAF = requestAnimationFrame(tick);
+      }
+      tick();
+    }
+    function stopLipsyncLoop() {
+      if (live2dLipsyncRAF) {
+        cancelAnimationFrame(live2dLipsyncRAF);
+        live2dLipsyncRAF = null;
+      }
     }
 
     async function typeWriter(el, text, speed = CONFIG.TYPEWRITER_SPEED) {
@@ -1984,6 +2474,12 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       $("#message-input").addEventListener("keydown", e => {
         if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
       });
+
+      // Live2D 形象收起/展开按钮
+      const live2dToggleBtn = $("#live2d-toggle");
+      if (live2dToggleBtn) {
+        live2dToggleBtn.addEventListener("click", () => toggleLive2DStage());
+      }
 
       // 语音按钮：点击开始/停止录音
       const voiceBtn = $("#voice-btn");
