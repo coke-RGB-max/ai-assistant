@@ -2737,7 +2737,7 @@ class MemoryDecaySystem:
         # 词语级分词：按标点、空格、常见停用词分割
         def tokenize(text: str) -> set:
             # 移除标点和数字
-            cleaned = re.sub(r'[，。！？、；：""''（）\s\d]+', ' ', text).strip()
+            cleaned = re.sub(r'[，。！？、；：“”‘’（）\s\d]+', ' ', text).strip()
             if JIEBA_AVAILABLE:
                 # 使用 jieba 精确分词，只保留长度>=2的词，避免2-gram噪音匹配
                 words = set()

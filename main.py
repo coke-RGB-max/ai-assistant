@@ -2981,9 +2981,10 @@ async def admin_list_characters(request: Request):
     if err:
         return err
     try:
-        from core.characters.loader import get_character_loader
-        loader = get_character_loader()
-        characters = loader.list_characters()
+        # FIX: 原写法 from core.characters.loader import get_character_loader 路径/符号均不存在
+        # （loader 实际在顶层 characters 包，且为函数式 API），调用必 500
+        from characters.loader import get_all_roles
+        characters = list(get_all_roles().values())
         return {"characters": characters}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -2996,12 +2997,12 @@ async def admin_get_character(request: Request, role_id: str):
     if err:
         return err
     try:
-        from core.characters.loader import get_character_loader
-        loader = get_character_loader()
-        char = loader.get_character(role_id)
+        # FIX: 改用 characters.loader 真实函数式 API；角色配置是 dict，无 to_dict()
+        from characters.loader import get_role
+        char = get_role(role_id)
         if not char:
             return JSONResponse({"error": "character not found"}, status_code=404)
-        return {"role_id": role_id, "config": char.to_dict()}
+        return {"role_id": role_id, "config": char}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
