@@ -441,6 +441,9 @@ class LongingEngine:
                 "dominant_value": remote.get("dominant_value", self.dominant_desire(desire)[1]),
                 "motivation_score": remote.get("motivation_score", self.calc_motivation_score(desire)),
                 "breakdown": desire,
+                # FIX: InnerEventGenerator.generate 与状态接口依赖顶层 mood，
+                # v13 重构时远程分支漏带，导致 motivation["mood"] KeyError
+                "mood": mood,
             }
         # 2. 降级：本地计算欲望状态
         desire = self.calc_local_desire(role_id, intimacy, attachment, idle_hours, mood, hour)
@@ -453,6 +456,8 @@ class LongingEngine:
             "dominant_value": dom_val,
             "motivation_score": score,
             "breakdown": desire,
+            # FIX: 与远程分支保持同一输出契约，补顶层 mood
+            "mood": mood,
         }
 
 # ============================================================
@@ -632,26 +637,33 @@ class InnerEventGenerator:
         motivation: Dict[str, Any],
         related_memory: Optional[Dict[str, Any]],
     ) -> Dict[str, str]:
-        bd = motivation["breakdown"]
-        mood = motivation["mood"]
+        # FIX: v13 起 motivation 来自 LongingEngine，其 breakdown 为欲望五维
+        # (longing/contact_desire/...)，不再保证含 memory/idle/attachment/mood 子键，
+        # 顶层 mood 也可能缺失；全部改为防御取值，缺项按 0/calm 处理，杜绝 KeyError 炸掉整轮 tick
+        bd = motivation.get("breakdown", {}) or {}
+        mood = motivation.get("mood") or "calm"
+        bd_memory = float(bd.get("memory", 0.0))
+        bd_attachment = float(bd.get("attachment", 0.0))
+        bd_idle = float(bd.get("idle", 0.0))
+        bd_mood = float(bd.get("mood", 0.0))
         candidates: List[Dict[str, str]] = []
 
         # 1. 记忆触发：检索到高价值共同记忆
-        if related_memory and bd["memory"] >= 8.0:
+        if related_memory and bd_memory >= 8.0:
             summary = related_memory.get("summary", "")
             if summary:
                 candidates.append({
                     "reason_type": "memory_recall",
                     "reason_detail": summary,
-                    "weight": bd["memory"] + 10.0,
+                    "weight": bd_memory + 10.0,
                 })
 
         # 2. 想念：空闲久 + 依恋/孤独
-        if idle_hours >= 24 and (bd["attachment"] >= 10.0 or mood == "lonely"):
+        if idle_hours >= 24 and (bd_attachment >= 10.0 or mood == "lonely"):
             candidates.append({
                 "reason_type": "missing_you",
                 "reason_detail": f"已经{int(idle_hours)}小时没联系了，有点想对方",
-                "weight": bd["idle"] * 0.5 + bd["attachment"],
+                "weight": bd_idle * 0.5 + bd_attachment,
             })
 
         # 3. 久未联系问候
@@ -659,7 +671,7 @@ class InnerEventGenerator:
             candidates.append({
                 "reason_type": "long_time_no_see",
                 "reason_detail": f"好几天没聊了，想知道对方最近怎么样",
-                "weight": bd["idle"] * 0.3,
+                "weight": bd_idle * 0.3,
             })
 
         # 4. 情绪需求：心情低落/开心想分享
@@ -667,14 +679,14 @@ class InnerEventGenerator:
             candidates.append({
                 "reason_type": "emotion_need",
                 "reason_detail": "现在心情有点低落，想找对方说说话",
-                "weight": bd["mood"] + 5.0,
+                "weight": bd_mood + 5.0,
             })
         elif mood in ("happy", "excited"):
             noise = random.choice(ROLE_DAILY_NOISE.get(role_id, ["刚遇到一件小事"]))
             candidates.append({
                 "reason_type": "daily_share",
                 "reason_detail": f"刚在{noise}，想分享给对方",
-                "weight": bd["mood"],
+                "weight": bd_mood,
             })
 
         # 5. 日常分享（基于 daily_noise，权重较低）
