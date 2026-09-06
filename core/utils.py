@@ -221,7 +221,7 @@ def safe_json_parse(text: str, model: Optional[type] = None) -> Optional[Dict]:
         data = json.loads(json_str)
     except json.JSONDecodeError:
         try: data = json.loads(json_str.replace('\n',' ').replace('\r',''))
-        except: return None
+        except Exception: return None
     if model and data:
         try: return model(**data).model_dump()
         except ValidationError: return data

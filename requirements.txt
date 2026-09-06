@@ -2,31 +2,37 @@
 # FlexiChrono P4 - Python Dependencies
 # 适用于 Railway / Docker / 本地部署
 # Python >= 3.10 推荐（代码使用了 match/case 等新语法需 3.10+）
+# ------------------------------------------------------------
+# 版本策略：直接依赖一律“已验证下限 + 大版本上限”，避免上游发布
+# 不兼容大版本时 `pip install` 自动升级把线上构建带崩（pydantic v1/v2、
+# pinecone 5→10、websockets 均出现过大版本破坏性变更）。
+# 需要逐字节复现构建时，使用随附的 requirements.lock：
+#     pip install -r requirements.lock
 # ============================================================
 
 # ---- Web 框架与 ASGI 服务器 ----
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0          # [standard] 含 uvloop/httptools 性能优化；Railway 上可用
-python-multipart>=0.0.6            # FastAPI UploadFile/File 表单文件上传必需（语音消息/图片上传）
+fastapi>=0.104,<1.0
+uvicorn[standard]>=0.24,<1.0        # [standard] 含 uvloop/httptools 性能优化；Railway 上可用
+python-multipart>=0.0.6,<0.1        # FastAPI UploadFile/File 表单文件上传必需（语音消息/图片上传）
 
 # ---- HTTP 客户端（内部服务间调用 + 外部 LLM/API 请求）----
-httpx>=0.25.0
+httpx>=0.25,<1.0
 
-# ---- 数据验证 ----
-pydantic>=2.0.0                    # 代码使用了 pydantic v2 语法（field_validator 等），不可降级到 v1
+# ---- 数据验证（锁死 v2 大版本）----
+pydantic>=2.5,<3                    # 代码使用 pydantic v2 语法（field_validator 等），不可降级到 v1，也不自动升 v3
 
 # ---- 配置与安全 ----
-pyyaml>=6.0                         # characters/*.yaml 角色配置加载 + image_generator 提示词模板
-bcrypt>=4.0                         # 管理员密码哈希；4.x 有预编译 wheel，Railway 构建无需 Rust 工具链
+pyyaml>=6.0,<7                      # characters/*.yaml 角色配置加载 + image_generator 提示词模板
+bcrypt>=4.0,<6                      # 管理员密码哈希；有预编译 wheel，构建无需 Rust 工具链
 
-# ---- 向量数据库（Pinecone，v3.0 新增）----
-pinecone>=5.0.0                     # Pinecone 官方 SDK，vector_server.py 记忆存储/检索用
+# ---- 向量数据库（Pinecone，v3.0 新增；使用 from pinecone import Pinecone 新客户端 API）----
+pinecone>=5.0,<11                   # Pinecone 官方 SDK，5~10 新客户端 API 兼容；锁 <11 防下一大版本破坏
 
 # ---- TTS 语音合成 ----
-edge-tts>=6.1.0                     # 微软免费 TTS，默认引擎；函数内延迟导入
-aiohttp>=3.9.0                       # edge-tts 底层依赖，显式锁定避免传递依赖版本漂移
+edge-tts>=6.1,<8                    # 微软免费 TTS，默认引擎；函数内延迟导入
+aiohttp>=3.9,<4                     # edge-tts 底层依赖，显式锁定避免传递依赖版本漂移
 # ---- 实时语音通话（v2.0 新增）----
-websockets>=12.0                     # 阿里云 NLS 实时 ASR + 火山引擎流式 TTS 的 WebSocket 客户端
+websockets>=12,<18                  # 阿里云 NLS 实时 ASR + 火山引擎流式 TTS 的 WebSocket 客户端
 
 # ---- 中文分词（可选，缺失时自动降级为 2-gram）----
-jieba>=0.42.1                        # personality_server 记忆衰减系统中文分词；try/except 延迟导入
+jieba>=0.42,<1                      # personality 记忆衰减系统中文分词；try/except 延迟导入

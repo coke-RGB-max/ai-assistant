@@ -31,9 +31,9 @@ COPY admin.html ./
 COPY characters/ ./characters/
 COPY common/ ./common/
 COPY core/ ./core/
-# P4 模块拆分 + 插件系统：以下目录不存在时会自动降级，不影响核心功能
+# 插件系统：缺失时自动降级，不影响核心功能
 COPY plugins/ ./plugins/
-COPY api/ ./api/
+# P4 领域引擎模块：personality_server 显式依赖，缺失会被 selfcheck 拦截
 COPY emotion/ ./emotion/
 COPY psych/ ./psych/
 COPY memory/ ./memory/
@@ -42,6 +42,8 @@ COPY group/ ./group/
 COPY quality/ ./quality/
 COPY topic/ ./topic/
 COPY scene/ ./scene/
+# 单元测试（可在镜像内执行 python -m pytest tests/ 做上线前验证）
+COPY tests/ ./tests/
 
 # 数据目录（SQLite / userdb.json 持久化挂载点）
 RUN mkdir -p /data

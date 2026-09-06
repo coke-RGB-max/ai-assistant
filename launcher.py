@@ -745,6 +745,27 @@ async def main():
         except NotImplementedError:
             pass
 
+    # 启动前自检：导入/路由/跨模块契约任一不过，直接拒启动，避免带病拉起进程
+    log("launcher", "执行启动自检 (selfcheck.py) ...")
+    try:
+        sc = await asyncio.create_subprocess_exec(
+            PYTHON, str(SCRIPT_DIR / "selfcheck.py"),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=str(SCRIPT_DIR),
+            limit=1024 * 1024,
+        )
+        sc_out, _ = await sc.communicate()
+        if sc.returncode != 0:
+            log("launcher", "启动自检未通过，终止启动（修复以下 FAIL 后再启动）：")
+            for _line in sc_out.decode("utf-8", errors="replace").splitlines():
+                if _line.strip():
+                    log("selfcheck", _line)
+            return
+        log("launcher", "启动自检通过")
+    except Exception as e:
+        log("launcher", f"自检执行异常: {type(e).__name__}: {e}（不阻塞启动）")
+
     for name, script, port, env_overrides in SERVICES:
         proc = await run_service(name, script, port, env_overrides)
         if proc:

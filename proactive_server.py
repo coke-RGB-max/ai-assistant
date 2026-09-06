@@ -233,8 +233,15 @@ ROLE_DAILY_NOISE = {
 # SQLite 持久化
 # ============================================================
 def _get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    # WAL：多进程并发读写同一库时避免 database is locked；busy_timeout 锁等待 5s
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=5.0)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.DatabaseError:
+        pass
     return conn
 
 def init_db() -> None:

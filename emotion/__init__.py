@@ -18,6 +18,15 @@ from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+# ---- P4 修复：显式导入共享底座，不再依赖 personality_server 全局命名空间 ----
+from core.config import *
+from core.utils import *
+from core.llm import smart_llm_call, kimi_search_call
+from core.roles import (ROLES_DEFINITION, EVENT_CATEGORY, RELATIONSHIP_MILESTONES,
+                        VIRTUAL_GIFTS, get_cached_persona, get_role_definition)
+# 跨领域包依赖：InnerState 定义在 psych
+from psych import InnerState
+
 logger = logging.getLogger("emotion")
 
 
@@ -61,10 +70,10 @@ class EmotionEngine:
         raw = await self._llm(msg, history, psych, intimacy, stage_name, active_conflict) if use_llm else None
         if raw:
             try: emotion = EmotionType(raw.get("emotion","neutral"))
-            except: emotion = EmotionType.NEUTRAL
+            except Exception: emotion = EmotionType.NEUTRAL
             intensity = int(raw.get("intensity",30))
             try: target = EmotionTarget(raw.get("target","none"))
-            except: target = EmotionTarget.NONE
+            except Exception: target = EmotionTarget.NONE
             et = raw.get("event_type","none")
             interp = raw.get("interpretation")
             inner = InnerState.from_llm(raw.get("inner_state",{}))

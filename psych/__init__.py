@@ -25,6 +25,13 @@ from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+# ---- P4 修复：显式导入共享底座，不再依赖 personality_server 全局命名空间 ----
+from core.config import *
+from core.utils import *
+from core.llm import smart_llm_call, kimi_search_call
+from core.roles import (ROLES_DEFINITION, EVENT_CATEGORY, RELATIONSHIP_MILESTONES,
+                        VIRTUAL_GIFTS, get_cached_persona, get_role_definition)
+
 logger = logging.getLogger("psych")
 
 

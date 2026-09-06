@@ -15,6 +15,18 @@ from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+# ---- P4 修复：显式导入共享底座，不再依赖 personality_server 全局命名空间 ----
+from core.config import *
+from core.utils import *
+from core.llm import smart_llm_call, kimi_search_call
+from core.roles import (ROLES_DEFINITION, EVENT_CATEGORY, RELATIONSHIP_MILESTONES,
+                        VIRTUAL_GIFTS, get_cached_persona, get_role_definition)
+# 跨领域包依赖（无环：psych/memory 为底座，emotion 依赖 psych）
+from psych import (PsychologicalState, CatchphraseController, ConflictEngine,
+                   RelationshipRepairSystem, llm_calibrator)
+from emotion import DailyNoiseLayer
+from memory import EventHistoryTracker
+
 logger = logging.getLogger("group")
 
 
@@ -182,7 +194,7 @@ class GroupBrain:
             intimacy = intimacy_map.get(rid, 30)
             impact = ge.get("impacts",{}).get(rid, {})
             try: emotion = EmotionType(impact.get("emotion","calm"))
-            except: emotion = EmotionType.CALM
+            except Exception: emotion = EmotionType.CALM
             intensity = int(impact.get("intensity",20))
             et = impact.get("event_type","none")
             interp = {"surface":impact.get("reason",""),"hidden_intent":"无意识",
