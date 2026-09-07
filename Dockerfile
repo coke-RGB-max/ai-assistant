@@ -9,12 +9,17 @@ FROM python:3.10-slim
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+# 容器统一使用北京时间，避免 datetime.now() 取到 UTC（凌晨被误判成傍晚）
+ENV TZ=Asia/Shanghai
 
 # 安装系统依赖：ffmpeg(语音AMR/WAV转码) + curl(健康检查) + build-essential(部分pip包编译)
+# tzdata：为 TZ 提供时区数据库，slim 镜像默认缺失
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
     build-essential \
+    tzdata \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
 # 设置工作目录

@@ -1,9 +1,12 @@
 """
-示例插件：天气查询
+天气查询插件
 P4 序号5：插件/技能系统示例
 
-触发词：天气、weather、气温、下雨、温度
+触发词（强意图）：天气怎么/如何、气温、几度、多少度、会下雨吗、天气预报、weather 等
 功能：查询指定城市的天气（模拟数据，实际可接入真实天气API）
+
+注意：不再用“下雨/晴天/阴天”这类宽子串，避免把“我这边下雨了好想你”这类
+情绪倾诉误判成天气查询而绕过人格 LLM。
 """
 from typing import Any, Dict, Optional
 
@@ -15,9 +18,34 @@ class WeatherPlugin(BasePlugin):
 
     name = "weather"
     description = "天气查询：查询指定城市的天气情况"
-    version = "1.0.0"
+    version = "1.1.0"
     author = "FlexiChrono"
-    commands = ["天气", "weather", "气温", "下雨", "温度", "晴天", "阴天"]
+    commands = ["天气", "weather", "气温", "温度", "几度", "天气预报"]
+
+    # 明确的“查询天气”强意图词
+    STRONG_KEYWORDS = [
+        "气温", "天气预报", "几度", "多少度", "温度多少", "天气怎么", "天气如何",
+        "天气多少", "会下雨吗", "下雨吗", "会不会下雨", "查天气", "看看天气",
+        "weather", "forecast",
+    ]
+    # 陈述/抒情，不是查询（“我这边下雨了好想你”应交给人格 LLM）
+    NEGATIVE_PHRASES = ["我这边", "外面在下雨", "下雨了", "好想", "想你", "心情",
+                        "不错", "真好", "好舒服", "喜欢"]
+    QUESTION_MARKS = ["吗", "？", "?", "怎么", "如何", "多少", "咋样", "怎么样"]
+    MAX_LEN = 16
+
+    def can_handle(self, message: str, context: Optional[Dict[str, Any]] = None) -> bool:
+        if not message:
+            return False
+        m = message.strip().lower()
+        if not m or len(m) > self.MAX_LEN:
+            return False
+        if any(neg in m for neg in self.NEGATIVE_PHRASES):
+            return False
+        if any(kw in m for kw in self.STRONG_KEYWORDS):
+            return True
+        # “XX天气？/ 天气怎么样”这类简短查询：含“天气”且带疑问语气
+        return "天气" in m and any(q in m for q in self.QUESTION_MARKS)
 
     # 模拟天气数据（实际使用时可接入和风天气/OpenWeather等API）
     WEATHER_DATA = {

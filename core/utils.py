@@ -119,7 +119,12 @@ SEASON_STYLE_MAP = {
 }
 
 def get_season() -> str:
-    month = datetime.datetime.now().month
+    # 统一取北京时间，避免容器 UTC 在月末跨日时取错月份
+    try:
+        from zoneinfo import ZoneInfo
+        month = datetime.datetime.now(ZoneInfo("Asia/Shanghai")).month
+    except Exception:
+        month = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).month
     if month in (3,4,5): return "spring"
     if month in (6,7,8): return "summer"
     if month in (9,10,11): return "autumn"
