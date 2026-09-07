@@ -1193,7 +1193,9 @@ class ProactiveScheduler:
 
                 # ========== 对话意图拦截：用户刚表示不想聊，阻止主动推送 ==========
                 if _is_intent_active(user_id):
-                    logger.info(f"[意图拦截] 用户 {user_id} 最近表达了终止意图，跳过主动消息")
+                    # v15.1: 该拦截态在用户重新开口前稳定存在，节流避免每轮重复刷屏
+                    if _should_log_block(f"{user_id}|sched|intent"):
+                        logger.info(f"[意图拦截] 用户 {user_id} 最近表达了终止意图，跳过主动消息（后续同类拦截日志已节流）")
                     continue
 
                 # v13.0: 从数据库读取 session_id，透传给 LongingEngine 拉取真实欲望状态
@@ -1313,6 +1315,35 @@ def clear_resume_block(user_id: str, role_id: Optional[str] = None) -> None:
             _resume_block.pop(k, None)
     else:
         _resume_block.pop(_resume_block_key(user_id, role_id), None)
+
+
+# ============================================================
+# v15.1: 拦截日志节流
+# 拦截决策本身稳定（深夜/告别缓存/末句结束意图/LLM否决，在用户重新开口前都不会变化），
+# 但调度器每 15~60 秒全表重扫，若每次拦截都打 info 日志会无限刷屏。
+# 对“同一拦截态”的日志做节流：默认 30 分钟最多一条；用户重新开口时由 clear_block_log_throttle 清除。
+# key 统一以 "{user_id}|" 开头便于按用户清理：
+#   长间隔调度器: "{user_id}|sched|intent"；话题延续(阶段1/2共用): "{user_id}|{role_id}|topic"
+# ============================================================
+_block_log_cache: Dict[str, float] = {}
+BLOCK_LOG_THROTTLE_SECONDS = int(os.getenv("BLOCK_LOG_THROTTLE_SECONDS", "1800"))  # 30分钟
+
+
+def _should_log_block(key: str) -> bool:
+    """同一 key 的拦截日志在节流窗口内只放行一次；返回 True 表示本次应打印。"""
+    now = time.time()
+    last = _block_log_cache.get(key)
+    if last is None or now - last >= BLOCK_LOG_THROTTLE_SECONDS:
+        _block_log_cache[key] = now
+        return True
+    return False
+
+
+def clear_block_log_throttle(user_id: str) -> None:
+    """用户重新活跃后清除其所有拦截日志节流，保证下次拦截能即时打出首条日志。"""
+    prefix = f"{user_id}|"
+    for k in [k for k in _block_log_cache if k.startswith(prefix)]:
+        _block_log_cache.pop(k, None)
 
 
 def _last_user_text(recent_messages_json: str) -> str:
@@ -1620,6 +1651,14 @@ class TopicResumer:
         conn = _get_db()
         sent = []
         try:
+            # v15.1: 深夜免打扰时段整轮短路。
+            # 静默时段闸门(assess_continue_willingness 第一条)本就拦截一切主动发起，
+            # 这里直接整轮跳过：不逐行评估、不调 LLM、不打拦截日志，避免深夜每15秒空转刷屏。
+            # 同时把卡在"待收尾"(topic_sent)的会话回收为 idle——白天原逻辑在深夜同样会拦截并回收，行为等价。
+            if is_silent_hour_now():
+                conn.execute("UPDATE conversation_state SET topic_phase='idle' WHERE topic_phase='topic_sent'")
+                conn.commit()
+                return {"sent": [], "ts": time.time(), "silent": True}
             rows = conn.execute("SELECT * FROM conversation_state").fetchall()
             now_ts = time.time()
             today = today_str()
@@ -1674,7 +1713,9 @@ class TopicResumer:
                         can_continue, block_reason = await assess_continue_willingness(
                             user_id, role_id, row["recent_messages"] or "[]", last_user)
                         if not can_continue:
-                            logger.info(f"[话题延续拦截] {user_id}/{role_id}: {block_reason}")
+                            # v15.1: 拦截结论已按对话状态缓存(_resume_block)，日志同样节流，避免每15秒刷屏
+                            if _should_log_block(f"{user_id}|{role_id}|topic"):
+                                logger.info(f"[话题延续拦截] {user_id}/{role_id}: {block_reason}（后续同类拦截日志已节流）")
                             continue
                         content = await self._generate_topic_continue(
                             role_id, row["recent_messages"] or "[]", intimacy, mood)
@@ -1713,7 +1754,9 @@ class TopicResumer:
                                     "WHERE user_id=? AND role_id=?",
                                     (user_id, role_id))
                                 conn.commit()
-                                logger.info(f"[自圆其说拦截] {user_id}/{role_id}: {close_reason}")
+                                # v15.1: 与阶段1共用节流键，避免自圆其说拦截每15秒重复刷屏
+                                if _should_log_block(f"{user_id}|{role_id}|topic"):
+                                    logger.info(f"[自圆其说拦截] {user_id}/{role_id}: {close_reason}（后续同类拦截日志已节流）")
                                 continue
                             # v14.0: 查询刚才发起的话题内容，连同对话历史一起传给大模型生成自然收尾
                             last_topic_msg = conn.execute(
@@ -1878,6 +1921,8 @@ async def on_user_spoke(req: UserSpokeReport):
         topic_resumer._ensure_state(conn, req.user_id, req.role_id)
         # 用户重新开口=新对话状态，清除上一轮续聊否决标记，允许重新评估
         clear_resume_block(req.user_id, req.role_id)
+        # v15.1: 同步清除拦截日志节流，使用户回来后若再次被拦能即时打出首条日志
+        clear_block_log_throttle(req.user_id)
         conn.execute(
             "UPDATE conversation_state SET last_user_message_at=?, topic_phase='idle' "
             "WHERE user_id=? AND role_id=?",

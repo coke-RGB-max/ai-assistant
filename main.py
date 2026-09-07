@@ -1020,28 +1020,28 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
     if result.get("session_id") and result["session_id"] != session_id:
         session_id = result["session_id"]
         user_db.set_session(identity, session_id)
-    reply = result.get("reply", "") or ""
-    # 网页/HTTP 通道无法渲染 QQ 表情，去 [face:] 标记并把气泡分隔符转为换行
+    raw_reply = result.get("reply", "") or ""
+    if not result.get("success") and not raw_reply:
+        raw_reply = "抱歉，我暂时无法回应..."
+    # 纯文本版本（去表情标记、气泡分隔符转换行），用于聊天历史/向量存储，避免把标记喂给 LLM
     from core.chat_bubble import to_plain_text
-    reply = to_plain_text(reply, "\n")
-    if not result.get("success") and not reply:
-        reply = "抱歉，我暂时无法回应..."
-    # 更新聊天历史
+    plain_reply = to_plain_text(raw_reply, "\n")
+    # 更新聊天历史（存纯文本，避免标记影响后续对话）
     # v13.0: 如果有主动推送的消息（话题延续等）还没纳入历史，先加进去，保证大模型知道自己刚才说了什么
     pending = pending_proactive_in_history.pop(identity, None)
     if pending and mode == "single":
         chat_history.append({"role": "assistant", "content": pending.get("content", "")})
     chat_history.append({"role": "user", "content": user_message})
-    chat_history.append({"role": "assistant", "content": reply})
+    chat_history.append({"role": "assistant", "content": plain_reply})
     if len(chat_history) > 20:
         del chat_history[:-20]
-    # 后台写入会话片段到 Pinecone（用户消息 + AI回复各一条，7天自动过期）
+    # 后台写入会话片段到 Pinecone（用户消息 + AI回复各一条，7天自动过期，存纯文本）
     _sess_task1 = asyncio.create_task(call_vector_insert_session(
         identity, session_id or "", "user", user_message))
     background_tasks.add(_sess_task1)
     _sess_task1.add_done_callback(background_tasks.discard)
     _sess_task2 = asyncio.create_task(call_vector_insert_session(
-        identity, session_id or "", "assistant", reply))
+        identity, session_id or "", "assistant", plain_reply))
     background_tasks.add(_sess_task2)
     _sess_task2.add_done_callback(background_tasks.discard)
     # 提取并写入亲密度
@@ -1057,7 +1057,7 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
     # v4.0.4: 亲密度变化时通知在线管理员实时刷新
     if updated_intimacy:
         asyncio.create_task(_notify_admin_intimacy_update(identity, response_intimacy))
-    # 后台记忆存储（不阻塞回复）
+    # 后台记忆存储（不阻塞回复，存纯文本）
     mem_cand = result.get("memory_candidate")
     if mem_cand and mem_cand.get("remember") and mem_cand.get("content"):
         task = asyncio.create_task(call_vector_add_direct(
@@ -1072,7 +1072,7 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
         task.add_done_callback(background_tasks.discard)
     elif len(user_message) >= 10:
         task = asyncio.create_task(_background_vector_add(
-            identity, user_message, reply, role_ids, session_id, mem_role_id))
+            identity, user_message, plain_reply, role_ids, session_id, mem_role_id))
         background_tasks.add(task)
         task.add_done_callback(background_tasks.discard)
     # 上报活动给主动消息后端（后台异步，不阻塞）
@@ -1093,9 +1093,9 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
         _t3.add_done_callback(background_tasks.discard)
     # 输出耗时汇总日志
     llm_used = result.get("used_llm_analysis", False)
-    timer.log(f" | 回复长度={len(reply)} | LLM分析={'是' if llm_used else '否'}")
+    timer.log(f" | 回复长度={len(raw_reply)} | LLM分析={'是' if llm_used else '否'}")
     return {
-        "reply": reply,
+        "reply": raw_reply,          # 原始带标记回复（含 ‖ 和 [face:]），各通道自行决定如何渲染
         "role_ids": role_ids,
         "mode": mode,
         "intimacy": response_intimacy,
@@ -1149,11 +1149,12 @@ async def process_chat_message_stream(identity, user_message, role_ids=None, cha
     timer.mark("人格生成(LLM流式)")
     if not result:
         return None
-    reply = result.get("reply", "") or ""
-    from core.chat_bubble import to_plain_text
-    reply = to_plain_text(reply, "\n")
-    if not reply:
+    raw_reply = result.get("reply", "") or ""
+    if not raw_reply:
         return None
+    # 纯文本版本（去表情标记、气泡分隔符转换行），用于聊天历史/向量存储
+    from core.chat_bubble import to_plain_text
+    plain_reply = to_plain_text(raw_reply, "\n")
     new_sid = result.get("session_id")
     if new_sid and new_sid != session_id:
         session_id = new_sid
@@ -1162,7 +1163,7 @@ async def process_chat_message_stream(identity, user_message, role_ids=None, cha
     if pending and mode == "single":
         chat_history.append({"role": "assistant", "content": pending.get("content", "")})
     chat_history.append({"role": "user", "content": user_message})
-    chat_history.append({"role": "assistant", "content": reply})
+    chat_history.append({"role": "assistant", "content": plain_reply})
     if len(chat_history) > 20:
         del chat_history[:-20]
     _sess_task1 = asyncio.create_task(call_vector_insert_session(
@@ -1170,7 +1171,7 @@ async def process_chat_message_stream(identity, user_message, role_ids=None, cha
     background_tasks.add(_sess_task1)
     _sess_task1.add_done_callback(background_tasks.discard)
     _sess_task2 = asyncio.create_task(call_vector_insert_session(
-        identity, session_id or "", "assistant", reply))
+        identity, session_id or "", "assistant", plain_reply))
     background_tasks.add(_sess_task2)
     _sess_task2.add_done_callback(background_tasks.discard)
     updated_intimacy = extract_intimacy_from_debug({"debug": result.get("debug") or {}}, role_ids)
@@ -1198,7 +1199,7 @@ async def process_chat_message_stream(identity, user_message, role_ids=None, cha
         task.add_done_callback(background_tasks.discard)
     elif len(user_message) >= 10:
         task = asyncio.create_task(_background_vector_add(
-            identity, user_message, reply, role_ids, session_id, mem_role_id))
+            identity, user_message, plain_reply, role_ids, session_id, mem_role_id))
         background_tasks.add(task)
         task.add_done_callback(background_tasks.discard)
     if mode == "single":
@@ -1214,9 +1215,9 @@ async def process_chat_message_stream(identity, user_message, role_ids=None, cha
         _t3 = asyncio.create_task(call_proactive_ai_replied(identity, rid, list(chat_history)))
         background_tasks.add(_t3)
         _t3.add_done_callback(background_tasks.discard)
-    timer.log(f" | 回复长度={len(reply)}")
+    timer.log(f" | 回复长度={len(raw_reply)}")
     return {
-        "reply": reply,
+        "reply": raw_reply,        # 原始带标记回复（含 ‖ 和 [face:]），各通道自行决定如何渲染
         "role_ids": role_ids,
         "mode": mode,
         "intimacy": response_intimacy,
@@ -2870,6 +2871,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # ============================================================
                 # v14.0: 单聊优先走流式输出（SSE→WS 逐 token 推送，实现真正的打字机流式）
                 # 群聊或流式失败时降级为原有的非流式全量回复。
+                from core.chat_bubble import to_plain_text  # 网页端需要纯文本（去 ‖ 和 [face:]）
                 if len(role_ids) == 1:
                     _stream_sent = {"v": False}
                     async def _on_token(tok):
@@ -2891,9 +2893,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         stream_result = None
                     if stream_result and stream_result.get("reply"):
                         session_id = stream_result["session_id"]
+                        # 网页端：把原始带标记回复转成纯文本（‖→换行，[face:]→去掉）
+                        ws_reply = to_plain_text(stream_result["reply"], "\n")
                         if _stream_sent["v"]:
                             await websocket.send_text(json.dumps({
-                                "type": "reply_done", "content": stream_result["reply"],
+                                "type": "reply_done", "content": ws_reply,
                                 "role_ids": stream_result["role_ids"], "mode": stream_result["mode"],
                                 "intimacy": stream_result["intimacy"], "session_id": session_id,
                                 "used_llm_analysis": stream_result["used_llm_analysis"]
@@ -2901,7 +2905,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         else:
                             # 幂等命中缓存（未实际流式）→ 走普通全量回复
                             await websocket.send_text(json.dumps({
-                                "type": "reply", "content": stream_result["reply"],
+                                "type": "reply", "content": ws_reply,
                                 "role_ids": stream_result["role_ids"], "mode": stream_result["mode"],
                                 "intimacy": stream_result["intimacy"], "session_id": session_id,
                                 "used_llm_analysis": stream_result["used_llm_analysis"]
@@ -2920,8 +2924,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     lambda: process_chat_message(username, user_message, role_ids, chat_history)
                 )
                 session_id = result["session_id"]
+                # 网页端：把原始带标记回复转成纯文本（‖→换行，[face:]→去掉）
+                ws_reply = to_plain_text(result["reply"], "\n")
                 await websocket.send_text(json.dumps({
-                    "type": "reply", "content": result["reply"],
+                    "type": "reply", "content": ws_reply,
                     "role_ids": result["role_ids"], "mode": result["mode"],
                     "intimacy": result["intimacy"], "session_id": session_id,
                     "used_llm_analysis": result["used_llm_analysis"]
@@ -2930,11 +2936,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 bystander_replies = result.get("bystander_replies") or []
                 for br in bystander_replies:
                     try:
+                        # 网页端：把原始带标记回复转成纯文本
+                        br_content = to_plain_text(br.get("content", ""), "\n")
                         await websocket.send_text(json.dumps({
                             "type": "bystander_reply",
                             "role_id": br.get("role_id"),
                             "role_name": br.get("role_name"),
-                            "content": br.get("content"),
+                            "content": br_content,
                             "emotion": br.get("emotion"),
                             "emotion_intensity": br.get("emotion_intensity"),
                             "probability": br.get("probability"),
@@ -2942,7 +2950,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             "relationship_clue": br.get("relationship_clue"),
                             "session_id": session_id,
                         }, ensure_ascii=False))
-                        logger.info(f"[{username}] 旁观者插话: {br.get('role_name')} - {br.get('content','')[:40]}")
+                        logger.info(f"[{username}] 旁观者插话: {br.get('role_name')} - {br_content[:40]}")
                     except Exception as be:
                         logger.warning(f"发送旁观者插话失败: {be}")
             except WebSocketDisconnect:
@@ -3094,8 +3102,11 @@ async def _mc_handle_chat(websocket, msg):
         })
         return
 
-    reply = result.get("reply", "") or "……"
-    # MC 聊天框为单行，多气泡换行转为空格
+    raw_reply = result.get("reply", "") or "……"
+    # MC 聊天框不支持多气泡和表情标记，先转纯文本（‖→空格，[face:]→去掉）
+    from core.chat_bubble import to_plain_text
+    reply = to_plain_text(raw_reply, " ")
+    # MC 聊天框为单行，多余换行和回车转为空格
     reply = reply.replace("\n", " ").replace("\r", " ").strip()
     # Minecraft 聊天框长度限制，超长截断
     if len(reply) > MC_MAX_REPLY_LENGTH:
