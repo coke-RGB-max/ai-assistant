@@ -38,12 +38,15 @@ class PluginAPI:
         self.proactive_url = os.getenv("PROACTIVE_SERVER_URL", "http://127.0.0.1:8003")
         self.main_url = os.getenv("MAIN_SERVER_URL", "http://127.0.0.1:8000")
         self.internal_token = os.getenv("INTERNAL_TOKEN", "")
+        self.vector_token = os.getenv("VECTOR_API_TOKEN", "change_me_strong_secret_key_123456")
         self.timeout = 10.0
 
     def _headers(self) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if self.internal_token:
             headers["Authorization"] = f"Bearer {self.internal_token}"
+        if self.vector_token:
+            headers["X-Vector-Token"] = self.vector_token
         return headers
 
     # ============================================================

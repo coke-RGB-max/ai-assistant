@@ -800,6 +800,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     let wsAuthFailed = false;
     let nicknameForced = false;
     let isTyping = false;
+    let streamingAI = null;  // 流式输出时的临时AI气泡
     let resetTargetUsername = null;
     // 语音录音相关
     let mediaRecorder = null;
@@ -1119,6 +1120,39 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
           } else {
             appendAIMessage(conv, msg.content, msg.role_ids?.[0]);
           }
+        }
+        if (msg.intimacy) {
+          Object.entries(msg.intimacy).forEach(([rid, score]) => {
+            updateIntimacyData(rid, score);
+          });
+        }
+      } else if (msg.type === "reply_chunk") {
+        // 真正的流式输出：逐 token 追加到气泡
+        removeTypingIndicator();
+        setLive2DStatus("idle", "待机中");
+        if (conv) {
+          if (!streamingAI) {
+            streamingAI = createMessage("ai", "");
+            streamingAI.roleId = msg.role_ids?.[0] || null;
+            appendMessageToDOM(streamingAI, conv);
+          }
+          streamingAI.content = (streamingAI.content || "") + (msg.content || "");
+          if (streamingAI._element) streamingAI._element.textContent = streamingAI.content;
+          scrollToBottom();
+        }
+      } else if (msg.type === "reply_done") {
+        removeTypingIndicator();
+        setLive2DStatus("idle", "待机中");
+        if (conv && streamingAI) {
+          if (msg.content) streamingAI.content = msg.content;
+          if (msg.imageUrl) streamingAI.imageUrl = msg.imageUrl;
+          if (streamingAI._element) streamingAI._element.textContent = streamingAI.content || "";
+          conv.messages.push(streamingAI);
+          streamingAI = null;
+          renderConversationList();
+          if (currentUser) saveConversationsToLocal(currentUser.username);
+        } else {
+          streamingAI = null;
         }
         if (msg.intimacy) {
           Object.entries(msg.intimacy).forEach(([rid, score]) => {

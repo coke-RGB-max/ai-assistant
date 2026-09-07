@@ -14,11 +14,8 @@ services:
     container_name: flexichrono
     restart: unless-stopped
     ports:
+      # 仅对外暴露主后端端口；其余服务（记忆/人格/主动/语音）只通过容器内部 localhost 通信，不对外暴露
       - "8000:8000"   # 主后端（QQ Webhook + WebSocket + 管理API）
-      - "8001:8001"   # 记忆后端（向量检索，仅内部用）
-      - "8002:8002"   # 人格后端（LLM 对话，仅内部用）
-      - "8003:8003"   # 主动后端（定时消息，仅内部用）
-      - "8004:8004"   # 语音后端（ASR + TTS，仅内部用）
     volumes:
       # 数据持久化：SQLite 数据库 + userdb.json
       - ./data:/data

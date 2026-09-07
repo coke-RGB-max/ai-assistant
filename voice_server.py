@@ -41,6 +41,7 @@ logger = logging.getLogger("voice_server_v2")
 PORT = int(os.getenv("VOICE_PORT", "8004"))
 PERSONALITY_SERVER_URL = os.getenv("PERSONALITY_SERVER_URL", "http://127.0.0.1:8002")
 VECTOR_SERVER_URL = os.getenv("VECTOR_SERVER_URL", "http://127.0.0.1:8001")
+VECTOR_API_TOKEN = os.getenv("VECTOR_API_TOKEN", "change_me_strong_secret_key_123456")
 
 # ---- 阿里云 NLS 实时 ASR 配置 ----
 ALIYUN_NLS_ACCESS_KEY_ID = os.getenv("ALIYUN_NLS_ACCESS_KEY_ID", "")
@@ -666,6 +667,7 @@ class CallSession:
                                 "source": "voice_call",
                                 "role_id": self.role_id,
                             },
+                            headers={"X-Vector-Token": VECTOR_API_TOKEN},
                         )
             logger.info(f"[记忆] 通话内容已写入记忆后端，共 {len([m for m in user_messages if len(m)>=10])} 条")
         except Exception as e:

@@ -26,6 +26,7 @@ import logging
 import time
 import uuid
 import re
+import hmac
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -76,6 +77,8 @@ DEEPSEEK_OFFICIAL_MODEL = "deepseek-chat"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("vector_server")
+if SUB_VECTOR_API_TOKEN == "change_me_strong_secret_key_123456":
+    logger.warning("[安全] VECTOR_API_TOKEN 仍为默认值，生产部署前务必通过环境变量修改！")
 
 # Pinecone 客户端全局单例
 _pinecone_client = None
@@ -291,7 +294,7 @@ def pinecone_delete(index, ids: List[str] = None, filter: Dict = None, namespace
 
 # ===================== 鉴权依赖 =====================
 async def verify_token(x_vector_token: Optional[str] = Header(None)) -> bool:
-    if x_vector_token != SUB_VECTOR_API_TOKEN:
+    if not hmac.compare_digest(x_vector_token or "", SUB_VECTOR_API_TOKEN):
         raise HTTPException(status_code=403, detail="token invalid")
     return True
 
@@ -577,7 +580,7 @@ class AddDirectMemoryResponse(BaseModel):
 
 
 @app.post("/api/memory/search", response_model=SearchMemoryResponse)
-async def search_memory(request: SearchMemoryRequest):
+async def search_memory(request: SearchMemoryRequest, _: bool = Depends(verify_token)):
     try:
         query_embedding = await get_embedding(request.query)
         index = get_pinecone_index()
@@ -618,7 +621,7 @@ async def _update_access_time(memories: List[Dict], namespace: str):
 
 
 @app.post("/api/memory/add", response_model=AddMemoryResponse)
-async def add_memory(request: AddMemoryRequest):
+async def add_memory(request: AddMemoryRequest, _: bool = Depends(verify_token)):
     try:
         existing_embedding = await get_embedding(request.user_message)
         index = get_pinecone_index()
@@ -673,7 +676,7 @@ async def add_memory(request: AddMemoryRequest):
 
 
 @app.post("/api/memory/add_direct", response_model=AddDirectMemoryResponse)
-async def add_direct_memory(request: AddDirectMemoryRequest):
+async def add_direct_memory(request: AddDirectMemoryRequest, _: bool = Depends(verify_token)):
     """直存已分析好的记忆，无需DeepSeek重复分析"""
     try:
         if not request.content or not request.content.strip():
@@ -722,7 +725,7 @@ async def add_direct_memory(request: AddDirectMemoryRequest):
 
 
 @app.post("/api/memory/migrate_user")
-async def migrate_user(payload: Dict[str, Any] = Body(...)):
+async def migrate_user(payload: Dict[str, Any] = Body(...), _: bool = Depends(verify_token)):
     """将 old_user_id 名下的所有记忆迁移到 new_user_id（QQ绑定账号时调用）"""
     old_uid = payload.get("old_user_id", "")
     new_uid = payload.get("new_user_id", "")
@@ -786,7 +789,7 @@ async def migrate_user(payload: Dict[str, Any] = Body(...)):
 
 
 @app.post("/api/memory/clear")
-async def clear_memory(request: ClearMemoryRequest):
+async def clear_memory(request: ClearMemoryRequest, _: bool = Depends(verify_token)):
     """清除指定用户的所有记忆（Pinecone 支持按 filter 直接删除，不需要先查ID）"""
     index = get_pinecone_index()
     if index is None:
@@ -821,7 +824,7 @@ async def clear_memory(request: ClearMemoryRequest):
 
 
 @app.post("/api/memory/delete")
-async def delete_memory(payload: Dict[str, Any] = Body(...)):
+async def delete_memory(payload: Dict[str, Any] = Body(...), _: bool = Depends(verify_token)):
     """按 ID 列表删除指定记忆"""
     user_id = payload.get("user_id", "")
     memory_ids = payload.get("memory_ids", [])
@@ -838,7 +841,7 @@ async def delete_memory(payload: Dict[str, Any] = Body(...)):
 
 
 @app.post("/api/memory/cleanup_expired")
-async def cleanup_expired(payload: Dict[str, Any] = Body(...)):
+async def cleanup_expired(payload: Dict[str, Any] = Body(...), _: bool = Depends(verify_token)):
     """
     清理过期记忆（由外部定时任务每天调用）
     1. 会话库：删除 expire_at < now 的片段
@@ -891,7 +894,7 @@ async def cleanup_expired(payload: Dict[str, Any] = Body(...)):
 
 
 @app.get("/api/memory/stats")
-async def memory_stats(user_id: str = ""):
+async def memory_stats(user_id: str = "", _: bool = Depends(verify_token)):
     """查看记忆统计信息"""
     index = get_pinecone_index()
     if index is None:

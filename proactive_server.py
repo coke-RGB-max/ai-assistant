@@ -13,6 +13,7 @@ import random
 import sqlite3
 import time
 import uuid
+import hmac
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -194,6 +195,8 @@ VECTOR_SERVER_URL = os.getenv("VECTOR_SERVER_URL", "http://127.0.0.1:8001")
 MAIN_SERVER_URL = os.getenv("MAIN_SERVER_URL", "http://127.0.0.1:8000")
 INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN", "change_me_internal_secret_2026")
 VECTOR_API_TOKEN = os.getenv("VECTOR_API_TOKEN", "change_me_strong_secret_key_123456")
+if INTERNAL_TOKEN == "change_me_internal_secret_2026" or VECTOR_API_TOKEN == "change_me_strong_secret_key_123456":
+    logger.warning("[安全] 内部通信 token 仍为默认值，生产部署前务必通过环境变量修改！")
 # ---- v14.0: 外接大模型配置（用于自圆其说等需要灵活生成的场景，OpenAI 兼容格式）----
 # 配置后优先直接调用大模型，传入完整对话上下文，生成更自然的收尾；未配置则降级到人格后端 proactive_generate
 PROACTIVE_LLM_API_KEY = os.getenv("PROACTIVE_LLM_API_KEY", "")
@@ -999,6 +1002,7 @@ async def fetch_related_memory(user_id: str, role_id: str, query: str = "我们�
             resp = await client.post(
                 f"{VECTOR_SERVER_URL}/api/memory/search",
                 json={"user_id": user_id, "query": query, "top_k": 5, "role_id": role_id},
+                headers={"X-Vector-Token": VECTOR_API_TOKEN},
                 timeout=20.0,
             )
             if resp.status_code == 200:
@@ -1774,7 +1778,7 @@ scheduler = ProactiveScheduler()
 topic_resumer = TopicResumer()
 
 async def verify_internal_token(x_internal_token: Optional[str] = Header(None)) -> bool:
-    if x_internal_token != INTERNAL_TOKEN:
+    if not hmac.compare_digest(x_internal_token or "", INTERNAL_TOKEN):
         raise HTTPException(status_code=403, detail="invalid internal token")
     return True
 
@@ -2022,7 +2026,7 @@ async def mark_delivered(req: MarkDeliveredRequest):
 @app.post("/api/internal/migrate_user")
 async def migrate_user(req: Request, x_internal_token: Optional[str] = Header(None)):
     """将 old_user_id 的主动消息数据迁移到 new_user_id（QQ绑定账号时调用）"""
-    if x_internal_token != INTERNAL_TOKEN:
+    if not hmac.compare_digest(x_internal_token or "", INTERNAL_TOKEN):
         raise HTTPException(status_code=403, detail="invalid internal token")
     body = await req.json()
     old_uid = body.get("old_user_id", "")

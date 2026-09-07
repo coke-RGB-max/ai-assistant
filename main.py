@@ -25,6 +25,9 @@ VECTOR_SERVER_URL = os.getenv("VECTOR_SERVER_URL", "http://127.0.0.1:8001")
 PROACTIVE_SERVER_URL = os.getenv("PROACTIVE_SERVER_URL", "http://127.0.0.1:8003")
 VOICE_SERVER_URL = os.getenv("VOICE_SERVER_URL", "http://127.0.0.1:8004")
 INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN", "change_me_internal_secret_2026")  # 与 proactive_server.py 保持一致
+VECTOR_API_TOKEN = os.getenv("VECTOR_API_TOKEN", "change_me_strong_secret_key_123456")  # 与 vector_server.py 保持一致
+if INTERNAL_TOKEN == "change_me_internal_secret_2026":
+    logger.warning("[安全] INTERNAL_TOKEN 仍为默认值，生产部署前务必通过环境变量修改！")
 PORT = int(os.getenv("MAIN_PORT", "8000"))
 # 数据目录：Docker 中挂载到 /data，本地默认脚本所在目录
 DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
@@ -77,7 +80,7 @@ def _proactive_on_fail():
         PROACTIVE_AVAILABLE = False
         logger.warning(f"[主动后端] 连续失败{_PROACTIVE_FAIL_COUNT}次，熔断60s（后台任务不再阻塞）")
 # ---- QQ 消息去重（NapCat 超时重试会导致同一条消息上报多次）----
-_recent_msg_ids: Dict[int, float] = {}
+_recent_msg_ids: Dict[str, float] = {}
 _MSG_DEDUP_WINDOW = 60.0  # 秒
 # ---- ffmpeg 可用性标记（lifespan 启动时检测）----
 FFMPEG_AVAILABLE = False
@@ -200,13 +203,12 @@ class UserDB:
         elif not verify_password(password, stored):
             return None
         return {
-                "username": username, "nickname": user.get("nickname", username),
-                "is_admin": user.get("is_admin", False),
-                "intimacy": user.get("intimacy", {}),
-                "session_id": user.get("session_id"),
-                "qq_bound": self.get_qq_by_username(username, data) is not None
-            }
-        return None
+            "username": username, "nickname": user.get("nickname", username),
+            "is_admin": user.get("is_admin", False),
+            "intimacy": user.get("intimacy", {}),
+            "session_id": user.get("session_id"),
+            "qq_bound": self.get_qq_by_username(username, data) is not None
+        }
     def authenticate_token(self, token):
         try:
             decoded = base64.b64decode(token).decode("utf-8")
@@ -575,6 +577,67 @@ async def call_personality_generate(role_ids, user_message, memory_context, chat
         _log_port_timing("人格后端", "/api/generate", time.perf_counter() - t0, f"ERROR:{e}")
         logger.error(f"人格后端调用失败: {e}")
         return {"success": False, "error": str(e), "reply": "抱歉，我暂时无法回应..."}
+async def call_personality_generate_stream(role_ids, user_message, memory_context, chat_history,
+                                           session_id=None, intimacy_map=None, temperature=0.9,
+                                           max_tokens=500, goodbye_hint=None, on_token=None):
+    """调用人格后端 /api/generate_stream（SSE），逐 token 回调 on_token。
+    返回 dict: {reply, debug, memory_candidate, session_id}；失败返回 None。"""
+    payload = {
+        "role_ids": role_ids, "user_message": user_message,
+        "memory_context": memory_context, "chat_history": chat_history,
+        "temperature": temperature, "max_tokens": max_tokens,
+        "enable_memory_analysis": True, "return_debug": True,
+    }
+    if session_id:
+        payload["session_id"] = session_id
+    if intimacy_map:
+        payload["intimacy_map"] = intimacy_map
+    if goodbye_hint:
+        payload["goodbye_hint"] = goodbye_hint
+    t0 = time.perf_counter()
+    reply_parts = []
+    done_debug = None
+    done_mem = None
+    done_session_id = session_id
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            async with client.stream("POST", f"{PERSONALITY_SERVER_URL}/api/generate_stream",
+                                     json=payload, timeout=120.0) as resp:
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    logger.error(f"人格后端流式 HTTP{resp.status_code}: {body[:200]}")
+                    return None
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    try:
+                        ev = json.loads(line[5:].strip())
+                    except Exception:
+                        continue
+                    t = ev.get("type")
+                    if t == "token":
+                        content = ev.get("content", "")
+                        if content:
+                            reply_parts.append(content)
+                            if on_token:
+                                await on_token(content)
+                    elif t == "done":
+                        done_debug = ev.get("debug")
+                        done_mem = ev.get("memory_candidate")
+                        done_session_id = ev.get("session_id") or session_id
+        _log_port_timing("人格后端", "/api/generate_stream", time.perf_counter() - t0, "OK")
+        return {
+            "reply": "".join(reply_parts),
+            "debug": done_debug or {},
+            "memory_candidate": done_mem,
+            "session_id": done_session_id,
+        }
+    except Exception as e:
+        _log_port_timing("人格后端", "/api/generate_stream", time.perf_counter() - t0, f"ERROR:{e}")
+        logger.error(f"人格后端流式调用失败: {e}")
+        return None
+
+
 async def call_vector_search(user_id, query, top_k=5, role_id=""):
     t0 = time.perf_counter()
     try:
@@ -583,7 +646,8 @@ async def call_vector_search(user_id, query, top_k=5, role_id=""):
             if role_id:
                 payload["role_id"] = role_id
             resp = await client.post(f"{VECTOR_SERVER_URL}/api/memory/search",
-                                     json=payload, timeout=30.0)
+                                     json=payload, timeout=30.0,
+                                     headers={"X-Vector-Token": VECTOR_API_TOKEN})
             _log_port_timing("记忆后端", "/api/memory/search", time.perf_counter() - t0,
                               f"HTTP{resp.status_code}")
             if resp.status_code == 200 and resp.json().get("success"):
@@ -604,7 +668,8 @@ async def call_vector_add_direct(user_id, content, memory_type="episodic", impor
             if conversation_id:
                 payload["conversation_id"] = conversation_id
             resp = await client.post(f"{VECTOR_SERVER_URL}/api/memory/add_direct",
-                                     json=payload, timeout=30.0)
+                                     json=payload, timeout=30.0,
+                                     headers={"X-Vector-Token": VECTOR_API_TOKEN})
             _log_port_timing("记忆后端", "/api/memory/add_direct", time.perf_counter() - t0,
                               f"HTTP{resp.status_code}")
             if resp.status_code == 200:
@@ -627,7 +692,8 @@ async def call_vector_add(user_id, user_message, assistant_reply, role_names,
             if conversation_id:
                 payload["conversation_id"] = conversation_id
             resp = await client.post(f"{VECTOR_SERVER_URL}/api/memory/add",
-                                     json=payload, timeout=60.0)
+                                     json=payload, timeout=60.0,
+                                     headers={"X-Vector-Token": VECTOR_API_TOKEN})
             _log_port_timing("记忆后端", "/api/memory/add", time.perf_counter() - t0,
                               f"HTTP{resp.status_code}")
             if resp.status_code == 200:
@@ -642,6 +708,7 @@ async def call_vector_migrate(old_user_id, new_user_id):
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(f"{VECTOR_SERVER_URL}/api/memory/migrate_user",
                                      json={"old_user_id": old_user_id, "new_user_id": new_user_id},
+                                     headers={"X-Vector-Token": VECTOR_API_TOKEN},
                                      timeout=60.0)
             if resp.status_code == 200:
                 return resp.json()
@@ -662,7 +729,8 @@ async def call_vector_insert_session(user_id, conversation_id, role, text):
             }
             resp = await client.post(
                 f"{VECTOR_SERVER_URL}/api/vector/insert_session_vector",
-                json=payload, timeout=30.0)
+                json=payload, timeout=30.0,
+                headers={"X-Vector-Token": VECTOR_API_TOKEN})
             return resp.status_code == 200 and resp.json().get("ok")
     except Exception as e:
         logger.debug(f"会话片段写入失败: {e}")
@@ -681,7 +749,8 @@ async def call_vector_search_session(user_id, conversation_id, query, top_k=3):
             }
             resp = await client.post(
                 f"{VECTOR_SERVER_URL}/api/vector/search_session_history",
-                json=payload, timeout=30.0)
+                json=payload, timeout=30.0,
+                headers={"X-Vector-Token": VECTOR_API_TOKEN})
             if resp.status_code == 200 and resp.json().get("ok"):
                 items = resp.json().get("data", [])
                 parts = []
@@ -1034,6 +1103,129 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
         "used_llm_analysis": llm_used,
         "bystander_replies": result.get("bystander_replies") or []
     }
+async def process_chat_message_stream(identity, user_message, role_ids=None, chat_history=None, on_token=None):
+    """流式版消息处理管线：边生成边通过 on_token 推送 token。
+    前/后处理与 process_chat_message 保持一致，仅 LLM 生成改用 SSE 流式接口。"""
+    if role_ids is None:
+        role_ids = ["nianqi"]
+    if chat_history is None:
+        chat_history = []
+    mode = "group" if len(role_ids) > 1 else "single"
+    mem_role_id = role_ids[0] if len(role_ids) == 1 else "group:" + "+".join(sorted(role_ids))
+    timer = StepTimer(f"{identity}|{mode}|{'+'.join(role_ids)}|stream")
+    _t = asyncio.create_task(call_proactive_mark_replied(identity))
+    background_tasks.add(_t)
+    _t.add_done_callback(background_tasks.discard)
+    if mode == "single":
+        _ts = asyncio.create_task(call_proactive_user_spoke(identity, role_ids[0], user_message))
+        background_tasks.add(_ts)
+        _ts.add_done_callback(background_tasks.discard)
+    session_id = user_db.get_session(identity)
+    if not session_id:
+        session_id = await create_personality_session()
+        if session_id:
+            user_db.set_session(identity, session_id)
+    timer.mark("session")
+    intimacy_map = {rid: user_db.get_intimacy(identity, rid) for rid in role_ids}
+    memory_context = await call_vector_search(identity, user_message, role_id=mem_role_id)
+    session_context = await call_vector_search_session(identity, session_id or "", user_message, top_k=3)
+    if session_context and memory_context:
+        memory_context = f"【最近对话片段】\n{session_context}\n\n【长期记忆】\n{memory_context}"
+    elif session_context:
+        memory_context = f"【最近对话片段】\n{session_context}"
+    timer.mark("记忆检索")
+    intent = ConversationIntentDetector().detect(user_message)
+    goodbye_hint = intent.get("hint") if intent["intent"] == "goodbye" else None
+    if intent["intent"] == "goodbye":
+        rid_for_goodbye = role_ids[0] if len(role_ids) == 1 else "group"
+        _t_gd = asyncio.create_task(_report_goodbye(identity, rid_for_goodbye))
+        background_tasks.add(_t_gd)
+        _t_gd.add_done_callback(background_tasks.discard)
+    result = await call_personality_generate_stream(
+        role_ids=role_ids, user_message=user_message,
+        memory_context=memory_context, chat_history=chat_history,
+        session_id=session_id, intimacy_map=intimacy_map,
+        goodbye_hint=goodbye_hint, on_token=on_token)
+    timer.mark("人格生成(LLM流式)")
+    if not result:
+        return None
+    reply = result.get("reply", "") or ""
+    from core.chat_bubble import to_plain_text
+    reply = to_plain_text(reply, "\n")
+    if not reply:
+        return None
+    new_sid = result.get("session_id")
+    if new_sid and new_sid != session_id:
+        session_id = new_sid
+        user_db.set_session(identity, session_id)
+    pending = pending_proactive_in_history.pop(identity, None)
+    if pending and mode == "single":
+        chat_history.append({"role": "assistant", "content": pending.get("content", "")})
+    chat_history.append({"role": "user", "content": user_message})
+    chat_history.append({"role": "assistant", "content": reply})
+    if len(chat_history) > 20:
+        del chat_history[:-20]
+    _sess_task1 = asyncio.create_task(call_vector_insert_session(
+        identity, session_id or "", "user", user_message))
+    background_tasks.add(_sess_task1)
+    _sess_task1.add_done_callback(background_tasks.discard)
+    _sess_task2 = asyncio.create_task(call_vector_insert_session(
+        identity, session_id or "", "assistant", reply))
+    background_tasks.add(_sess_task2)
+    _sess_task2.add_done_callback(background_tasks.discard)
+    updated_intimacy = extract_intimacy_from_debug({"debug": result.get("debug") or {}}, role_ids)
+    for rid, val in updated_intimacy.items():
+        try:
+            user_db.set_intimacy(identity, rid, int(val))
+        except Exception:
+            pass
+    response_intimacy = dict(intimacy_map)
+    response_intimacy.update(updated_intimacy)
+    timer.mark("后处理")
+    if updated_intimacy:
+        asyncio.create_task(_notify_admin_intimacy_update(identity, response_intimacy))
+    mem_cand = result.get("memory_candidate")
+    if mem_cand and mem_cand.get("remember") and mem_cand.get("content"):
+        task = asyncio.create_task(call_vector_add_direct(
+            user_id=identity, content=mem_cand["content"],
+            memory_type=mem_cand.get("type", "episodic"),
+            importance=mem_cand.get("importance", 50),
+            reason=mem_cand.get("reason", ""),
+            source=user_message[:500],
+            role_id=mem_role_id,
+            conversation_id=session_id or ""))
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
+    elif len(user_message) >= 10:
+        task = asyncio.create_task(_background_vector_add(
+            identity, user_message, reply, role_ids, session_id, mem_role_id))
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
+    if mode == "single":
+        rid = role_ids[0]
+        dbg = result.get("debug") or {}
+        psych_snap = dbg.get("psychological_state") or {}
+        attachment = psych_snap.get("attachment")
+        _t2 = asyncio.create_task(call_proactive_report(
+            identity, rid, response_intimacy.get(rid, 30), attachment, psych_snap,
+            session_id=session_id))
+        background_tasks.add(_t2)
+        _t2.add_done_callback(background_tasks.discard)
+        _t3 = asyncio.create_task(call_proactive_ai_replied(identity, rid, list(chat_history)))
+        background_tasks.add(_t3)
+        _t3.add_done_callback(background_tasks.discard)
+    timer.log(f" | 回复长度={len(reply)}")
+    return {
+        "reply": reply,
+        "role_ids": role_ids,
+        "mode": mode,
+        "intimacy": response_intimacy,
+        "session_id": session_id,
+        "used_llm_analysis": False,
+        "bystander_replies": []
+    }
+
+
 # -------------------------- 语音消息处理 --------------------------
 async def call_voice_server(audio_base64, role_ids, session_id=None, intimacy_map=None,
                              chat_history=None, audio_format="wav"):
@@ -1599,8 +1791,8 @@ async def get_roles():
             r = await client.get(f"{PERSONALITY_SERVER_URL}/api/roles")
             if r.status_code == 200:
                 return r.json()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"获取角色列表失败（人格后端不可用）: {e}")
     return {}
 
 
@@ -1618,7 +1810,7 @@ async def admin_set_intimacy(req: SetIntimacyRequest, request: Request,
     自拍判断时取两层平均值。
     """
     # 鉴权：内部 token 或 管理员登录态（二选一）
-    is_internal = (x_internal_token == INTERNAL_TOKEN)
+    is_internal = hmac.compare_digest(x_internal_token or "", INTERNAL_TOKEN)
     is_admin = False
     if not is_internal:
         token = request.headers.get("Authorization", "").replace("Bearer ", "")
@@ -1968,8 +2160,8 @@ async def qq_webhook(request: Request):
         group_result = await handle_group_message(body)
         return group_result
     # ---- 消息去重：NapCat 上报超时会重试，同一条消息可能到达多次 ----
-    msg_id = body.get("message_id")
-    if msg_id is not None:
+    msg_id = str(body.get("message_id")) if body.get("message_id") is not None else None
+    if msg_id:
         now = time.time()
         expired = [mid for mid, t in _recent_msg_ids.items() if now - t > _MSG_DEDUP_WINDOW]
         for mid in expired:
@@ -2676,6 +2868,53 @@ async def websocket_endpoint(websocket: WebSocket):
                 # ============================================================
                 # 正常聊天流程（非自拍请求，或自拍快速响应失败降级）
                 # ============================================================
+                # v14.0: 单聊优先走流式输出（SSE→WS 逐 token 推送，实现真正的打字机流式）
+                # 群聊或流式失败时降级为原有的非流式全量回复。
+                if len(role_ids) == 1:
+                    _stream_sent = {"v": False}
+                    async def _on_token(tok):
+                        _stream_sent["v"] = True
+                        try:
+                            await websocket.send_text(json.dumps(
+                                {"type": "reply_chunk", "content": tok}, ensure_ascii=False))
+                        except Exception:
+                            pass
+                    stream_result = None
+                    try:
+                        stream_result = await identity_queue.submit(
+                            username, ws_msg_id,
+                            lambda: process_chat_message_stream(
+                                username, user_message, role_ids, chat_history, on_token=_on_token)
+                        )
+                    except Exception as _se:
+                        logger.warning(f"[{username}] 流式处理异常，降级非流式: {_se}")
+                        stream_result = None
+                    if stream_result and stream_result.get("reply"):
+                        session_id = stream_result["session_id"]
+                        if _stream_sent["v"]:
+                            await websocket.send_text(json.dumps({
+                                "type": "reply_done", "content": stream_result["reply"],
+                                "role_ids": stream_result["role_ids"], "mode": stream_result["mode"],
+                                "intimacy": stream_result["intimacy"], "session_id": session_id,
+                                "used_llm_analysis": stream_result["used_llm_analysis"]
+                            }, ensure_ascii=False))
+                        else:
+                            # 幂等命中缓存（未实际流式）→ 走普通全量回复
+                            await websocket.send_text(json.dumps({
+                                "type": "reply", "content": stream_result["reply"],
+                                "role_ids": stream_result["role_ids"], "mode": stream_result["mode"],
+                                "intimacy": stream_result["intimacy"], "session_id": session_id,
+                                "used_llm_analysis": stream_result["used_llm_analysis"]
+                            }, ensure_ascii=False))
+                        continue
+                    if _stream_sent["v"]:
+                        # 已推送部分 token 但最终失败：结束当前气泡，避免重复生成第二条回复
+                        try:
+                            await websocket.send_text(json.dumps(
+                                {"type": "reply_done", "content": "", "intimacy": {}}, ensure_ascii=False))
+                        except Exception:
+                            pass
+                        continue
                 result = await identity_queue.submit(
                     username, ws_msg_id,
                     lambda: process_chat_message(username, user_message, role_ids, chat_history)

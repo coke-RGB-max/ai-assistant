@@ -1657,6 +1657,9 @@ class StreamGenerateRequest(BaseModel):
     weather: Optional[str] = None
     scene_mode: str = "normal"
     gift: Optional[str] = None
+    # 流式同样支持记忆分析与返回调试信息（供主后端在流式展示后做亲密度/记忆后处理）
+    enable_memory_analysis: bool = False
+    return_debug: bool = False
 
 @app.post("/api/generate_stream")
 async def generate_stream(request: StreamGenerateRequest):
@@ -1678,6 +1681,9 @@ async def generate_stream(request: StreamGenerateRequest):
     psych_in = {}; event_hist = {}; active_conf = None; cp_use = {}
     res_map = 0; intim_map = request.intimacy_map or {rid: 30}
     turn = 0; milestones = {}; growth_state = {}; emotion_history = []
+    user_profile = {"likes":[],"dislikes":[],"traits":[],"events":[],"basic_info":{}}
+    alter_state = {}
+    session_data = None
     if request.session_id:
         session_data = load_session(request.session_id)
         if session_data:
@@ -1691,24 +1697,101 @@ async def generate_stream(request: StreamGenerateRequest):
             milestones = session_data.get("milestones", {}).get(rid, {})
             growth_state = session_data.get("growth_state", {}).get(rid, {})
             emotion_history = session_data.get("emotion_history", {}).get(rid, [])
+            user_profile = session_data.get("user_profile", user_profile)
+            alter_state = session_data.get("alter_system", {})
     engine = PersonalityEngine(
         mode=ChatMode.SINGLE, role_ids=role_ids, intimacy_map=intim_map,
         psych_states=psych_in, event_history=event_hist, active_conflict=active_conf,
         resilience=res_map, turn=turn, cp_usage=cp_use,
         weather=request.weather, scene_mode=request.scene_mode, gift=request.gift,
-        emotion_history=emotion_history, milestones=milestones, growth_state=growth_state)
+        emotion_history=emotion_history, milestones=milestones, growth_state=growth_state,
+        user_profile=user_profile, alter_state=alter_state, session_id=request.session_id)
     system_prompt, debug = await engine.generate(
         msg=request.user_message, mem_ctx=request.memory_context, history=valid,
         override=request.override_emotion, ov_int=request.emotion_intensity,
-        use_llm=use_llm)
+        use_llm=use_llm, enable_mem=request.enable_memory_analysis)
     messages = [{"role":"system","content":system_prompt}]
     messages.extend(valid)
     messages.append({"role":"user","content":request.user_message})
-    # 先推送元信息
+    # 先推送元信息，再流式推送 token；流式结束后累积完整回复并做记忆/会话持久化
     async def event_generator():
         yield f"data: {json.dumps({'type':'meta','emotion':debug.get('emotion','calm'),'intimacy':debug.get('intimacy',30)})}\n\n"
+        full_reply = ""
         async for token in smart_llm_stream_call(messages, request.temperature, request.max_tokens):
+            try:
+                if token.startswith("data: "):
+                    ev = json.loads(token[6:].strip())
+                    if ev.get("type") == "token":
+                        full_reply += ev.get("content", "")
+            except Exception:
+                pass
             yield token
+        full_reply = clean_reply(full_reply)
+
+        # 记忆分析（可选，复用主流程逻辑）
+        mem_cand = None
+        if request.enable_memory_analysis and use_llm:
+            analyzer = debug.get("_mem_analyzer")
+            if analyzer:
+                try:
+                    mem_cand = await analyzer.analyze(
+                        debug.get("_rname", ""), debug.get("_pers", ""),
+                        request.user_message, full_reply, valid)
+                except Exception as e:
+                    logger.warning(f"[流式] 记忆分析失败: {e}")
+
+        # 保存 session（单聊状态持久化，保持与 /api/generate 一致的人格连续性）
+        new_session_id = request.session_id
+        if request.session_id and session_data is not None:
+            for _compat_key in ("psychological_states", "event_history", "conflict_state",
+                                "catchphrase_usage", "resilience", "positive_streak",
+                                "milestones", "growth_state", "emotion_history", "alter_system",
+                                "intimacy_map", "user_profile", "desire_states"):
+                if not isinstance(session_data.get(_compat_key), dict):
+                    session_data[_compat_key] = {}
+            session_data.setdefault("psychological_states", {})[rid] = debug.get("psychological_state", {})
+            session_data.setdefault("event_history", {})[rid] = debug.get("event_history", {})
+            session_data.setdefault("conflict_state", {})[rid] = debug.get("new_active_conflict")
+            session_data.setdefault("catchphrase_usage", {})[rid] = debug.get("catchphrase_usage", {})
+            session_data.setdefault("resilience", {})[rid] = debug.get("resilience", 0)
+            session_data.setdefault("positive_streak", {})[rid] = debug.get("positive_streak", 0)
+            session_data.setdefault("milestones", {})[rid] = debug.get("v10_milestone_state", {})
+            session_data.setdefault("growth_state", {})[rid] = debug.get("v10_growth_state", {})
+            session_data.setdefault("emotion_history", {})[rid] = debug.get("v10_emotion_history", [])
+            session_data["user_profile"] = user_profile
+            if "alter_system" in debug:
+                session_data["alter_system"] = debug["alter_system"]
+            # v12.0: 意念欲望状态反馈闭环
+            desire_states = session_data.setdefault("desire_states", {})
+            desire = DesireMentalState(rid, desire_states.get(rid))
+            _msg = request.user_message or ""
+            _warm_kw = ("喜欢", "爱你", "想你", "开心", "哈哈", "谢谢", "抱抱", "亲亲")
+            _cold_kw = ("哦", "嗯", "随便", "算了", "不用", "没事")
+            _share_kw = ("今天", "刚才", "我去", "看到", "发现", "吃了", "玩了")
+            if any(k in _msg for k in _warm_kw) and len(_msg) > 3:
+                desire.update_from_feedback("user_warm_reply")
+            elif len(_msg) <= 3 and any(k in _msg for k in _cold_kw):
+                desire.update_from_feedback("user_cold_reply")
+            elif any(k in _msg for k in _share_kw):
+                desire.update_from_feedback("user_shared")
+            elif rid in _msg or ("你" in _msg and ("?" in _msg or "？" in _msg)):
+                desire.update_from_feedback("user_asked_about_me")
+            else:
+                desire.update_from_feedback("user_replied")
+            desire_states[rid] = desire.to_dict()
+            if "intimacy" in debug:
+                intim_map[rid] = debug["intimacy"]
+            session_data["intimacy_map"] = intim_map
+            session_data["current_turn"] = turn
+            save_session(request.session_id, session_data)
+            new_session_id = request.session_id
+
+        done_payload = {"type": "done"}
+        if request.return_debug:
+            done_payload["debug"] = {k: v for k, v in debug.items() if not k.startswith("_")}
+            done_payload["memory_candidate"] = mem_cand
+        done_payload["session_id"] = new_session_id
+        yield f"data: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 # ============================================================
