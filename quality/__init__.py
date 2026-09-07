@@ -83,6 +83,65 @@ class QualityChecker:
         score = max(0, score)
         return {"passed": score >= 60, "score": score, "issues": issues}
 
+    # AI 腔/书面腔连接词（出现即提示）
+    AI_TONE_WORDS = ["首先", "其次", "综上所述", "总的来说", "总之", "严格来说",
+                     "作为一个", "作为一名", "我理解你的感受", "我明白你的感受",
+                     "值得注意的是", "从某种意义上", "换句话说"]
+    # 单个文字气泡建议上限（字）
+    BUBBLE_HARD_LEN = 30
+    # 一次回复建议的气泡上限（与 core.chat_bubble.split_bubbles 默认值对齐）
+    BUBBLE_MAX_COUNT = 6
+
+    def check_bubble_style(self, reply: str) -> Dict:
+        """
+        多气泡风格质检（诊断用，不阻断发送）：
+        - AI 腔连接词；单气泡过长；气泡数过多；非法 [face:?] 标记。
+        """
+        issues = []
+        if not reply:
+            return {"passed": False, "issues": [{"level": "error", "type": "empty", "msg": "回复为空"}]}
+        try:
+            from core.chat_bubble import split_bubbles, resolve_face, FACE_PATTERN
+        except Exception:
+            return {"passed": True, "issues": []}  # 依赖缺失时不报错
+
+        seq = split_bubbles(reply)
+        text_bubbles = [f["text"] for f in seq if f.get("type") == "text"]
+        face_bubbles = [f for f in seq if f.get("type") == "face"]
+
+        # 1. AI 腔
+        hit = [w for w in self.AI_TONE_WORDS if w in reply]
+        if hit:
+            issues.append({"level": "warning", "type": "ai_tone",
+                           "msg": f"含AI腔/书面腔词汇: {'、'.join(hit)}"})
+        # 2. 单气泡过长
+        for b in text_bubbles:
+            if len(b) > self.BUBBLE_HARD_LEN:
+                issues.append({"level": "info", "type": "bubble_too_long",
+                               "msg": f"单条气泡{len(b)}字偏长（建议≤{self.BUBBLE_HARD_LEN}）: {b[:12]}…"})
+        # 3. 气泡数过多
+        n_text = len(text_bubbles)
+        if n_text > self.BUBBLE_MAX_COUNT:
+            issues.append({"level": "info", "type": "too_many_bubbles",
+                           "msg": f"气泡数{n_text}超过建议上限{self.BUBBLE_MAX_COUNT}"})
+        # 4. 表情标记合法性（写了 [face:xx] 但映射不到 id，且不是数字）
+        for raw in FACE_PATTERN.findall(reply):
+            if not str(raw).strip().isdigit() and resolve_face(raw) is None:
+                issues.append({"level": "info", "type": "unknown_face",
+                               "msg": f"未识别的表情标记[face:{raw}]，将按原文发送"})
+        # 5. 表情过多
+        if len(face_bubbles) > 1:
+            issues.append({"level": "info", "type": "too_many_faces",
+                           "msg": f"一次回复出现{len(face_bubbles)}个表情，建议≤1"})
+
+        score = 100
+        for issue in issues:
+            if issue["level"] == "error": score -= 40
+            elif issue["level"] == "warning": score -= 15
+            else: score -= 5
+        return {"passed": score >= 60, "score": max(0, score), "issues": issues,
+                "bubble_count": n_text, "face_count": len(face_bubbles)}
+
     @staticmethod
     def fallback_reply(role_id: str, emotion: str = "calm") -> str:
         """OOC重试失败后的规则模板降级回复，确保不崩人设、不暴露AI身份。"""

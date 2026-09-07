@@ -952,6 +952,9 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
         session_id = result["session_id"]
         user_db.set_session(identity, session_id)
     reply = result.get("reply", "") or ""
+    # 网页/HTTP 通道无法渲染 QQ 表情，去 [face:] 标记并把气泡分隔符转为换行
+    from core.chat_bubble import to_plain_text
+    reply = to_plain_text(reply, "\n")
     if not result.get("success") and not reply:
         reply = "抱歉，我暂时无法回应..."
     # 更新聊天历史
@@ -1114,6 +1117,9 @@ async def process_voice_message(identity, audio_base64, role_ids=None, chat_hist
         background_tasks.add(_ts_intent)
         _ts_intent.add_done_callback(background_tasks.discard)
     reply = result.get("reply", "") or ""
+    # 语音通道：去表情标记，气泡分隔符转为逗号停顿（不能把 ‖/[face:] 送去 TTS）
+    from core.chat_bubble import to_plain_text
+    reply = to_plain_text(reply, "，")
     audio_out = result.get("audio_base64", "") or ""
     audio_out_fmt = result.get("audio_format", "mp3")
     if result.get("session_id") and result["session_id"] != session_id:
@@ -1402,6 +1408,77 @@ async def send_qq_private_msg(qq_number, text):
         elif isinstance(e, httpx.RemoteProtocolError):
             logger.error(f"  → 协议错误：NapCat返回了非法HTTP响应，可能是服务异常")
         return False
+
+async def send_qq_private_face(qq_number, face_id) -> bool:
+    """通过 NapCat 发送一条 QQ 原生小黄脸表情（独立表情气泡）。"""
+    if not NAPCAT_HTTP_URL:
+        logger.error("[QQ] NAPCAT_HTTP_URL 未配置，无法发送表情")
+        return False
+    try:
+        headers = {}
+        if NAPCAT_ACCESS_TOKEN:
+            headers["Authorization"] = f"Bearer {NAPCAT_ACCESS_TOKEN}"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{NAPCAT_HTTP_URL.rstrip('/')}/send_private_msg",
+                json={"user_id": int(qq_number),
+                      "message": [{"type": "face", "data": {"id": str(face_id)}}]},
+                headers=headers, timeout=15.0)
+            return resp.status_code == 200
+    except Exception as e:
+        logger.error(f"NapCat 发送表情失败: qq={qq_number} face={face_id} err={repr(e)}")
+        return False
+
+# 多气泡连发总开关（默认开启，置 0/false 可回退为整段一次发送）
+BUBBLE_CHAT_ENABLED = os.getenv("BUBBLE_CHAT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+
+async def send_qq_reply_bubbles(qq_number, reply_text, *, is_group=False,
+                                group_id="", at_qq="") -> bool:
+    """
+    把一次回复拆成多条短气泡/表情，按真人打字节奏依次发送。
+    - 私聊：qq_number 必填；
+    - 群聊：is_group=True、group_id 必填，仅第一条文本 @ at_qq；
+    - 文本片段走对应文本发送，face 片段独立发表情气泡；
+    - 返回是否至少成功发出一条。
+    """
+    from core.chat_bubble import split_bubbles, typing_delay_seconds, to_plain_text
+    if not reply_text or not str(reply_text).strip():
+        return False
+    if BUBBLE_CHAT_ENABLED:
+        seq = split_bubbles(reply_text)
+    else:
+        # 回退整段发送时也清掉分隔符/表情标记，避免把 ‖/[face:] 直接发给用户
+        seq = [{"type": "text", "text": to_plain_text(str(reply_text), "  ").replace("  ", " ").strip()}]
+    if not seq:
+        return False
+
+    sent_any = False
+    text_idx = 0
+    for i, frag in enumerate(seq):
+        ok = False
+        if frag.get("type") == "face":
+            if is_group:
+                from core.napcat import send_group_face
+                ok = await send_group_face(group_id, frag["face"])
+            else:
+                ok = await send_qq_private_face(qq_number, frag["face"])
+        else:
+            seg_text = frag["text"]
+            if is_group:
+                from core.napcat import send_group_text
+                ok = await send_group_text(
+                    group_id=group_id, text=seg_text,
+                    at_qq=(at_qq if text_idx == 0 else ""))
+            else:
+                ok = await send_qq_private_msg(qq_number, seg_text)
+            text_idx += 1
+        if ok:
+            sent_any = True
+        # 片段之间按字数等待，模拟真人逐条打字；最后一条不再等
+        if i < len(seq) - 1:
+            await asyncio.sleep(typing_delay_seconds(frag.get("text", "")))
+    return sent_any
+
 async def send_qq_private_record(qq_number, audio_b64: str, audio_format: str = "mp3") -> bool:
     """
     通过 NapCat HTTP API 发送 QQ 私聊语音消息。
@@ -1795,11 +1872,10 @@ async def handle_group_message(body: dict) -> dict:
                     logger.warning(f"[QQ群聊] 角色{role_id} 生成回复为空")
                     continue
 
-                # 发送到群聊（@用户）
-                sent = await send_group_text(
-                    group_id=group_id,
-                    text=reply_text,
-                    at_qq=user_id,
+                # 发送到群聊（多短气泡连发，仅第一条@用户）
+                sent = await send_qq_reply_bubbles(
+                    None, reply_text, is_group=True,
+                    group_id=group_id, at_qq=user_id,
                 )
 
                 results.append({
@@ -2056,8 +2132,8 @@ async def qq_webhook(request: Request):
         reply_text = "抱歉，我刚才走神了，能再说一遍吗？"
         bystander_replies = []
 
-    # 发送消息
-    sent = await send_qq_private_msg(qq_number, reply_text)
+    # 发送消息（多短气泡连发，模拟真人节奏；BUBBLE_CHAT_ENABLED=0 时回退整段发送）
+    sent = await send_qq_reply_bubbles(qq_number, reply_text, is_group=False)
 
     # v13.0: 发送旁观者插话（每条以角色名开头，间隔发送）
     for br in bystander_replies:
@@ -2065,9 +2141,17 @@ async def qq_webhook(request: Request):
             br_name = br.get("role_name") or br.get("role_id", "")
             br_content = br.get("content", "")
             if br_content:
-                br_text = f"{br_name}：{br_content}"
+                from core.chat_bubble import split_bubbles, typing_delay_seconds
                 await asyncio.sleep(0.8)  # 模拟角色思考间隔，避免消息同时到达
-                await send_qq_private_msg(qq_number, br_text)
+                br_seq = split_bubbles(br_content)
+                for bi, bf in enumerate(br_seq):
+                    prefix = f"{br_name}：" if bi == 0 else ""
+                    if bf.get("type") == "face":
+                        await send_qq_private_face(qq_number, bf["face"])
+                    else:
+                        await send_qq_private_msg(qq_number, prefix + bf["text"])
+                    if bi < len(br_seq) - 1:
+                        await asyncio.sleep(typing_delay_seconds(bf.get("text", "")))
                 logger.info(f"[QQ] 旁观者插话: {br_name} - {br_content[:40]}")
         except Exception as br_e:
             logger.warning(f"[QQ] 旁观者插话发送失败: {br_e}")
@@ -2179,11 +2263,14 @@ async def internal_proactive_push(request: Request, x_internal_token: str = Head
     message_id = body.get("message_id")
     if not user_id or not content:
         return JSONResponse({"error": "bad_request"}, status_code=400)
-    msg = {"type": "proactive", "role_id": role_id, "content": content,
+    # 网页 WS / 对话历史用纯文本（去[face:]、‖转换行）；QQ 侧保留原始串用于多气泡拆分
+    from core.chat_bubble import to_plain_text
+    plain_content = to_plain_text(content, "\n")
+    msg = {"type": "proactive", "role_id": role_id, "content": plain_content,
            "timestamp": time.time(), "message_id": message_id}
     # v13.0: 缓存主动消息，用户下一次发消息时纳入 chat_history，保证大模型知道自己刚才说了什么
     pending_proactive_in_history[user_id] = {
-        "role_id": role_id, "content": content, "timestamp": time.time()
+        "role_id": role_id, "content": plain_content, "timestamp": time.time()
     }
 
     delivered = False
@@ -2233,12 +2320,12 @@ async def internal_proactive_push(request: Request, x_internal_token: str = Head
                 except Exception as img_e:
                     logger.warning(f"[主动发图] 异常: {type(img_e).__name__}: {img_e}")
 
-            # 发送消息（有图则图文一起发，无图则只发文本）
+            # 发送消息（有图则图文一起发，无图则多短气泡连发）
             if image_url:
                 from core.napcat import send_private_image
                 qq_sent = await send_private_image(qq_number, image_url, text=content)
             else:
-                qq_sent = await send_qq_private_msg(qq_number, content)
+                qq_sent = await send_qq_reply_bubbles(qq_number, content, is_group=False)
 
             if qq_sent:
                 delivered = True
@@ -2769,6 +2856,8 @@ async def _mc_handle_chat(websocket, msg):
         return
 
     reply = result.get("reply", "") or "……"
+    # MC 聊天框为单行，多气泡换行转为空格
+    reply = reply.replace("\n", " ").replace("\r", " ").strip()
     # Minecraft 聊天框长度限制，超长截断
     if len(reply) > MC_MAX_REPLY_LENGTH:
         reply = reply[:MC_MAX_REPLY_LENGTH] + "…"

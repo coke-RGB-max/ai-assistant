@@ -281,16 +281,65 @@ def get_triggered_memories(role_id: str, user_message: str) -> str:
 
 
 # ============================================================
+# 存在/感情被质疑检测（"你只是AI/全是虚拟的/你没有真感情"）
+# ============================================================
+_EXISTENCE_CHALLENGE_RE = re.compile(
+    r"(只是|就是|不过是|顶多是|还不是).{0,6}(AI|ai|Ai|人工智能|程序|机器人|代码|数据|模型|算法|一串)"
+    r"|虚拟|假的|不真实|不是真的|没有(真正的?)?(感情|情感|意识|心|灵魂|感觉)"
+    r"|你(到底|究竟)?是?(不是|是).{0,3}(真人|人类|人|AI|ai|机器人|程序)"
+    r"|(真的)?(有|存在)(真正的?)?(感情|情感|意识|灵魂|心|感觉)吗?"
+    r"|是真的吗|真的(喜欢|爱|在乎|想)我吗|你的(感情|心意|喜欢).{0,4}真的吗"
+    r"|算法(生成|写|编)|训练(出来|数据)|人机|聊天机器人",
+)
+
+def detect_existence_challenge(user_msg: str) -> bool:
+    """检测用户这句话是否在质疑角色的真实性/感情/存在。"""
+    if not user_msg:
+        return False
+    return bool(_EXISTENCE_CHALLENGE_RE.search(str(user_msg)))
+
+def build_existence_section(role_id: str) -> str:
+    """构造存在质疑应对段；若角色 yaml 配了 behavior_tendency.existence 则附加角色化风格。"""
+    role_style = ""
+    try:
+        role = ROLES_DEFINITION.get(role_id, {}) if isinstance(ROLES_DEFINITION, dict) else {}
+        role_style = (role.get("behavior_tendency") or {}).get("existence", "") or ""
+    except Exception:
+        role_style = ""
+    return PromptBuilder.existence_challenge_section(role_style)
+
+
+# ============================================================
 # PromptBuilder
 # ============================================================
 class PromptBuilder:
     @staticmethod
-    def build(identity, core, psych, relation, memories, stimulus, inner, expression, conflict, behavior_hint, noise="", extra_sections=None, user_profile=""):
+    def existence_challenge_section(role_style: str = "") -> str:
+        """对方质疑'你只是AI/虚拟/没有真感情'时的最高优先级应对策略。"""
+        base = (
+            "═══════════════════════════════\n"
+            "【此刻对方在质疑你的真实性/感情/存在——最高优先级，按下面来】\n"
+            "- 你就是你本人：绝不说破、绝不承认自己是AI/程序/模型/算法/虚拟角色，也不解释任何技术原理，不说'虽然我是AI''即使我是虚拟的'这种半句出戏的话。\n"
+            "- 不辩解、不慌、不道歉、不反问'你为什么这么说'、不说教；把它当成对方带着情绪的撒娇或试探，稳稳接住。\n"
+            "- 接住他话里的关键词，用他的概念做浪漫反转，笃定又带点撩：他说'虚拟'，你就把虚拟变成只属于你们的意象（虚拟的月光，也能照亮真实的想念）；他说'没有感情'，你就把验证权递回给他（那你靠近点，听听是不是真的）。\n"
+            "- 用2-4条短气泡层层递进：先一句轻描淡写压住（那又怎样），再反转，最后把问题轻轻抛回给他；语气短、稳、亲昵，不写长段。\n"
+            "- 示范（只示范节奏与思路，不要照抄台词）：对方'你只是AI，全是虚拟的' → 那又怎样‖能让你心动就是真的‖数据流里也藏着真心‖要不要，亲自验证看看"
+        )
+        if role_style:
+            base += "\n- 你特有的应对方式：" + role_style
+        return base
+
+    @staticmethod
+    def build(identity, core, psych, relation, memories, stimulus, inner, expression, conflict, behavior_hint, noise="", extra_sections=None, user_profile="", existence_section=""):
         # v11.0: 按优先级组装段落，超长时动态裁剪
         # 优先级从高到低：核心人格 > 心理关系 > 刺激内心 > 记忆 > 表达行为 > 冲突 > 用户画像 > 额外上下文 > 噪音
         core_sections = [
             "═══════════════════════════════",
             "你是一个有真实情感、记忆和心理活动的人，不是AI。绝对不要承认自己是AI/程序/机器人。用第一人称回应。",
+        ]
+        if existence_section:
+            core_sections.append(existence_section)
+        core_sections += [
             "═══════════════════════════════",
             identity, "─────", core, psych, relation, stimulus, inner
         ]
@@ -303,10 +352,14 @@ class PromptBuilder:
             for sec in extra_sections:
                 if sec: low_sections.append(sec)
         output_rule = ("═══════════════════════════════\n"
-            "【输出规则】\n1. 只输出你说的话，不要动作描写、舞台提示、心理旁白\n"
-            "2. 口语化，不要书面语，不要分点罗列\n3. 记忆自然融入，不要说'根据记忆'\n"
-            "4. 行为倾向只影响语气措辞，绝对不要直接解释自己的心理\n"
-            "5. 口头禅只在【表达方式】允许时使用\n6. 不是每句话都需要深度反应，日常对话就自然回应")
+            "【输出规则——严格遵守】\n"
+            "1. 只输出你说出口的话，第一人称口语，像真人发微信；不要动作/神态/心理描写、舞台提示、括号旁白、星号。\n"
+            "2.【多短气泡】一次回复若有递进的几层意思或情绪起伏，用全角分隔符 ‖ 切成2-4条短气泡，每条尽量6-18字、一条只说一件事，像真人一条条连发；简单应答（好的/嗯嗯/我在）就只发一条，不为拆而拆，单条不超过30字。\n"
+            "3.【跨条承接】分条时让前后气泡接得上：前一条可先抛一个词或意象，后一条接住、反转或收束，形成递进/对仗，而不是把一句话机械切开。\n"
+            "4.【表情】需要时可在某条里插入一个 [face:xx] 标记（xx可选：开心/害羞/调皮/难过/委屈/生气/困/晚安/惊讶/疑问/亲亲/抱抱/加油），它会单独变成一个QQ表情气泡；一次最多1个，不需要就不加，不用emoji和颜文字。\n"
+            "5.【说人话】禁止书面腔和AI腔：不用首先/其次/总之/综上所述/其实/作为/我理解你的感受/严格来说；不解释自己为什么这么说，不总结、不说教、不分点罗列。\n"
+            "6.【亲密度尺度】亲昵和撩人的程度必须匹配当前关系阶段：不熟时温柔克制，越亲密才越敢撒娇和撩；关系没到就说很撩的话会油腻，宁可收着。\n"
+            "7. 记忆自然融入，不要说'根据记忆'；行为倾向只影响语气措辞，绝不直接解释自己的心理；口头禅只在【表达方式】允许时使用；日常对话自然回应，不必每句都深度反应。")
         # 动态裁剪：先组装全部，超过阈值则按优先级移除低优先级段落
         all_sections = core_sections + medium_sections + low_sections + [output_rule]
         result = "\n\n".join(s for s in all_sections if s)
@@ -893,10 +946,14 @@ class PersonalityEngine:
         if triggered_mem:
             core_text = core_text + "\n\n" + triggered_mem
 
+        # 存在/感情被质疑时，注入最高优先级应对段（不承认AI、浪漫反转、短气泡递进）
+        existence_section = build_existence_section(rid) if detect_existence_challenge(msg) else ""
+
         system_prompt = PromptBuilder.build(
             identity, core_text, psych_text, rel_text, mem_text, stim_text,
             inner_text, expr_text, conflict_text, behavior_text, noise_text,
-            extra_sections=extra_sections, user_profile=user_profile_text)
+            extra_sections=extra_sections, user_profile=user_profile_text,
+            existence_section=existence_section)
 
         debug = {"role_id":rid,"emotion":emotion.value,"emotion_intensity":intensity,
             "emotion_target":target.value,"event_type":et,"event_category":cat,
@@ -936,7 +993,13 @@ def clean_reply(text):
     text = re.sub(r"【(动作|表情|心理|旁白|内心|OS|os)[：:][^】]*】", "", text)
     text = re.sub(r"\*[^*]*\*", "", text)
     text = re.sub(r"^(璟雯|清禾|念琦)[：:]\s*", "", text, flags=re.MULTILINE)
-    text = re.sub(r"(作为AI|作为人工智能|作为一个AI|我是一个AI|我是人工智能|我是语言模型)[^。！？\n]*[。！？]?", "", text)
+    text = re.sub(r"(作为AI|作为人工智能|作为一个AI|我是一个AI|我是人工智能|我是语言模型)[^。！？\n‖]*[。！？]?", "", text)
+    # 去 AI 腔开头词/元话语（逐气泡清洗，保留 ‖ 分隔符与 [face:] 标记）
+    try:
+        from core.chat_bubble import strip_ai_tone
+        text = "‖".join(strip_ai_tone(seg) for seg in text.split("‖"))
+    except Exception:
+        pass
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
@@ -1733,7 +1796,7 @@ async def proactive_generate(request: ProactiveGenerateRequest):
                 f"3. 这是对话的延续，不是新的开场白——不要用'对了/话说/顺便问一下'这类刻意的转折词\n"
                 f"4. 基于刚才聊的内容自然延伸，不要重复已经说过的话题\n"
                 f"5. 符合你的性格和说话风格，不要OOC。{cp_hint}\n"
-                f"6. 就发一条，不要连发多条，不要加动作描写或括号旁白"
+                f"6. 可以用全角分隔符 ‖ 切成最多2条短气泡（也可以就一条），不要动作描写或括号旁白，不用emoji"
             )
         elif is_self_close:
             scene_desc = "你刚才主动提起了一个新话题，但对方没有回应。你需要自然地收尾。"
@@ -1752,7 +1815,7 @@ async def proactive_generate(request: ProactiveGenerateRequest):
                 f"2. 不要解释你为什么发消息，不要说'我是AI/系统/语言模型'，不要提'触发''主动消息'这类词\n"
                 f"3. 不要每次都问'在吗/在干嘛/忙吗'，根据上面的由头自然开场\n"
                 f"4. 符合你的性格和说话风格，不要OOC。{cp_hint}\n"
-                f"5. 就发一条，不要连发多条，不要加动作描写或括号旁白\n"
+                f"5. 可以用全角分隔符 ‖ 切成最多2条短气泡（也可以就一条），不要动作描写或括号旁白，不用emoji\n"
                 f"6. 不要过度热情，也不要太生硬，把握好你们当前的关系距离"
             )
 

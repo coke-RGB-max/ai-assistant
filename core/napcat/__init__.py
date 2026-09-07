@@ -36,10 +36,12 @@ from .sender import (
     send_private_text,
     send_private_image,
     send_private_voice,
+    send_private_face,
     send_private_mixed,
     send_group_text,
     send_group_image,
     send_group_voice,
+    send_group_face,
     send_group_mixed,
     send_proactive_image_to_qq,
     is_available,
@@ -57,7 +59,9 @@ __all__ = [
     # image_handler
     "download_image", "understand_image", "process_image_message", "is_image_message",
     # sender
-    "send_private_text", "send_private_image", "send_private_voice", "send_private_mixed",
-    "send_group_text", "send_group_image", "send_group_voice", "send_group_mixed",
+    "send_private_text", "send_private_image", "send_private_voice", "send_private_face",
+    "send_private_mixed",
+    "send_group_text", "send_group_image", "send_group_voice", "send_group_face",
+    "send_group_mixed",
     "send_proactive_image_to_qq", "is_available", "get_status",
 ]

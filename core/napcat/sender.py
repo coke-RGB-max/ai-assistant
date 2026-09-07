@@ -150,6 +150,15 @@ async def send_private_voice(user_id: str, audio_url_or_b64: str) -> bool:
     return result is not None
 
 
+async def send_private_face(user_id: str, face_id: str) -> bool:
+    """发送私聊 QQ 原生小黄脸表情（OneBot face 消息段）。"""
+    result = await call_napcat_api("send_private_msg", {
+        "user_id": int(user_id),
+        "message": [build_face(face_id)],
+    })
+    return result is not None
+
+
 async def send_private_mixed(
     user_id: str,
     text: str = "",
@@ -226,6 +235,15 @@ async def send_group_voice(group_id: str, audio_url_or_b64: str) -> bool:
     result = await call_napcat_api("send_group_msg", {
         "group_id": int(group_id),
         "message": [build_voice(audio_url_or_b64)],
+    })
+    return result is not None
+
+
+async def send_group_face(group_id: str, face_id: str) -> bool:
+    """发送群聊 QQ 原生小黄脸表情。"""
+    result = await call_napcat_api("send_group_msg", {
+        "group_id": int(group_id),
+        "message": [build_face(face_id)],
     })
     return result is not None
 
