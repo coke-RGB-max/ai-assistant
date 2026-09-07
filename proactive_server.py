@@ -51,6 +51,8 @@ class ConversationIntentDetector:
         "太困了", "犯困", "撑不住了", "改天聊", "下次聊",
         "回头聊", "晚点聊", "有空再聊", "先不聊了", "先睡了",
         "不早了", "太晚了", "该休息了", "想一个人待着",
+        "先这样吧", "聊到这", "到这吧", "明天聊", "改天再说",
+        "眯一会", "眯一下", "先撤", "去休息",
     ]
 
     @classmethod
@@ -797,10 +799,7 @@ class ContactPolicy:
         ).fetchone()["c"]
 
     def is_silent_hour(self) -> bool:
-        h = now_cst().hour
-        if SLEEP_START_HOUR <= h or h < SLEEP_END_HOUR:
-            return True
-        return False
+        return is_silent_hour_now()
 
     def check(self, conn, user_id: str, role_id: str, intimacy: int,
               score: float, has_memory_event: bool) -> Dict[str, Any]:
@@ -1278,6 +1277,144 @@ class ProactiveScheduler:
         return role_id
 
 # ============================================================
+# v15.0: 主动发起前的“续聊意愿评估”闸门
+# 设计：AI 准备主动延续话题/收尾前，先判断“现在还适不适合接话”，
+#       而不是只看“最近30分钟有没有说过告别词”。短路顺序（越靠前越省成本）：
+#   1) 静默时段（23:00-8:00）硬拦截；
+#   2) 30分钟告别缓存命中（_is_intent_active）；
+#   3) 最近对话“最后一条用户消息”本身是结束意图（不依赖 TTL，用户没再开口就一直拦）；
+#   4) 同一对话状态已被 LLM 否决过 → 沿用结论，不重复调用模型；
+#   5) 配置了外接大模型时，回看最近6轮对话判断是否还能自然续聊。
+# ============================================================
+def is_silent_hour_now() -> bool:
+    """当前（北京时间）是否处于免打扰静默时段。TopicResumer 与 ContactPolicy 共用同一口径。"""
+    h = now_cst().hour
+    return SLEEP_START_HOUR <= h or h < SLEEP_END_HOUR
+
+
+# key = "user_id|role_id" -> (last_user_message_at, reason)；用户重新开口时清除
+_resume_block: Dict[str, Tuple[float, str]] = {}
+
+
+def _resume_block_key(user_id: str, role_id: str) -> str:
+    return f"{user_id}|{role_id}"
+
+
+def clear_resume_block(user_id: str, role_id: Optional[str] = None) -> None:
+    """用户重新发言后清除续聊否决标记，使其之后能恢复主动话题。"""
+    if role_id is None:
+        prefix = f"{user_id}|"
+        for k in [k for k in _resume_block if k.startswith(prefix)]:
+            _resume_block.pop(k, None)
+    else:
+        _resume_block.pop(_resume_block_key(user_id, role_id), None)
+
+
+def _last_user_text(recent_messages_json: str) -> str:
+    """取最近对话中最后一条用户消息文本。"""
+    try:
+        msgs = json.loads(recent_messages_json) if recent_messages_json else []
+    except Exception:
+        return ""
+    for m in reversed(msgs):
+        if isinstance(m, dict) and m.get("role") == "user":
+            return str(m.get("content", "") or "").strip()
+    return ""
+
+
+async def _llm_assess_continue(recent_messages_json: str) -> Optional[Tuple[bool, str]]:
+    """让外接大模型回看最近对话，判断现在由 AI 主动续聊是否合适。返回 (can_continue, reason) 或 None(无法判断)。"""
+    if not PROACTIVE_LLM_API_KEY:
+        return None
+    try:
+        msgs = json.loads(recent_messages_json) if recent_messages_json else []
+    except Exception:
+        msgs = []
+    lines = []
+    for m in msgs[-6:]:
+        if not isinstance(m, dict):
+            continue
+        role = "对方" if m.get("role") == "user" else "你"
+        content = str(m.get("content", "") or "").strip()
+        if content:
+            lines.append(f"{role}：{content[:120]}")
+    if not lines:
+        return None
+    history = "\n".join(lines)
+
+    system_prompt = """你是“主动续聊可行性”判断器。判断：在下面这段对话之后，现在由“你”（AI）主动发起一个新话题是否合适。
+
+【不应主动续聊，返回 can_continue=false】
+- 对方最后在告别或要离开：晚安、我睡了、去忙了、先这样、到这吧、下次聊、不聊了
+- 对方明确表示要休息/睡觉/吃饭/洗澡/出门等，对话已经自然收尾
+- 对方最后很敷衍、冷淡或明显不想继续（嗯、哦、算了、随便你）
+- 已经是深夜，对方很可能要休息
+
+【可以主动续聊，返回 can_continue=true】
+- 对话只是暂时停顿，之前有来有回、对方有投入
+- 对方最后是提问、分享、表达情绪或想念，没有结束信号
+- 没有任何告别/离开/收尾的意思
+
+只返回 JSON：{"can_continue": true 或 false, "reason": "不超过20字的简短原因"}"""
+
+    user_prompt = f"【最近对话】\n{history}\n\n请判断现在是否适合由你主动发起新话题，只返回 JSON。"
+    result_str = await call_llm_direct(system_prompt, user_prompt, temperature=0.2, max_tokens=120)
+    if not result_str:
+        return None
+    try:
+        cleaned = result_str.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:]
+            cleaned = cleaned.strip()
+        js, je = cleaned.find("{"), cleaned.rfind("}")
+        if js < 0 or je <= js:
+            return None
+        result = json.loads(cleaned[js:je + 1])
+        can = bool(result.get("can_continue", True))
+        reason = str(result.get("reason", ""))[:40]
+        return can, reason
+    except Exception as e:
+        logger.warning(f"[续聊评估-LLM] 解析失败，放行由规则兜底: {e}")
+        return None
+
+
+async def assess_continue_willingness(user_id: str, role_id: str,
+                                      recent_messages_json: str,
+                                      last_user_ts: float) -> Tuple[bool, str]:
+    """
+    主动发起前的综合续聊意愿闸门。返回 (是否允许, 原因)。
+    last_user_ts: 该会话最后一条用户消息时间戳，用于识别“同一对话状态”，避免重复调用 LLM。
+    """
+    # 1) 静默时段：深夜不主动
+    if is_silent_hour_now():
+        return False, "silent_hour"
+    # 2) 30 分钟内明确告别缓存
+    if _is_intent_active(user_id):
+        return False, "intent_cache_active"
+    # 3) 最后一条用户消息本身就是结束意图（规则复判，不依赖 30 分钟 TTL）
+    last_text = _last_user_text(recent_messages_json)
+    if last_text and ConversationIntentDetector.detect(last_text):
+        return False, "last_user_end_intent"
+    # 4) 同一对话状态已被模型否决 → 沿用，省调用
+    key = _resume_block_key(user_id, role_id)
+    blocked = _resume_block.get(key)
+    if blocked and blocked[0] == last_user_ts:
+        return False, f"llm_blocked:{blocked[1]}"
+    # 5) 大模型回看最近对话评估
+    verdict = await _llm_assess_continue(recent_messages_json)
+    if verdict is not None:
+        can, reason = verdict
+        if not can:
+            _resume_block[key] = (last_user_ts, reason)
+            logger.info(f"[续聊评估] {user_id}/{role_id} 模型判定不宜续聊: {reason}")
+            return False, f"llm_blocked:{reason}"
+        return True, "llm_allow"
+    # 未配置模型 / 模型不可用：规则全过则放行
+    return True, "rule_allow"
+
+# ============================================================
 # v13.0: TopicResumer 话题延续引擎
 # 两阶段机制：
 #   阶段1 topic_continue: AI回复后沉默 N 秒 → 基于上文延伸新话题
@@ -1528,9 +1665,11 @@ class TopicResumer:
                             logger.debug(f"[TopicResumer] 跳过话题延续 {user_id}/{role_id}: {reason}")
                             continue
 
-                        # 对话意图拦截：用户最近表达了终止意图，不发起话题延续
-                        if _is_intent_active(user_id):
-                            logger.info(f"[意图拦截] 用户 {user_id} 最近表达了终止意图，跳过话题延续")
+                        # v15.0 续聊意愿闸门：静默时段 / 末句结束意图 / 模型回看评估，任一否决都不发起
+                        can_continue, block_reason = await assess_continue_willingness(
+                            user_id, role_id, row["recent_messages"] or "[]", last_user)
+                        if not can_continue:
+                            logger.info(f"[话题延续拦截] {user_id}/{role_id}: {block_reason}")
                             continue
                         content = await self._generate_topic_continue(
                             role_id, row["recent_messages"] or "[]", intimacy, mood)
@@ -1560,6 +1699,17 @@ class TopicResumer:
                     if (now_ts - topic_sent_at) >= TOPIC_CLOSING_DELAY:
                         # 二次确认：用户在话题发出后确实没回复
                         if last_user < topic_sent_at:
+                            # v15.0: 深夜或用户已表达结束意图时，不再“自圆其说”打扰，直接回到 idle
+                            can_close, close_reason = await assess_continue_willingness(
+                                user_id, role_id, row["recent_messages"] or "[]", last_user)
+                            if not can_close:
+                                conn.execute(
+                                    "UPDATE conversation_state SET topic_phase='idle' "
+                                    "WHERE user_id=? AND role_id=?",
+                                    (user_id, role_id))
+                                conn.commit()
+                                logger.info(f"[自圆其说拦截] {user_id}/{role_id}: {close_reason}")
+                                continue
                             # v14.0: 查询刚才发起的话题内容，连同对话历史一起传给大模型生成自然收尾
                             last_topic_msg = conn.execute(
                                 "SELECT content FROM proactive_messages WHERE user_id=? AND role_id=? AND reason_type='topic_continue' ORDER BY created_at DESC LIMIT 1",
@@ -1721,6 +1871,8 @@ async def on_user_spoke(req: UserSpokeReport):
     conn = _get_db()
     try:
         topic_resumer._ensure_state(conn, req.user_id, req.role_id)
+        # 用户重新开口=新对话状态，清除上一轮续聊否决标记，允许重新评估
+        clear_resume_block(req.user_id, req.role_id)
         conn.execute(
             "UPDATE conversation_state SET last_user_message_at=?, topic_phase='idle' "
             "WHERE user_id=? AND role_id=?",
