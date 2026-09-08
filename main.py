@@ -2614,11 +2614,6 @@ async def switch_story_mode(request: Request):
     # 获取原始用户名（如果当前已经是过往线虚拟用户，还原出原始用户名）
     original_username = user_db.get_original_user(user["username"])
 
-    # QQ 用户禁止切换到过往线
-    if user.get("qq_bound") or user.get("is_qq_tmp"):
-        if mode == "past":
-            return JSONResponse({"success": False, "error": "QQ端仅支持模式一（新相遇线）"}, status_code=403)
-
     if mode == "past":
         # 切换到过往线：确保虚拟用户存在，返回虚拟用户的 token
         past_username = user_db.ensure_past_user(original_username)
