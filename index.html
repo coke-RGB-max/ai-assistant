@@ -401,29 +401,65 @@
     /* ===== 管理员后台 ===== */
     .admin-panel { min-height: 100dvh; background: var(--bg); padding: 24px; }
     .admin-header {
-      width: min(100%, 1000px); margin: 0 auto 20px;
+      width: min(100%, 1200px); margin: 0 auto 20px;
       display: flex; align-items: center; justify-content: space-between; gap: 12px;
     }
     .admin-header h2 { margin: 0; font-size: 20px; }
-    .admin-content {
-      width: min(100%, 1000px); margin: 0 auto;
-      display: grid; grid-template-columns: 320px 1fr; gap: 18px; align-items: start;
+    .admin-body {
+      width: min(100%, 1200px); margin: 0 auto;
+      display: grid; grid-template-columns: 340px 1fr; gap: 18px; align-items: start;
+    }
+    .admin-left { display: flex; flex-direction: column; gap: 18px; max-height: calc(100dvh - 120px); overflow-y: auto; position: sticky; top: 20px; }
+    .admin-right { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+    .admin-detail {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 16px; padding: 20px; box-shadow: var(--shadow);
+      min-height: 200px;
     }
     .admin-card {
       background: var(--panel); border: 1px solid var(--border);
       border-radius: 16px; padding: 20px; box-shadow: var(--shadow);
     }
     .admin-card h3 { margin: 0 0 14px; font-size: 15px; }
+
+    /* 折叠用户列表 */
     .user-row {
-      padding: 14px; border: 1px solid var(--border-soft); border-radius: 12px;
-      background: var(--panel-2); margin-bottom: 10px;
+      padding: 12px 14px; border: 1px solid var(--border-soft); border-radius: 10px;
+      background: var(--panel-2); margin-bottom: 8px; cursor: pointer;
+      transition: border-color .15s;
     }
+    .user-row:hover { border-color: var(--accent); }
+    .user-row.active { border-color: var(--accent); background: var(--panel); }
     .user-row-head {
       display: flex; align-items: center; justify-content: space-between;
-      gap: 10px; margin-bottom: 12px; flex-wrap: wrap;
+      gap: 8px; flex-wrap: wrap;
     }
     .user-row-head strong { font-size: 14px; }
     .user-row-head .uinfo { font-size: 12px; color: var(--muted); }
+    .user-row-head .arrow { font-size: 12px; color: var(--muted); transition: transform .2s; }
+    .user-row.active .arrow { transform: rotate(90deg); }
+
+    /* 时间线选择 */
+    .timeline-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+    .timeline-tab {
+      padding: 8px 16px; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--panel-2); cursor: pointer; font-size: 13px;
+    }
+    .timeline-tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+    /* 角色折叠块 */
+    .role-fold {
+      border: 1px solid var(--border-soft); border-radius: 10px; margin-bottom: 8px; overflow: hidden;
+    }
+    .role-fold-head {
+      padding: 12px 14px; cursor: pointer; background: var(--panel-2);
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .role-fold-head:hover { background: var(--panel); }
+    .role-fold-body { padding: 14px; display: none; }
+    .role-fold.open .role-fold-body { display: block; }
+    .role-fold.open .role-fold-head { border-bottom: 1px solid var(--border-soft); }
+
     .qq-badge {
       display: inline-block; padding: 2px 8px; border-radius: 999px;
       font-size: 11px; background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0;
@@ -483,7 +519,8 @@
       }
       .sidebar.open { transform: translateX(0); }
       #sidebar-toggle { display: inline-grid; }
-      .admin-content { grid-template-columns: 1fr; }
+      .admin-body { grid-template-columns: 1fr; }
+      .admin-left { position: static; max-height: none; overflow: visible; }
       .message { max-width: 88%; }
     }
     @media (max-width: 480px) {
@@ -668,41 +705,50 @@
         <h2>管理员后台</h2>
         <button id="admin-logout-btn" class="ghost-btn" type="button">退出</button>
       </header>
-      <div class="admin-content">
-        <div class="admin-card">
-          <h3>新建账号</h3>
-          <form id="create-user-form">
-            <div class="field">
-              <label for="new-username">用户名</label>
-              <input id="new-username" type="text" placeholder="用于登录" />
-            </div>
-            <div class="field">
-              <label for="new-nickname">昵称</label>
-              <input id="new-nickname" type="text" placeholder="展示名称" />
-            </div>
-            <div class="field">
-              <label for="new-password">密码</label>
-              <input id="new-password" type="password" placeholder="至少 6 位" />
-              <div id="new-password-hint" class="hint"></div>
-            </div>
-            <button id="create-user-btn" class="primary-btn" type="submit">创建账号</button>
-          </form>
-        </div>
-        <div class="admin-card">
-          <h3>全部用户 · 实时心理数据</h3>
-          <div id="users-list"></div>
-        </div>
-        <div class="admin-card">
-          <h3>日程活动池管理</h3>
-          <div class="field">
-            <label>选择角色</label>
-            <select id="schedule-role-select">
-              <option value="nianqi">念琦</option>
-              <option value="jingwen">璟雯</option>
-              <option value="qinghe">清禾</option>
-            </select>
+      <div class="admin-body">
+        <!-- 左栏：用户列表 -->
+        <div class="admin-left">
+          <div class="admin-card">
+            <h3>新建账号</h3>
+            <form id="create-user-form">
+              <div class="field">
+                <label for="new-username">用户名</label>
+                <input id="new-username" type="text" placeholder="用于登录" />
+              </div>
+              <div class="field">
+                <label for="new-nickname">昵称</label>
+                <input id="new-nickname" type="text" placeholder="展示名称" />
+              </div>
+              <div class="field">
+                <label for="new-password">密码</label>
+                <input id="new-password" type="password" placeholder="至少 6 位" />
+                <div id="new-password-hint" class="hint"></div>
+              </div>
+              <button id="create-user-btn" class="primary-btn" type="submit">创建账号</button>
+            </form>
           </div>
-          <div id="schedule-editor"></div>
+          <div class="admin-card">
+            <h3>用户列表</h3>
+            <div id="users-list"></div>
+          </div>
+        </div>
+        <!-- 右栏：详情 -->
+        <div class="admin-right">
+          <div id="admin-detail" class="admin-detail">
+            <div class="hint">← 从左侧选择一个用户查看详情</div>
+          </div>
+          <div class="admin-card">
+            <h3>日程活动池管理</h3>
+            <div class="field">
+              <label>选择角色</label>
+              <select id="schedule-role-select">
+                <option value="nianqi">念琦</option>
+                <option value="jingwen">璟雯</option>
+                <option value="qinghe">清禾</option>
+              </select>
+            </div>
+            <div id="schedule-editor"></div>
+          </div>
         </div>
       </div>
     </section>
@@ -826,12 +872,12 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     let currentAudio = null;  // 当前播放的语音
     // ===== Live2D 形象配置 =====
     const LIVE2D_CONFIG = {
-      // 每个角色的模型路径（相对 index.html 的路径）
+      // 每个角色的模型路径（Cloudflare R2 公共地址）
       // 念琦→Hiyori(温柔)  清禾→Haru(知性学姐)  璟雯→Epsilon(活泼傲娇)
       models: {
-        nianqi:  "models/hiyori/hiyori_free/runtime/hiyori_free_t08.model3.json",
-        qinghe:  "models/haru/runtime/haru.model3.json",
-        jingwen: "models/epsilon/epsilon_free/runtime/Epsilon_free.model3.json",
+        nianqi:  "https://pub-43eaf7717432408d951f3bb38ff241e.r2.dev/hiyori/hiyori_free/runtime/hiyori_free_t08.model3.json",
+        qinghe:  "https://pub-43eaf7717432408d951f3bb38ff241e.r2.dev/haru/runtime/haru.model3.json",
+        jingwen: "https://pub-43eaf7717432408d951f3bb38ff241e.r2.dev/epsilon/epsilon_free/runtime/Epsilon_free.model3.json",
       },
       // 模型显示缩放（三个模型尺寸不同，可分别调整，统一用一个值先跑通）
       scale: 0.15,
@@ -2252,37 +2298,174 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       users.forEach(user => {
         const row = document.createElement("div");
         row.className = "user-row";
-        const head = document.createElement("div");
-        head.className = "user-row-head";
+        row.dataset.username = user.username;
         const qqBadge = user.qq
           ? `<span class="qq-badge">QQ: ${escapeHtml(user.qq)}</span>`
-          : `<span class="qq-badge none">未绑定QQ</span>`;
-        head.innerHTML = `<div><strong>${escapeHtml(user.nickname)}</strong> <span class="uinfo">@${escapeHtml(user.username)} · ${user.is_admin ? "管理员" : "普通用户"}</span></div>${qqBadge}`;
-        row.appendChild(head);
-
-        // 心理状态编辑区（异步加载）
-        const psychArea = document.createElement("div");
-        psychArea.className = "psych-area";
-        psychArea.innerHTML = '<div class="hint">加载中...</div>';
-        row.appendChild(psychArea);
-
+          : `<span class="qq-badge none">未绑定</span>`;
+        row.innerHTML = `<div class="user-row-head">
+          <div><strong>${escapeHtml(user.nickname)}</strong> <span class="uinfo">@${escapeHtml(user.username)}</span></div>
+          <div style="display:flex;align-items:center;gap:6px">${qqBadge}<span class="arrow">›</span></div>
+        </div>`;
+        row.addEventListener("click", () => selectUser(user.username, row));
         box.appendChild(row);
-        loadUserPsych(user.username, psychArea);
       });
     }
 
-    async function loadUserPsych(username, container) {
-      adminUserContainers[username] = container;  // v4.0.4: 记录容器，用于实时刷新
+    let selectedUser = null;
+    let selectedTimeline = "new";
+
+    async function selectUser(username, rowEl) {
+      document.querySelectorAll(".user-row").forEach(r => r.classList.remove("active"));
+      rowEl.classList.add("active");
+      selectedUser = username;
+      selectedTimeline = "new";
+      renderUserDetail(username);
+    }
+
+    function renderUserDetail(username) {
+      const detail = $("#admin-detail");
+      detail.innerHTML = `
+        <h3 style="margin:0 0 12px">@${escapeHtml(username)}</h3>
+        <div class="timeline-tabs">
+          <div class="timeline-tab active" data-tl="new">📖 新相遇线</div>
+          <div class="timeline-tab" data-tl="past">🌙 过往线（青梅竹马）</div>
+        </div>
+        <div id="roles-container"></div>
+      `;
+      detail.querySelectorAll(".timeline-tab").forEach(tab => {
+        tab.addEventListener("click", () => {
+          detail.querySelectorAll(".timeline-tab").forEach(t => t.classList.remove("active"));
+          tab.classList.add("active");
+          selectedTimeline = tab.dataset.tl;
+          loadRolesForTimeline(username, selectedTimeline);
+        });
+      });
+      loadRolesForTimeline(username, "new");
+    }
+
+    async function loadRolesForTimeline(username, timeline) {
+      const container = $("#roles-container");
+      const effectiveUser = timeline === "past" ? username + "_past" : username;
+      container.innerHTML = '<div class="hint">加载中...</div>';
       try {
-        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/users/${encodeURIComponent(username)}/psych`, {
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/users/${encodeURIComponent(effectiveUser)}/psych`, {
           headers: { Authorization: `Bearer ${currentUser.token}` }
         });
-        if (!resp.ok) throw new Error();
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
         const data = await resp.json();
-        renderPsychEditor(username, data.states || {}, container);
+        const states = data.states || {};
+        container.innerHTML = "";
+        ROLES.forEach(role => {
+          const st = states[role.id] || {};
+          const fold = document.createElement("div");
+          fold.className = "role-fold";
+          fold.innerHTML = `
+            <div class="role-fold-head">
+              <span>${role.emoji} ${role.name}</span>
+              <span class="arrow">›</span>
+            </div>
+            <div class="role-fold-body"></div>
+          `;
+          const body = fold.querySelector(".role-fold-body");
+          fold.querySelector(".role-fold-head").addEventListener("click", () => {
+            fold.classList.toggle("open");
+            if (fold.classList.contains("open") && !body.dataset.loaded) {
+              loadRoleDetail(effectiveUser, role.id, body);
+              body.dataset.loaded = "1";
+            }
+          });
+          container.appendChild(fold);
+        });
       } catch (e) {
-        container.innerHTML = '<div class="hint error">加载失败</div>';
+        container.innerHTML = `<div class="hint error">加载失败: ${e.message}</div>`;
       }
+    }
+
+    async function loadRoleDetail(username, roleId, body) {
+      body.innerHTML = '<div class="hint">加载中...</div>';
+      try {
+        // 两层亲密度
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/get_both_intimacy/${encodeURIComponent(username)}`, {
+          headers: { Authorization: `Bearer ${currentUser.token}` }
+        });
+        let layer1 = 0, layer2 = 0, avg = 0;
+        if (resp.ok) {
+          const data = await resp.json();
+          layer1 = (data.layer1_basic || {})[roleId] || 0;
+          layer2 = (data.layer2_realtime || {})[roleId] || 0;
+          avg = (data.average || {})[roleId] || 0;
+        }
+        // 心理状态
+        const psychResp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/users/${encodeURIComponent(username)}/psych`, {
+          headers: { Authorization: `Bearer ${currentUser.token}` }
+        });
+        const psychData = psychResp.ok ? await psychResp.json() : { states: {} };
+        const st = (psychData.states || {})[roleId] || {};
+
+        body.innerHTML = `
+          <div class="intimacy-bar">
+            <div class="intimacy-bar-title">两层亲密度</div>
+            <div class="intimacy-bar-grid">
+              <div class="intimacy-item layer1">
+                <span class="intimacy-label">第一层(基础)</span>
+                <span class="intimacy-val">${layer1}</span>
+                <input type="number" min="0" max="100" class="intimacy-input" placeholder="0-100" value="${layer1}" id="l1-input-${roleId}" />
+                <button class="intimacy-save-btn" type="button" id="l1-save-${roleId}">保存</button>
+              </div>
+              <div class="intimacy-item layer2">
+                <span class="intimacy-label">第二层(当下)</span>
+                <span class="intimacy-val">${layer2}</span>
+              </div>
+              <div class="intimacy-item avg">
+                <span class="intimacy-label">平均值</span>
+                <span class="intimacy-val">${avg}</span>
+              </div>
+            </div>
+          </div>
+          <div style="margin-top:12px">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+              <div>亲密度 <input type="number" value="${st.intimacy||30}" id="psych-intimacy-${roleId}" style="width:100%"></div>
+              <div>信任感 <input type="number" value="${st.trust||50}" id="psych-trust-${roleId}" style="width:100%"></div>
+              <div>安全感 <input type="number" value="${st.security||50}" id="psych-security-${roleId}" style="width:100%"></div>
+              <div>依恋度 <input type="number" value="${st.attachment||30}" id="psych-attachment-${roleId}" style="width:100%"></div>
+              <div>醋意 <input type="number" value="${st.jealousy||0}" id="psych-jealousy-${roleId}" style="width:100%"></div>
+              <div>疲劳度 <input type="number" value="${st.fatigue||0}" id="psych-fatigue-${roleId}" style="width:100%"></div>
+              <div>心情 <input type="number" value="${st.mood||50}" id="psych-mood-${roleId}" style="width:100%"></div>
+            </div>
+            <button class="primary-btn" style="margin-top:10px" onclick="savePsych('${username}','${roleId}')">保存心理状态</button>
+          </div>
+        `;
+        // 保存第一层亲密度
+        $(`#l1-save-${roleId}`).addEventListener("click", async () => {
+          const val = parseInt($(`#l1-input-${roleId}`).value) || 0;
+          try {
+            await fetch(`${CONFIG.HTTP_BASE}/api/admin/set_intimacy`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentUser.token}` },
+              body: JSON.stringify({ username, role_id: roleId, value: val })
+            });
+            showToast("已保存", "success");
+          } catch (e) { showToast("保存失败", "error"); }
+        });
+      } catch (e) {
+        body.innerHTML = `<div class="hint error">加载失败: ${e.message}</div>`;
+      }
+    }
+
+    window.savePsych = async function(username, roleId) {
+      const vals = {};
+      ["intimacy","trust","security","attachment","jealousy","fatigue","mood"].forEach(k => {
+        const el = $(`#psych-${k}-${roleId}`);
+        if (el) vals[k] = parseInt(el.value) || 0;
+      });
+      try {
+        await fetch(`${CONFIG.HTTP_BASE}/api/admin/users/${encodeURIComponent(username)}/psych`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentUser.token}` },
+          body: JSON.stringify({ states: { [roleId]: vals } })
+        });
+        showToast("已保存", "success");
+      } catch (e) { showToast("保存失败", "error"); }
     }
 
     function renderPsychEditor(username, states, container) {
@@ -2327,7 +2510,11 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
             const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/get_both_intimacy/${encodeURIComponent(username)}`, {
               headers: { Authorization: `Bearer ${currentUser.token}` }
             });
-            if (!resp.ok) return;
+            if (!resp.ok) {
+              const l1El = document.getElementById(`layer1-val-${role.id}`);
+              if (l1El) l1El.textContent = "错误:" + resp.status;
+              return;
+            }
             const data = await resp.json();
             const layer1 = (data.layer1_basic || {})[role.id] || 0;
             const layer2 = (data.layer2_realtime || {})[role.id] || 0;
@@ -2556,7 +2743,11 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     async function loadSchedule() {
       const rid = $("#schedule-role-select").value;
       try {
-        const data = await apiFetch(`/api/admin/schedule/${rid}`);
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/schedule/${rid}`, {
+          headers: { Authorization: `Bearer ${currentUser.token}` }
+        });
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        const data = await resp.json();
         const editor = $("#schedule-editor");
         let html = "";
         for (const [bucket, name] of Object.entries(SCHEDULE_BUCKET_NAMES)) {
@@ -2589,10 +2780,12 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       const inputs = document.querySelectorAll(`#acts-${bucket} input`);
       const activities = Array.from(inputs).map(i => i.value.trim()).filter(Boolean);
       try {
-        await apiFetch(`/api/admin/schedule/${rid}`, {
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/schedule/${rid}`, {
           method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentUser.token}` },
           body: JSON.stringify({ time_bucket: bucket, activities })
         });
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
         showToast("已保存", "success");
         loadSchedule();
       } catch (e) {
@@ -2614,7 +2807,11 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     window.deleteScheduleItem = async function(id, bucket) {
       const rid = $("#schedule-role-select").value;
       try {
-        await apiFetch(`/api/admin/schedule/${rid}/${id}`, { method: "DELETE" });
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/schedule/${rid}/${id}`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${currentUser.token}` }
+        });
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
         showToast("已删除", "success");
         loadSchedule();
       } catch (e) {
