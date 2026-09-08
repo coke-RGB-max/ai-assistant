@@ -2466,75 +2466,78 @@ async def internal_proactive_push(request: Request, x_internal_token: str = Head
         "role_id": role_id, "content": plain_content, "timestamp": time.time()
     }
 
-    delivered = False
     ws_sent = False
-    qq_sent = False
 
-    # 1. 尝试 WebSocket 推送给网页端在线用户
+    # 1. WebSocket 即时推送（快，同步做）
     ws = manager.active_connections.get(user_id)
     if ws:
         try:
             await ws.send_text(json.dumps(msg, ensure_ascii=False))
             ws_sent = True
-            delivered = True
         except Exception as e:
             logger.warning(f"主动推送WS发送失败: {e}")
 
-    # 2. 尝试通过 NapCat 发送 QQ 消息（核心修复：之前完全缺失这一步）
+    # 2. QQ 发送 + 图片生成 → 后台异步，不阻塞响应（修复：之前同步阻塞导致 proactive 端10s超时）
     qq_number = _extract_qq_number(user_id)
-    if qq_number:
-        try:
-            # P3：主动发图（如果启用了且亲密度足够）
-            image_url = ""
-            if PROACTIVE_AUTO_IMAGE and role_id:
-                try:
-                    # P3 修复：查询用户亲密度（优先从proactive_server读取admin面板的数值）
-                    user_intimacy = await _get_user_intimacy(user_id, role_id)
+    if qq_number and not ws_sent:
+        asyncio.create_task(_deliver_proactive_to_qq(
+            user_id, qq_number, role_id, content, msg
+        ))
 
-                    if user_intimacy >= PROACTIVE_IMAGE_INTIMACY_THRESHOLD:
-                        logger.info(f"[主动发图] 亲密度{user_intimacy}≥阈值{PROACTIVE_IMAGE_INTIMACY_THRESHOLD}，开始生成自拍...")
-                        from core.image_generator import get_selfie_system
-                        selfie_system = get_selfie_system()
-                        if selfie_system.client.available:
-                            img_result = await selfie_system.generate_proactive_image(
-                                user_id=user_id,
-                                role_id=role_id,
-                                intimacy=user_intimacy,
-                            )
-                            if img_result.get("allowed") and img_result.get("image_url"):
-                                image_url = img_result["image_url"]
-                                logger.info(f"[主动发图] 图片生成成功: {image_url[:60]}...")
-                            else:
-                                logger.warning(f"[主动发图] 图片生成失败: {img_result.get('error')}")
-                        else:
-                            logger.warning("[主动发图] 图像生成API不可用")
-                    else:
-                        logger.debug(f"[主动发图] 亲密度{user_intimacy}<阈值{PROACTIVE_IMAGE_INTIMACY_THRESHOLD}，跳过发图")
-                except Exception as img_e:
-                    logger.warning(f"[主动发图] 异常: {type(img_e).__name__}: {img_e}")
-
-            # 发送消息（有图则图文一起发，无图则多短气泡连发）
-            if image_url:
-                from core.napcat import send_private_image
-                qq_sent = await send_private_image(qq_number, image_url, text=content)
-            else:
-                qq_sent = await send_qq_reply_bubbles(qq_number, content, is_group=False)
-
-            if qq_sent:
-                delivered = True
-                logger.info(f"[主动消息] QQ发送成功 user={user_id} qq={qq_number} role={role_id} content={content[:30]} image={'有' if image_url else '无'}")
-            else:
-                logger.warning(f"[主动消息] QQ发送失败 user={user_id} qq={qq_number} role={role_id}")
-        except Exception as e:
-            logger.error(f"[主动消息] QQ发送异常 user={user_id} qq={qq_number}: {type(e).__name__}: {e}", exc_info=True)
-    else:
-        logger.debug(f"[主动消息] 用户 {user_id} 未绑定QQ，跳过QQ发送")
-
-    # 3. 如果都没成功，存入 pending 等待网页端上线拉取
-    if not delivered:
+    # 3. 未在线投递的存入 pending 等待网页端上线拉取
+    if not ws_sent:
         manager.pending_messages.setdefault(user_id, []).append(msg)
 
-    return {"delivered": delivered, "ws_sent": ws_sent, "qq_sent": qq_sent}
+    # 立即返回，不等 QQ 发送结果
+    return {"delivered": ws_sent, "ws_sent": ws_sent, "qq_sent": "async"}
+
+
+async def _deliver_proactive_to_qq(user_id, qq_number, role_id, content, msg):
+    """后台异步投递主动消息到QQ（含图片生成），不阻塞 proactive_push 接口响应"""
+    try:
+        image_url = ""
+        if PROACTIVE_AUTO_IMAGE and role_id:
+            try:
+                user_intimacy = await _get_user_intimacy(user_id, role_id)
+                if user_intimacy >= PROACTIVE_IMAGE_INTIMACY_THRESHOLD:
+                    logger.info(f"[主动发图] 亲密度{user_intimacy}≥阈值{PROACTIVE_IMAGE_INTIMACY_THRESHOLD}，开始生成自拍...")
+                    from core.image_generator import get_selfie_system
+                    selfie_system = get_selfie_system()
+                    if selfie_system.client.available:
+                        img_result = await selfie_system.generate_proactive_image(
+                            user_id=user_id,
+                            role_id=role_id,
+                            intimacy=user_intimacy,
+                        )
+                        if img_result.get("allowed") and img_result.get("image_url"):
+                            image_url = img_result["image_url"]
+                            logger.info(f"[主动发图] 图片生成成功: {image_url[:60]}...")
+                        else:
+                            logger.warning(f"[主动发图] 图片生成失败: {img_result.get('error')}")
+                    else:
+                        logger.warning("[主动发图] 图像生成API不可用")
+                else:
+                    logger.debug(f"[主动发图] 亲密度{user_intimacy}<阈值{PROACTIVE_IMAGE_INTIMACY_THRESHOLD}，跳过发图")
+            except Exception as img_e:
+                logger.warning(f"[主动发图] 异常: {type(img_e).__name__}: {img_e}")
+
+        # 发送消息（有图则图文一起发，无图则多短气泡连发）
+        if image_url:
+            from core.napcat import send_private_image
+            qq_sent = await send_private_image(qq_number, image_url, text=content)
+        else:
+            qq_sent = await send_qq_reply_bubbles(qq_number, content, is_group=False)
+
+        if qq_sent:
+            logger.info(f"[主动消息] QQ发送成功 user={user_id} qq={qq_number} role={role_id} content={content[:30]} image={'有' if image_url else '无'}")
+            # QQ发送成功后从 pending 移除，避免网页端上线后重复推送
+            pending_list = manager.pending_messages.get(user_id, [])
+            if msg in pending_list:
+                pending_list.remove(msg)
+        else:
+            logger.warning(f"[主动消息] QQ发送失败 user={user_id} qq={qq_number} role={role_id}")
+    except Exception as e:
+        logger.error(f"[主动消息] QQ发送异常 user={user_id} qq={qq_number}: {type(e).__name__}: {e}", exc_info=True)
 # -------------------------- 认证 --------------------------
 @app.post("/api/login")
 async def login(request: Request):

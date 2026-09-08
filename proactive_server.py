@@ -1107,7 +1107,7 @@ async def generate_proactive_message(
 async def push_to_user(message_id: str, user_id: str, role_id: str, content: str) -> bool:
     """推送给主后端，返回是否在线投递成功"""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{MAIN_SERVER_URL}/api/internal/proactive_push",
                 json={
@@ -1117,12 +1117,17 @@ async def push_to_user(message_id: str, user_id: str, role_id: str, content: str
                     "content": content,
                 },
                 headers={"X-Internal-Token": INTERNAL_TOKEN},
-                timeout=10.0,
+                timeout=30.0,
             )
             if resp.status_code == 200:
                 return bool(resp.json().get("delivered"))
+            else:
+                logger.warning(
+                    f"推送主后端返回非200: status={resp.status_code} "
+                    f"body={resp.text[:300]} user={user_id}"
+                )
     except Exception as e:
-        logger.warning(f"推送主后端失败: {e}")
+        logger.warning(f"推送主后端失败: {type(e).__name__}: {e} user={user_id}")
     return False
 
 # ============================================================
