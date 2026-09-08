@@ -1238,9 +1238,33 @@ class ProactiveScheduler:
 
                 # 第五步：InnerEventGenerator 生成触发原因 + 检索相关记忆
                 role_name = await self._get_role_name(role_id)
-                related = await fetch_related_memory(user_id, role_id) if idle_hours >= 24 else None
-                event = await self.events.generate(
-                    role_id, role_name, idle_hours, motivation, related)
+
+                # v14.0: 承诺后门——之前说了"下课找你"，现在到期了，直接兑现
+                promise_event = None
+                if session_id:
+                    try:
+                        async with httpx.AsyncClient(timeout=3.0) as client:
+                            pr = await client.get(
+                                f"{PERSONALITY_SERVER_URL}/api/session/{session_id}/check_promise",
+                                timeout=3.0)
+                            if pr.status_code == 200:
+                                pdata = pr.json()
+                                if pdata.get("promise"):
+                                    promise_text = pdata["promise"].get("text", "之前说找你")
+                                    promise_event = {
+                                        "reason_type": "promise_keep",
+                                        "reason_detail": f"之前跟他说「{promise_text}」，现在忙完了，主动找他",
+                                    }
+                                    logger.info(f"[承诺] {user_id}/{role_id} 兑现承诺: {promise_text}")
+                    except Exception as e:
+                        logger.debug(f"[承诺] 检查失败: {e}")
+
+                if promise_event:
+                    event = promise_event
+                else:
+                    related = await fetch_related_memory(user_id, role_id) if idle_hours >= 24 else None
+                    event = await self.events.generate(
+                        role_id, role_name, idle_hours, motivation, related)
 
                 # 第六步：PersonalityEngine 生成文本（传入行为意图引导生成风格）
                 content = await generate_proactive_message(

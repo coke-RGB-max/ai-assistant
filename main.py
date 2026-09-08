@@ -3586,6 +3586,61 @@ async def admin_system_status(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+# ============================================================
+# v14.0: 日程活动池管理 API
+# ============================================================
+PERSONALITY_DB_PATH = os.path.join(DATA_DIR, "personality_sessions.db")
+
+def _get_schedule_db():
+    import sqlite3
+    conn = sqlite3.connect(PERSONALITY_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+@app.get("/api/admin/schedule/{role_id}")
+async def admin_get_schedule(role_id: str):
+    """获取某角色的完整日程活动池。"""
+    conn = _get_schedule_db()
+    rows = conn.execute(
+        "SELECT id, time_bucket, activity_text, sort_order FROM role_schedule WHERE role_id=? ORDER BY time_bucket, sort_order",
+        (role_id,)).fetchall()
+    conn.close()
+    buckets = {}
+    for r in rows:
+        b = r["time_bucket"]
+        if b not in buckets:
+            buckets[b] = []
+        buckets[b].append({"id": r["id"], "text": r["activity_text"]})
+    return {"role_id": role_id, "buckets": buckets}
+
+@app.post("/api/admin/schedule/{role_id}")
+async def admin_save_schedule(role_id: str, request: Request):
+    """保存某角色的日程活动池（全量替换某时间桶）。"""
+    body = await request.json()
+    bucket = body.get("time_bucket")
+    activities = body.get("activities", [])
+    if not bucket or not isinstance(activities, list):
+        return JSONResponse({"error": "time_bucket and activities required"}, status_code=400)
+    conn = _get_schedule_db()
+    # 删除旧的，插入新的
+    conn.execute("DELETE FROM role_schedule WHERE role_id=? AND time_bucket=?", (role_id, bucket))
+    for i, text in enumerate(activities):
+        if text and text.strip():
+            conn.execute(
+                "INSERT INTO role_schedule (role_id, time_bucket, activity_text, sort_order) VALUES (?,?,?,?)",
+                (role_id, bucket, text.strip(), i))
+    conn.commit(); conn.close()
+    return {"ok": True, "role_id": role_id, "bucket": bucket, "count": len(activities)}
+
+@app.delete("/api/admin/schedule/{role_id}/{activity_id}")
+async def admin_delete_schedule(role_id: str, activity_id: int):
+    """删除单条活动。"""
+    conn = _get_schedule_db()
+    conn.execute("DELETE FROM role_schedule WHERE id=? AND role_id=?", (activity_id, role_id))
+    conn.commit(); conn.close()
+    return {"ok": True}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")

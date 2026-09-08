@@ -692,6 +692,18 @@
           <h3>全部用户 · 实时心理数据</h3>
           <div id="users-list"></div>
         </div>
+        <div class="admin-card">
+          <h3>日程活动池管理</h3>
+          <div class="field">
+            <label>选择角色</label>
+            <select id="schedule-role-select">
+              <option value="nianqi">念琦</option>
+              <option value="jingwen">璟雯</option>
+              <option value="qinghe">清禾</option>
+            </select>
+          </div>
+          <div id="schedule-editor"></div>
+        </div>
       </div>
     </section>
 
@@ -2531,6 +2543,85 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       }
     }
 
+    // ===== v14.0: 日程活动池管理 =====
+    const SCHEDULE_BUCKET_NAMES = {
+      weekday_morning: "工作日 上午",
+      weekday_afternoon: "工作日 下午",
+      weekday_evening: "工作日 晚上",
+      weekend_morning: "周末 上午",
+      weekend_afternoon: "周末 下午",
+      weekend_evening: "周末 晚上",
+    };
+
+    async function loadSchedule() {
+      const rid = $("#schedule-role-select").value;
+      try {
+        const data = await apiFetch(`/api/admin/schedule/${rid}`);
+        const editor = $("#schedule-editor");
+        let html = "";
+        for (const [bucket, name] of Object.entries(SCHEDULE_BUCKET_NAMES)) {
+          const acts = data.buckets[bucket] || [];
+          html += `<div style="margin:12px 0;padding:10px;border:1px solid #333;border-radius:8px">
+            <strong>${name}</strong>
+            <div id="acts-${bucket}" style="margin:8px 0">`;
+          acts.forEach((a, i) => {
+            html += `<div style="display:flex;gap:6px;margin:4px 0">
+              <input type="text" value="${escapeHtml(a.text)}" data-id="${a.id}" data-bucket="${bucket}" style="flex:1">
+              <button class="ghost-btn" onclick="deleteScheduleItem(${a.id},'${bucket}')">×</button>
+            </div>`;
+          });
+          html += `</div>
+            <div style="display:flex;gap:6px">
+              <input type="text" placeholder="新增活动..." id="new-${bucket}" style="flex:1">
+              <button class="ghost-btn" onclick="addScheduleItem('${bucket}')">+ 添加</button>
+            </div>
+            <button class="primary-btn" style="margin-top:6px" onclick="saveSchedule('${bucket}')">保存${name}</button>
+          </div>`;
+        }
+        editor.innerHTML = html;
+      } catch (e) {
+        showToast("加载日程失败：" + e.message, "error");
+      }
+    }
+
+    window.saveSchedule = async function(bucket) {
+      const rid = $("#schedule-role-select").value;
+      const inputs = document.querySelectorAll(`#acts-${bucket} input`);
+      const activities = Array.from(inputs).map(i => i.value.trim()).filter(Boolean);
+      try {
+        await apiFetch(`/api/admin/schedule/${rid}`, {
+          method: "POST",
+          body: JSON.stringify({ time_bucket: bucket, activities })
+        });
+        showToast("已保存", "success");
+        loadSchedule();
+      } catch (e) {
+        showToast("保存失败：" + e.message, "error");
+      }
+    };
+
+    window.addScheduleItem = function(bucket) {
+      const input = $(`#new-${bucket}`);
+      if (!input.value.trim()) return;
+      const div = document.createElement("div");
+      div.style = "display:flex;gap:6px;margin:4px 0";
+      div.innerHTML = `<input type="text" value="${escapeHtml(input.value.trim())}" data-bucket="${bucket}" style="flex:1">
+        <button class="ghost-btn" onclick="this.parentElement.remove()">×</button>`;
+      $(`#acts-${bucket}`).appendChild(div);
+      input.value = "";
+    };
+
+    window.deleteScheduleItem = async function(id, bucket) {
+      const rid = $("#schedule-role-select").value;
+      try {
+        await apiFetch(`/api/admin/schedule/${rid}/${id}`, { method: "DELETE" });
+        showToast("已删除", "success");
+        loadSchedule();
+      } catch (e) {
+        showToast("删除失败：" + e.message, "error");
+      }
+    };
+
     // ===== 事件绑定 =====
     function bindEvents() {
       $("#login-form").addEventListener("submit", e => handleLogin(e, false));
@@ -2621,6 +2712,10 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       $("#qq-confirm-btn").addEventListener("click", confirmBindQQ);
 
       $("#create-user-form").addEventListener("submit", handleCreateUser);
+
+      // v14.0: 日程活动池管理
+      $("#schedule-role-select").addEventListener("change", loadSchedule);
+      loadSchedule();
 
       $("#sidebar-toggle").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
 

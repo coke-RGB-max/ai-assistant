@@ -56,6 +56,9 @@ logger = logging.getLogger("personality_server")
 # 配置（已迁移到 core/config.py）
 # ============================================================
 from core.config import *
+
+# v14.0: 自发记忆检索需要调 vector_server
+VECTOR_SERVER_URL = os.getenv("VECTOR_SERVER_URL", "http://127.0.0.1:8001")
 # ============================================================
 # 工具函数（已迁移到 core/utils.py）
 # ============================================================
@@ -105,9 +108,176 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(last_active);
         CREATE INDEX IF NOT EXISTS idx_intents_session ON session_intents(session_id, role_id, status);
         CREATE INDEX IF NOT EXISTS idx_intents_notbefore ON session_intents(not_before);
+        CREATE TABLE IF NOT EXISTS role_schedule (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, role_id TEXT NOT NULL,
+            time_bucket TEXT NOT NULL, activity_text TEXT NOT NULL,
+            sort_order INTEGER DEFAULT 0, UNIQUE(role_id, time_bucket, activity_text));
+        CREATE INDEX IF NOT EXISTS idx_schedule_role ON role_schedule(role_id, time_bucket);
     """)
     conn.commit(); conn.close()
     logger.info(f"SQLite初始化: {DB_PATH}")
+    _seed_default_schedule()
+
+# ============================================================
+# v14.0: 日程活动池系统
+# ============================================================
+DEFAULT_SCHEDULE = {
+    "nianqi": {
+        "weekday_morning": [
+            "正在上课，手机藏在课本后面偷偷回的",
+            "今天前两节没课，在宿舍赖床刚醒",
+            "在食堂排队买早饭，单手打字",
+            "在图书馆占座，刚坐下",
+        ],
+        "weekday_afternoon": [
+            "在画室画画，手上沾着颜料",
+            "没课，在宿舍看动漫",
+            "和同学在外面走",
+            "在琴房练琴",
+        ],
+        "weekday_evening": [
+            "刚吃完晚饭在操场散步",
+            "在宿舍画作业",
+            "和室友视频",
+            "刚洗完澡，吹头发呢",
+        ],
+        "weekend_morning": [
+            "睡懒觉中，刚被消息吵醒",
+            "早起了，在食堂",
+        ],
+        "weekend_afternoon": [
+            "出去逛了",
+            "在家画画",
+            "和朋友吃饭",
+        ],
+        "weekend_evening": [
+            "刚回家",
+            "在看电影",
+            "窝在沙发上刷手机",
+        ],
+    },
+    "jingwen": {
+        "weekday_morning": [
+            "在开会，刚偷偷看了一眼手机",
+            "刚到公司，在赶地铁",
+            "在工位上，同事在旁边",
+        ],
+        "weekday_afternoon": [
+            "上班摸鱼，刚做完一个方案",
+            "在开会，等下才能回你",
+            "在食堂吃饭",
+        ],
+        "weekday_evening": [
+            "刚到家，好累",
+            "在写博客，刚写完一段",
+            "在改稿子",
+        ],
+        "weekend_morning": [
+            "睡到自然醒，刚起",
+            "出门拍素材了",
+        ],
+        "weekend_afternoon": [
+            "在家躺了一天",
+            "出去拍照了",
+            "和朋友喝咖啡",
+        ],
+        "weekend_evening": [
+            "在剪视频",
+            "刚洗完澡",
+            "窝在沙发上追剧",
+        ],
+    },
+    "qinghe": {
+        "weekday_morning": [
+            "在上班，刚开完早会",
+            "在工位上处理邮件",
+            "在地铁上",
+        ],
+        "weekday_afternoon": [
+            "在上班，忙",
+            "刚开完会",
+            "在茶水间休息",
+        ],
+        "weekday_evening": [
+            "刚到家，在写故事",
+            "在赶稿，等我一下",
+            "在煮面",
+        ],
+        "weekend_morning": [
+            "刚起，在泡咖啡",
+            "今天没事，在家躺着",
+        ],
+        "weekend_afternoon": [
+            "在写故事，进入状态了",
+            "出门买东西",
+            "在家看书",
+        ],
+        "weekend_evening": [
+            "刚写完一段",
+            "在阳台发呆",
+            "在看老电影",
+        ],
+    },
+}
+
+def _seed_default_schedule():
+    """首次启动时从 DEFAULT_SCHEDULE 导入默认数据。"""
+    conn = _get_db()
+    cnt = conn.execute("SELECT COUNT(*) FROM role_schedule").fetchone()[0]
+    if cnt > 0:
+        conn.close()
+        return
+    for rid, buckets in DEFAULT_SCHEDULE.items():
+        for bucket, activities in buckets.items():
+            for i, act in enumerate(activities):
+                conn.execute(
+                    "INSERT OR IGNORE INTO role_schedule (role_id, time_bucket, activity_text, sort_order) VALUES (?,?,?,?)",
+                    (rid, bucket, act, i))
+    conn.commit(); conn.close()
+    logger.info("默认日程活动池已导入")
+
+def _get_time_bucket():
+    """根据当前时间和星期几返回时间桶。"""
+    now = datetime.datetime.now()
+    h = now.hour
+    is_weekend = now.weekday() >= 5
+    if is_weekend:
+        if 6 <= h < 12: return "weekend_morning"
+        if 12 <= h < 18: return "weekend_afternoon"
+        return "weekend_evening"
+    else:
+        if 6 <= h < 12: return "weekday_morning"
+        if 12 <= h < 18: return "weekday_afternoon"
+        return "weekday_evening"
+
+def get_random_activity(role_id):
+    """从数据库随机抽一条当前时间段的活动。"""
+    bucket = _get_time_bucket()
+    conn = _get_db()
+    rows = conn.execute(
+        "SELECT activity_text FROM role_schedule WHERE role_id=? AND time_bucket=?",
+        (role_id, bucket)).fetchall()
+    conn.close()
+    if rows:
+        return random.choice([r[0] for r in rows])
+    return None
+
+# 承诺关键词：检测回复中是否说了"稍后找你"之类的话
+PROMISE_KEYWORDS = [
+    ("下课找你", 2), ("下课跟你说", 2), ("下课聊", 2),
+    ("等下回你", 1), ("等下找你", 1), ("忙完找你", 1),
+    ("忙完回你", 1), ("稍后说", 0.5), ("晚点找你", 2),
+    ("开完会找你", 1.5), ("写完找你", 1), ("洗完澡找你", 0.5),
+]
+
+def detect_promise(reply_text):
+    """检测回复中是否包含承诺，返回(承诺内容, 预计延迟小时)或None。"""
+    if not reply_text:
+        return None
+    for kw, delay_h in PROMISE_KEYWORDS:
+        if kw in reply_text:
+            return (kw, delay_h)
+    return None
 
 def create_session():
     sid = hashlib.md5(f"{time.time()}{random.random()}".encode()).hexdigest()[:16]
@@ -659,7 +829,7 @@ class PersonalityEngine:
                  gift=None, emotion_history=None, milestones=None,
                  growth_state=None, associative_memories=None,
                  knowledge_search_result=None, user_profile=None,
-                 alter_state=None, session_id=None):
+                 alter_state=None, session_id=None, user_id=None, vector_url=None):
         self.mode = mode
         self.role_ids = role_ids[:3]
         self.intimacy_map = intimacy_map
@@ -686,6 +856,9 @@ class PersonalityEngine:
         # HDSI-PORT: 氛围偏移追踪状态
         self.alter_state = alter_state
         self.session_id = session_id
+        # v14.0: 自发记忆检索需要
+        self.user_id = user_id
+        self.vector_url = vector_url
 
     async def generate(self, msg, mem_ctx, history, override=None, ov_int=50, use_llm=True, enable_mem=True):
         if self.mode == ChatMode.GROUP or len(self.role_ids) > 1:
@@ -711,7 +884,7 @@ class PersonalityEngine:
         repair = RelationshipRepairSystem(rid_ac, rid_res)
         rid_cp = self.cp_usage.get(rid, {}) if isinstance(self.cp_usage, dict) else self.cp_usage
         cp_ctrl = CatchphraseController(rid, rid_cp)
-        noise_layer = DailyNoiseLayer()
+        noise_layer = DailyNoiseLayer(user_id=self.user_id, vector_url=self.vector_url, role_id=rid)
 
         # v10.0 新模块初始化
         micro_narrative = MicroNarrativeEngine(rid)
@@ -748,7 +921,7 @@ class PersonalityEngine:
         if scene_mood_bias != 0:
             psych.states["mood"] = max(0, min(100, psych.states["mood"] + scene_mood_bias * 0.3))
 
-        noise = noise_layer.generate(rid, intensity)
+        noise = await noise_layer.generate(rid, intensity, weather=self.weather)
         if noise and noise["emotion_shift"] == "happy" and emotion == EmotionType.NEUTRAL:
             emotion = EmotionType.HAPPY; intensity = max(intensity, noise["magnitude"])
             inner["surface_emotion"] = "happy"; inner["surface_intensity"] = intensity
@@ -926,6 +1099,12 @@ class PersonalityEngine:
             growth_text, scene_text, gift_text, knowledge_text,
             alter_text, intent_text,
         ] if s]
+
+        # v14.0: 日程活动注入——她现在在做什么，影响回复风格
+        activity = get_random_activity(rid)
+        if activity:
+            activity_text = f"【你现在在做什么】{activity}。你看到他发消息了，虽然在忙但还是回他。回复要短一点、快一点，带着偷偷摸摸忙里偷闲的感觉。"
+            extra_sections.append(activity_text)
 
         # v14.0: 动态对话引擎——主动性/情绪记忆/节奏控制/剧情推进
         dynamic_ctx = await _DYNAMIC_ENGINE.generate(
@@ -1382,7 +1561,9 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
             knowledge_search_result=knowledge_search_result,
             user_profile=user_profile if len(role_ids)==1 else None,
             alter_state=alter_state if len(role_ids)==1 else None,
-            session_id=request.session_id if len(role_ids)==1 else None)
+            session_id=request.session_id if len(role_ids)==1 else None,
+            user_id=request.user_id,
+            vector_url=VECTOR_SERVER_URL)
         system_prompt, debug = await engine.generate(
             msg=request.user_message, mem_ctx=request.memory_context, history=valid,
             override=request.override_emotion, ov_int=request.emotion_intensity,
@@ -1418,6 +1599,18 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
             return GenerateResponse(success=False, error="豆包 API 返回为空", rate_limit_remaining=remaining)
         reply = clean_reply(reply)
         timer.mark("主回复LLM生成")
+
+        # v14.0: 承诺检测——回复中说了"下课找你"之类的话，存到session供proactive_server使用
+        if not is_group and request.session_id and session_data is not None:
+            promise = detect_promise(reply)
+            if promise:
+                kw, delay_h = promise
+                session_data["pending_promise"] = {
+                    "text": kw,
+                    "created_at": time.time(),
+                    "due_at": time.time() + delay_h * 3600,
+                }
+                logger.info(f"[承诺] 检测到承诺: {kw}, {delay_h}h后兑现")
 
         # P4 序号5：插件后处理 —— 插件可以修改LLM生成的回复
         if PLUGINS_AVAILABLE and get_plugin_manager:
@@ -1725,7 +1918,8 @@ async def generate_stream(request: StreamGenerateRequest):
         resilience=res_map, turn=turn, cp_usage=cp_use,
         weather=request.weather, scene_mode=request.scene_mode, gift=request.gift,
         emotion_history=emotion_history, milestones=milestones, growth_state=growth_state,
-        user_profile=user_profile, alter_state=alter_state, session_id=request.session_id)
+        user_profile=user_profile, alter_state=alter_state, session_id=request.session_id,
+        user_id=request.user_id, vector_url=VECTOR_SERVER_URL)
     system_prompt, debug = await engine.generate(
         msg=request.user_message, mem_ctx=request.memory_context, history=valid,
         override=request.override_emotion, ov_int=request.emotion_intensity,
@@ -2332,6 +2526,27 @@ async def voice_tts(request: TTSRequest):
     except Exception as e:
         logger.error(f"[TTS] 合成失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"TTS合成失败: {str(e)}")
+
+# ============================================================
+# v14.0: 承诺后门 API —— proactive_server 检查是否有未兑现的承诺
+# ============================================================
+@app.get("/api/session/{session_id}/check_promise")
+async def check_promise(session_id: str):
+    """检查session里有没有到期的承诺。有则返回并清除，无则返回null。"""
+    session_data = load_session(session_id)
+    if not session_data:
+        return {"promise": None}
+    p = session_data.get("pending_promise")
+    if not p:
+        return {"promise": None}
+    now = time.time()
+    if now < p.get("due_at", 0):
+        return {"promise": None, "remaining_hours": round((p["due_at"] - now) / 3600, 1)}
+    # 到期了，取出并清除
+    session_data.pop("pending_promise", None)
+    save_session(session_id, session_data)
+    return {"promise": p}
+
 
 # ============================================================
 # 启动

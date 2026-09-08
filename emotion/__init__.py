@@ -34,18 +34,95 @@ logger = logging.getLogger("emotion")
 # DailyNoiseLayer
 # ============================================================
 class DailyNoiseLayer:
+    """
+    v14.0 升级：从yaml随机抽取改为自发记忆检索。
+    角色会根据时间、天气从你们真实的对话记忆里"突然想起"一件事。
+    """
     GENERIC = [("今天天气不错，心情莫名轻快","happy",12),("有点犯困，懒洋洋的","calm",-5),
              ("刚在发呆走神","neutral",0),("突然想吃点甜的","neutral",0),
              ("今天有点提不起劲","sad",8),("莫名有点烦躁","angry",8)]
-    def generate(self, rid, intensity=30):
+
+    TIME_QUERIES = {
+        "morning":  ["一起吃早餐 早餐 早起 起床 早饭", "今天想和你分享的事"],
+        "forenoon": ["一起学习 上课 自习 图书馆", "你说过的计划"],
+        "noon":     ["午饭 吃饭 食堂 外卖 一起吃饭", "上次说想吃的东西"],
+        "afternoon":["奶茶 下午茶 零食 散步 逛街", "你上次说的那家店"],
+        "evening":  ["晚饭 散步 电影 晚上聊天", "今天发生的事想告诉你"],
+        "night":    ["睡不着 深夜聊天 晚安 想你", "深夜突然想起的事"],
+        "late_night":["失眠 一个人 安静 想找人说话", "你现在在干嘛"],
+    }
+    WEATHER_QUERIES = {
+        "rainy": ["下雨 雨天 撑伞 淋雨 湿漉漉"],
+        "snowy": ["下雪 冬天 冷 热饮 取暖"],
+        "sunny": ["阳光 公园 散步 出去玩 好天气"],
+        "cloudy":["阴天 闷闷的 想窝着"],
+        "hot":   ["热 空调 冰饮 西瓜 夏天"],
+        "cold":  ["冷 暖气 热奶茶 冬天 想被抱着"],
+    }
+
+    def __init__(self, user_id=None, vector_url=None, role_id=None):
+        self.user_id = user_id
+        self.vector_url = vector_url
+        self.role_id = role_id
+
+    def _time_bucket(self):
+        h = datetime.datetime.now().hour
+        if 6 <= h < 10: return self.TIME_QUERIES["morning"]
+        if 10 <= h < 12: return self.TIME_QUERIES["forenoon"]
+        if 12 <= h < 14: return self.TIME_QUERIES["noon"]
+        if 14 <= h < 18: return self.TIME_QUERIES["afternoon"]
+        if 18 <= h < 21: return self.TIME_QUERIES["evening"]
+        if 21 <= h < 24: return self.TIME_QUERIES["night"]
+        return self.TIME_QUERIES["late_night"]
+
+    async def _search_memory(self, query, top_k=2):
+        if not self.user_id or not self.vector_url:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.post(
+                    f"{self.vector_url}/api/memory/search",
+                    json={"user_id": self.user_id, "query": query, "top_k": top_k,
+                          "role_id": self.role_id or ""}
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    results = data.get("results") or data.get("memories") or []
+                    if results:
+                        c = results[0].get("content") or results[0].get("text", "")
+                        return c[:120] if c else None
+        except Exception:
+            pass
+        return None
+
+    async def generate(self, rid, intensity=30, weather=None):
         if intensity > 45: return None
-        if random.random() > 0.25: return None
+        if random.random() > 0.30: return None
+
+        queries = self._time_bucket()
+        if weather and weather in self.WEATHER_QUERIES:
+            queries = self.WEATHER_QUERIES[weather] + queries
+        random.shuffle(queries)
+
+        for q in queries[:2]:
+            mem = await self._search_memory(q)
+            if mem:
+                return {
+                    "description": f"突然想起一件事——{mem}",
+                    "emotion_shift": "neutral",
+                    "magnitude": 5,
+                    "spontaneous_memory": mem,
+                }
+
         role = ROLES_DEFINITION.get(rid, {})
         pool = self.GENERIC + [(d,"neutral",0) for d in role.get("daily_noise",[])]
         desc, shift, mag = random.choice(pool)
         return {"description":desc,"emotion_shift":shift,"magnitude":abs(mag)}
+
     def build(self, n):
         if not n: return ""
+        if n.get("spontaneous_memory"):
+            return f"【你此刻突然想到】{n['description']}。这个念头在你脑海里，可能会影响你说话的语气或让你顺口提一句。"
         return f"【日常状态】{n['description']}。这会轻微影响你说话的语气。"
 
 # ============================================================
