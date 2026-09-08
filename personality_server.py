@@ -1124,6 +1124,8 @@ class GenerateRequest(BaseModel):
     enable_bystander: bool = Field(default=False, description="是否启用旁观者插话（单聊模式下其他角色旁听并概率性插话）")
     active_role_id: Optional[str] = Field(default=None, description="当前活跃角色ID（单聊模式下即用户正在对话的角色，其余为旁观者）")
     bystander_cooldown_turns: int = Field(default=3, description="旁观者插话最小冷却轮数")
+    # v14.0 故事模式字段（双时间线）
+    user_id: Optional[str] = Field(default=None, description="用户ID，带 _past 后缀表示过往线（青梅竹马继承模式）")
 
 class GenerateResponse(BaseModel):
     success: bool; reply: str=""; error: str=""
@@ -1386,6 +1388,22 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
             override=request.override_emotion, ov_int=request.emotion_intensity,
             use_llm=use_llm, enable_mem=request.enable_memory_analysis)
         timer.mark("引擎构建(含情感分析LLM)")
+
+        # v14.0: 故事模式二（过往线）—— 用户ID带 _past 后缀时，注入青梅竹马版背景
+        if request.user_id and request.user_id.endswith("_past") and len(role_ids) == 1:
+            role = ROLES_DEFINITION.get(role_ids[0], {})
+            past_story = role.get("past_story", "")
+            if past_story:
+                # 截取前2000字，避免prompt过长
+                past_story_short = past_story[:2000] + ("……" if len(past_story) > 2000 else "")
+                system_prompt += (
+                    f"\n\n【重要：你现在处于过往线（青梅竹马继承模式）】\n"
+                    f"你和对方不是新认识的人，你们有共同的过去。以下是你们的故事背景摘要：\n"
+                    f"{past_story_short}\n\n"
+                    f"请基于这个共同过去来回复，你们的关系已经有了深厚的基础，"
+                    f"不需要像刚认识那样小心翼翼，可以自然地提到共同的回忆。"
+                )
+                logger.info(f"[过往线] 注入 past_story，user={request.user_id} role={role_ids[0]}")
 
         messages = [{"role":"system","content":system_prompt}]
         messages.extend(valid)
@@ -1660,6 +1678,8 @@ class StreamGenerateRequest(BaseModel):
     # 流式同样支持记忆分析与返回调试信息（供主后端在流式展示后做亲密度/记忆后处理）
     enable_memory_analysis: bool = False
     return_debug: bool = False
+    # v14.0 故事模式字段（双时间线）
+    user_id: Optional[str] = Field(default=None, description="用户ID，带 _past 后缀表示过往线")
 
 @app.post("/api/generate_stream")
 async def generate_stream(request: StreamGenerateRequest):
@@ -1710,6 +1730,21 @@ async def generate_stream(request: StreamGenerateRequest):
         msg=request.user_message, mem_ctx=request.memory_context, history=valid,
         override=request.override_emotion, ov_int=request.emotion_intensity,
         use_llm=use_llm, enable_mem=request.enable_memory_analysis)
+
+    # v14.0: 故事模式二（过往线）—— 注入青梅竹马版背景
+    if request.user_id and request.user_id.endswith("_past"):
+        role = ROLES_DEFINITION.get(rid, {})
+        past_story = role.get("past_story", "")
+        if past_story:
+            past_story_short = past_story[:2000] + ("……" if len(past_story) > 2000 else "")
+            system_prompt += (
+                f"\n\n【重要：你现在处于过往线（青梅竹马继承模式）】\n"
+                f"你和对方不是新认识的人，你们有共同的过去。以下是你们的故事背景摘要：\n"
+                f"{past_story_short}\n\n"
+                f"请基于这个共同过去来回复，你们的关系已经有了深厚的基础，"
+                f"不需要像刚认识那样小心翼翼，可以自然地提到共同的回忆。"
+            )
+
     messages = [{"role":"system","content":system_prompt}]
     messages.extend(valid)
     messages.append({"role":"user","content":request.user_message})
@@ -1867,6 +1902,55 @@ async def proactive_generate(request: ProactiveGenerateRequest):
             cp_hint = (f"偶尔可以自然带一句口头禅（如「{random.choice(role['catchphrases'])}」），"
                        f"但不要每条都用。")
 
+        # v13.0: 注入角色背景素材，让主动消息有个人印记而不是万能模板
+        role_bg = ""
+        relationship = role.get("relationship", {})
+        if relationship.get("core_dynamic"):
+            # 截取核心关系背景的前250字，避免prompt过长
+            core_dyn = relationship["core_dynamic"]
+            role_bg = core_dyn[:250] + ("……" if len(core_dyn) > 250 else "")
+
+        # 从生活片段库随机抽2-3条作为"今天可能想到的事"
+        life_snippets = ""
+        micro = role.get("micro_narratives", [])
+        if micro:
+            samples = random.sample(micro, min(2, len(micro)))
+            life_snippets = "；".join(samples)
+
+        # 从话题池随机抽1-2条
+        topic_suggestions = ""
+        topics = role.get("topic_pool", [])
+        if topics:
+            t_samples = random.sample(topics, min(1, len(topics)))
+            topic_suggestions = "；".join(t_samples)
+
+        # 主动风格（从dynamic.initiative.style提取）
+        initiative_style = ""
+        dynamic = role.get("dynamic", {})
+        if dynamic.get("initiative", {}).get("style"):
+            initiative_style = dynamic["initiative"]["style"].strip()
+
+        # 默认行为倾向
+        default_behavior = ""
+        if role.get("behavior_tendency", {}).get("default"):
+            default_behavior = role["behavior_tendency"]["default"]
+
+        # 组装角色背景块
+        character_block = ""
+        if role_bg or life_snippets or initiative_style or default_behavior:
+            parts = []
+            if role_bg:
+                parts.append(f"【你的背景】{role_bg}")
+            if life_snippets:
+                parts.append(f"【你今天可能在想的事】{life_snippets}")
+            if topic_suggestions:
+                parts.append(f"【可以聊的方向】{topic_suggestions}")
+            if initiative_style:
+                parts.append(f"【你主动找人时的样子】{initiative_style}")
+            if default_behavior:
+                parts.append(f"【你的默认状态】{default_behavior}")
+            character_block = "\n".join(parts)
+
         # v12.2: 根据 reason_type 动态调整场景描述和输出规则
         is_topic_continue = request.reason_type == "topic_continue"
         is_self_close = request.reason_type == "topic_self_close"
@@ -1907,10 +1991,12 @@ async def proactive_generate(request: ProactiveGenerateRequest):
             f"性格：{role['personality']}。说话风格：{role['speaking_style']}。\n"
             f"你们现在的关系：{stage_name}（亲密度{request.intimacy}/100）。\n"
             f"{noise_text}\n\n"
+            f"{character_block}\n\n"
             f"{scene_desc}\n"
             f"{reason_block}\n"
             f"{intent_hint}\n"
             f"{memory_block}\n\n"
+            f"【重要】不要用'刚路过XX忽然想起你'这种万能模板，结合上面你的背景、今天在想的事、你的主动风格来写。要像{rname}本人会说的话，而不是任何一个温柔女生都能说的话。\n\n"
             f"【输出规则】\n"
             f"{output_rules}"
         )

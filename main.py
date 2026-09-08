@@ -327,6 +327,30 @@ class UserDB:
             }
             self._write(data)
         return True
+    def ensure_past_user(self, username):
+        """确保故事模式二（青梅竹马继承线）的虚拟用户存在。
+        虚拟用户ID = {username}_past，密码与原用户相同，昵称加后缀。
+        返回虚拟用户的 username。"""
+        past_username = f"{username}_past"
+        data = self._read()
+        if past_username not in data["users"]:
+            original = data["users"].get(username, {})
+            data["users"][past_username] = {
+                "password": original.get("password", hash_password("past123")),
+                "nickname": f"{original.get('nickname', username)}（过往线）",
+                "is_admin": original.get("is_admin", False),
+                "intimacy": {}, "session_id": None,
+                "is_past_virtual": True,
+                "original_user": username
+            }
+            self._write(data)
+            logger.info(f"[故事模式] 创建虚拟用户 {past_username}（继承自 {username}）")
+        return past_username
+    def get_original_user(self, username):
+        """如果是过往线虚拟用户，返回原始用户名；否则返回原用户名。"""
+        if username.endswith("_past"):
+            return username[:-5]
+        return username
     def set_user_field(self, username, field, value):
         """设置用户的任意字段（如 disabled），用户不存在时返回 False"""
         data = self._read()
@@ -543,7 +567,7 @@ async def create_personality_session():
     return None
 async def call_personality_generate(role_ids, user_message, memory_context, chat_history,
                                      session_id=None, intimacy_map=None, temperature=0.9, max_tokens=500,
-                                     goodbye_hint=None, enable_bystander=False, active_role_id=None):
+                                     goodbye_hint=None, enable_bystander=False, active_role_id=None, user_id=None):
     mode = "group" if len(role_ids) > 1 else "single"
     payload = {
         "mode": mode, "role_ids": role_ids, "user_message": user_message,
@@ -559,6 +583,8 @@ async def call_personality_generate(role_ids, user_message, memory_context, chat
         payload["session_id"] = session_id
     if intimacy_map:
         payload["intimacy_map"] = intimacy_map
+    if user_id:
+        payload["user_id"] = user_id
     t0 = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -579,7 +605,7 @@ async def call_personality_generate(role_ids, user_message, memory_context, chat
         return {"success": False, "error": str(e), "reply": "抱歉，我暂时无法回应..."}
 async def call_personality_generate_stream(role_ids, user_message, memory_context, chat_history,
                                            session_id=None, intimacy_map=None, temperature=0.9,
-                                           max_tokens=500, goodbye_hint=None, on_token=None):
+                                           max_tokens=500, goodbye_hint=None, on_token=None, user_id=None):
     """调用人格后端 /api/generate_stream（SSE），逐 token 回调 on_token。
     返回 dict: {reply, debug, memory_candidate, session_id}；失败返回 None。"""
     payload = {
@@ -594,6 +620,8 @@ async def call_personality_generate_stream(role_ids, user_message, memory_contex
         payload["intimacy_map"] = intimacy_map
     if goodbye_hint:
         payload["goodbye_hint"] = goodbye_hint
+    if user_id:
+        payload["user_id"] = user_id
     t0 = time.perf_counter()
     reply_parts = []
     done_debug = None
@@ -1012,7 +1040,8 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
         goodbye_hint=goodbye_hint,
         # v13.0修复：仅群聊启用旁观者插话，私聊默认禁用（避免私聊中串角色）
         enable_bystander=(mode == "group"),
-        active_role_id=role_ids[0] if mode == "single" else None
+        active_role_id=role_ids[0] if mode == "single" else None,
+        user_id=identity
     )
     timer.mark("人格生成(LLM)")
     if not isinstance(result, dict):
@@ -1145,7 +1174,7 @@ async def process_chat_message_stream(identity, user_message, role_ids=None, cha
         role_ids=role_ids, user_message=user_message,
         memory_context=memory_context, chat_history=chat_history,
         session_id=session_id, intimacy_map=intimacy_map,
-        goodbye_hint=goodbye_hint, on_token=on_token)
+        goodbye_hint=goodbye_hint, on_token=on_token, user_id=identity)
     timer.mark("人格生成(LLM流式)")
     if not result:
         return None
@@ -2559,6 +2588,62 @@ async def admin_login(request: Request):
         token = base64.b64encode(f"{user['username']}:{body.get('password','')}".encode()).decode()
         return {"success": True, "token": token}
     return JSONResponse({"success": False, "error": "管理员验证失败"}, status_code=401)
+
+# -------------------------- 故事模式切换（双时间线） --------------------------
+@app.post("/api/story_mode/switch")
+async def switch_story_mode(request: Request):
+    """切换故事模式。仅网页端可用，QQ端强制模式一。
+    mode: "new"（模式一：新相遇线）或 "past"（模式二：青梅竹马继承线）
+    切换后返回新的 token，前端需用新 token 重新连接 WebSocket。"""
+    body = await request.json()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "") or body.get("token", "")
+    mode = body.get("mode", "new")
+
+    # 验证当前用户
+    user = user_db.authenticate_token(token)
+    if not user:
+        return JSONResponse({"success": False, "error": "未登录"}, status_code=401)
+
+    # 从 token 解码出原始密码（用于生成新 token）
+    try:
+        decoded = base64.b64decode(token).decode("utf-8")
+        _, password = decoded.split(":", 1)
+    except Exception:
+        return JSONResponse({"success": False, "error": "token 无效"}, status_code=400)
+
+    # 获取原始用户名（如果当前已经是过往线虚拟用户，还原出原始用户名）
+    original_username = user_db.get_original_user(user["username"])
+
+    # QQ 用户禁止切换到过往线
+    if user.get("qq_bound") or user.get("is_qq_tmp"):
+        if mode == "past":
+            return JSONResponse({"success": False, "error": "QQ端仅支持模式一（新相遇线）"}, status_code=403)
+
+    if mode == "past":
+        # 切换到过往线：确保虚拟用户存在，返回虚拟用户的 token
+        past_username = user_db.ensure_past_user(original_username)
+        new_token = base64.b64encode(f"{past_username}:{password}".encode()).decode()
+        past_user = user_db.authenticate(past_username, password)
+        return {
+            "success": True, "mode": "past",
+            "token": new_token, "username": past_username,
+            "nickname": past_user.get("nickname", past_username),
+            "is_admin": past_user.get("is_admin", False),
+            "intimacy": past_user.get("intimacy", {}),
+            "message": "已切换到过往线（青梅竹马继承模式），所有数据独立存档"
+        }
+    else:
+        # 切换回新相遇线：返回原始用户的 token
+        new_token = base64.b64encode(f"{original_username}:{password}".encode()).decode()
+        orig_user = user_db.authenticate(original_username, password)
+        return {
+            "success": True, "mode": "new",
+            "token": new_token, "username": original_username,
+            "nickname": orig_user.get("nickname", original_username),
+            "is_admin": orig_user.get("is_admin", False),
+            "intimacy": orig_user.get("intimacy", {}),
+            "message": "已切换到新相遇线，所有数据独立存档"
+        }
 @app.post("/api/reset-password")
 async def reset_password(request: Request):
     body = await request.json()

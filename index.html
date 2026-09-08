@@ -608,6 +608,7 @@
           </div>
           <div class="sidebar-actions">
             <button id="create-group-btn" type="button">＋ 创建群聊</button>
+            <button id="story-mode-btn" type="button" title="切换故事模式（新相遇线 / 青梅竹马继承线）">📖 故事模式：新相遇线</button>
           </div>
           <div class="conv-section">
             <h3>单聊</h3>
@@ -1055,6 +1056,9 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       $("#user-nickname").textContent = currentUser.nickname;
       $("#user-role-text").textContent = currentUser.role === "admin" ? "管理员" : "普通用户";
       $("#user-avatar").textContent = (currentUser.nickname || currentUser.username).slice(0, 1).toUpperCase();
+      // 更新故事模式按钮文字
+      const isPast = currentUser.username.endsWith("_past");
+      $("#story-mode-btn").textContent = `📖 故事模式：${isPast ? "青梅竹马线" : "新相遇线"}`;
     }
 
     // ===== WebSocket =====
@@ -2469,6 +2473,64 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       $("#messages").innerHTML = "";
     }
 
+    // ===== 故事模式切换（双时间线）=====
+    async function switchStoryMode() {
+      if (!currentUser) return;
+      const isPast = currentUser.username.endsWith("_past");
+      const targetMode = isPast ? "new" : "past";
+      const modeName = targetMode === "past" ? "青梅竹马继承线" : "新相遇线";
+
+      if (!confirm(`确定切换到「${modeName}」吗？\n\n切换后将使用独立的存档（亲密度、聊天记录、记忆互不影响），当前连接会自动重连。`)) return;
+
+      try {
+        const resp = await fetch(`${CONFIG.BACKEND_URL}/api/story_mode/switch`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${currentUser.token}` },
+          body: JSON.stringify({ mode: targetMode })
+        });
+        const data = await resp.json();
+        if (!data.success) {
+          showToast(data.error || "切换失败", "error");
+          return;
+        }
+
+        // 关闭旧连接
+        if (ws) { ws.onclose = null; ws.close(); }
+        ws = null;
+        clearTimeout(reconnectTimer);
+
+        // 更新用户信息
+        currentUser = {
+          username: data.username,
+          nickname: data.nickname,
+          role: data.is_admin ? "admin" : "user",
+          token: data.token,
+          intimacy: data.intimacy || {},
+          qqBound: false
+        };
+
+        // 更新UI
+        $("#user-nickname").textContent = currentUser.nickname;
+        $("#user-role-text").textContent = currentUser.role === "admin" ? "管理员" : "普通用户";
+        $("#user-avatar").textContent = (currentUser.nickname || currentUser.username).slice(0, 1).toUpperCase();
+        $("#story-mode-btn").textContent = `📖 故事模式：${targetMode === "past" ? "青梅竹马线" : "新相遇线"}`;
+
+        // 清空当前消息，加载新用户的会话
+        $("#messages").innerHTML = "";
+        ensureConversations(currentUser.username);
+        renderConversationList();
+        const convs = getCurrentConversations();
+        const firstConv = Object.values(convs).find(c => c.type === "single");
+        if (firstConv) switchConversation(firstConv.id);
+
+        // 重新连接 WebSocket
+        connectWebSocket(data.token);
+        showToast(`已切换到「${modeName}」`, "success");
+      } catch (e) {
+        showToast("切换失败：" + e.message, "error");
+      }
+    }
+
     // ===== 事件绑定 =====
     function bindEvents() {
       $("#login-form").addEventListener("submit", e => handleLogin(e, false));
@@ -2547,6 +2609,8 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       $("#create-group-btn").addEventListener("click", openGroupModal);
       $("#group-form").addEventListener("submit", createGroup);
       $("#group-cancel-btn").addEventListener("click", () => $("#group-modal").classList.add("hidden"));
+
+      $("#story-mode-btn").addEventListener("click", switchStoryMode);
 
       $("#edit-nickname-btn").addEventListener("click", () => openNicknameModal(false));
       $("#nickname-save-btn").addEventListener("click", saveNickname);
