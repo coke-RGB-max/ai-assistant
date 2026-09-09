@@ -873,12 +873,12 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     let currentAudio = null;  // 当前播放的语音
     // ===== Live2D 形象配置 =====
     const LIVE2D_CONFIG = {
-      // 每个角色的模型路径（Cloudflare R2 公共地址）
+      // 每个角色的模型路径（Cloudflare R2 自定义域名）
       // 念琦→Hiyori(温柔)  清禾→Haru(知性学姐)  璟雯→Epsilon(活泼傲娇)
       models: {
-        nianqi:  "https://pub-43eaf7717432408d951f3bb38ff241e.r2.dev/hiyori/hiyori_free/runtime/hiyori_free_t08.model3.json",
-        qinghe:  "https://pub-43eaf7717432408d951f3bb38ff241e.r2.dev/haru/runtime/haru.model3.json",
-        jingwen: "https://pub-43eaf7717432408d951f3bb38ff241e.r2.dev/epsilon/epsilon_free/runtime/Epsilon_free.model3.json",
+        nianqi:  "https://r2.jinwen.online/hiyori/hiyori_free/runtime/hiyori_free_t08.model3.json",
+        qinghe:  "https://r2.jinwen.online/haru/runtime/haru.model3.json",
+        jingwen: "https://r2.jinwen.online/epsilon/epsilon_free/runtime/Epsilon_free.model3.json",
       },
       // 模型显示缩放（三个模型尺寸不同，可分别调整，统一用一个值先跑通）
       scale: 0.15,
