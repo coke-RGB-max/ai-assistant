@@ -1102,8 +1102,8 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       renderQQBindStatus();
       ensureConversations(currentUser.username);
       switchConversation(`single-${ROLES[0].id}`);
-      // 普通用户登录后初始化 Live2D 形象（管理员后台不需要）
-      if (currentUser.role !== "admin" && !goAdmin) {
+      // 登录后初始化 Live2D 形象（在聊天界面时）
+      if (!goAdmin) {
         setTimeout(() => initLive2D(), 300);
       }
       if (!currentUser.nickname || currentUser.nickname === currentUser.username) {
