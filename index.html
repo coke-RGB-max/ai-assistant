@@ -194,7 +194,35 @@
       border-bottom: 1px solid var(--border);
       overflow: hidden;
       flex-shrink: 0;
+      transition: height 0.25s ease;
     }
+    /* 拖动分隔条：始终可见，拖动调整Live2D区与聊天区高度 */
+    .stage-splitter {
+      height: 7px;
+      flex-shrink: 0;
+      cursor: ns-resize;
+      position: relative;
+      background: transparent;
+      z-index: 4;
+      touch-action: none;
+    }
+    .stage-splitter::after {
+      content: "";
+      position: absolute;
+      left: 50%; top: 50%;
+      transform: translate(-50%, -50%);
+      width: 48px; height: 3px;
+      border-radius: 2px;
+      background: var(--border);
+      transition: background 0.15s, box-shadow 0.15s;
+    }
+    .stage-splitter:hover::after,
+    .stage-splitter.dragging::after {
+      background: var(--primary);
+      box-shadow: 0 0 6px var(--primary);
+    }
+    .stage-splitter.no-transition { transition: none; }
+    .live2d-stage.no-transition { transition: none; }
     .live2d-stage canvas {
       display: block;
       width: 100%;
@@ -401,65 +429,29 @@
     /* ===== 管理员后台 ===== */
     .admin-panel { min-height: 100dvh; background: var(--bg); padding: 24px; }
     .admin-header {
-      width: min(100%, 1200px); margin: 0 auto 20px;
+      width: min(100%, 1000px); margin: 0 auto 20px;
       display: flex; align-items: center; justify-content: space-between; gap: 12px;
     }
     .admin-header h2 { margin: 0; font-size: 20px; }
-    .admin-body {
-      width: min(100%, 1200px); margin: 0 auto;
-      display: grid; grid-template-columns: 340px 1fr; gap: 18px; align-items: start;
-    }
-    .admin-left { display: flex; flex-direction: column; gap: 18px; max-height: calc(100dvh - 120px); overflow-y: auto; position: sticky; top: 20px; }
-    .admin-right { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
-    .admin-detail {
-      background: var(--panel); border: 1px solid var(--border);
-      border-radius: 16px; padding: 20px; box-shadow: var(--shadow);
-      min-height: 200px;
+    .admin-content {
+      width: min(100%, 1000px); margin: 0 auto;
+      display: grid; grid-template-columns: 320px 1fr; gap: 18px; align-items: start;
     }
     .admin-card {
       background: var(--panel); border: 1px solid var(--border);
       border-radius: 16px; padding: 20px; box-shadow: var(--shadow);
     }
     .admin-card h3 { margin: 0 0 14px; font-size: 15px; }
-
-    /* 折叠用户列表 */
     .user-row {
-      padding: 12px 14px; border: 1px solid var(--border-soft); border-radius: 10px;
-      background: var(--panel-2); margin-bottom: 8px; cursor: pointer;
-      transition: border-color .15s;
+      padding: 14px; border: 1px solid var(--border-soft); border-radius: 12px;
+      background: var(--panel-2); margin-bottom: 10px;
     }
-    .user-row:hover { border-color: var(--accent); }
-    .user-row.active { border-color: var(--accent); background: var(--panel); }
     .user-row-head {
       display: flex; align-items: center; justify-content: space-between;
-      gap: 8px; flex-wrap: wrap;
+      gap: 10px; margin-bottom: 12px; flex-wrap: wrap;
     }
     .user-row-head strong { font-size: 14px; }
     .user-row-head .uinfo { font-size: 12px; color: var(--muted); }
-    .user-row-head .arrow { font-size: 12px; color: var(--muted); transition: transform .2s; }
-    .user-row.active .arrow { transform: rotate(90deg); }
-
-    /* 时间线选择 */
-    .timeline-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
-    .timeline-tab {
-      padding: 8px 16px; border-radius: 8px; border: 1px solid var(--border);
-      background: var(--panel-2); cursor: pointer; font-size: 13px;
-    }
-    .timeline-tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-
-    /* 角色折叠块 */
-    .role-fold {
-      border: 1px solid var(--border-soft); border-radius: 10px; margin-bottom: 8px; overflow: hidden;
-    }
-    .role-fold-head {
-      padding: 12px 14px; cursor: pointer; background: var(--panel-2);
-      display: flex; align-items: center; justify-content: space-between;
-    }
-    .role-fold-head:hover { background: var(--panel); }
-    .role-fold-body { padding: 14px; display: none; }
-    .role-fold.open .role-fold-body { display: block; }
-    .role-fold.open .role-fold-head { border-bottom: 1px solid var(--border-soft); }
-
     .qq-badge {
       display: inline-block; padding: 2px 8px; border-radius: 999px;
       font-size: 11px; background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0;
@@ -519,8 +511,7 @@
       }
       .sidebar.open { transform: translateX(0); }
       #sidebar-toggle { display: inline-grid; }
-      .admin-body { grid-template-columns: 1fr; }
-      .admin-left { position: static; max-height: none; overflow: visible; }
+      .admin-content { grid-template-columns: 1fr; }
       .message { max-width: 88%; }
     }
     @media (max-width: 480px) {
@@ -534,7 +525,6 @@
   </style>
   <!-- Live2D 渲染库 -->
   <script src="https://cdn.jsdelivr.net/npm/pixi.js@7.4.0/dist/pixi.min.js"></script>
-  <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
 </head>
 <body>
@@ -646,7 +636,6 @@
           </div>
           <div class="sidebar-actions">
             <button id="create-group-btn" type="button">＋ 创建群聊</button>
-            <button id="story-mode-btn" type="button" title="切换故事模式（新相遇线 / 青梅竹马继承线）">📖 故事模式：新相遇线</button>
           </div>
           <div class="conv-section">
             <h3>单聊</h3>
@@ -682,6 +671,7 @@
               <span>形象加载中...</span>
             </div>
           </div>
+          <div id="stage-splitter" class="stage-splitter" title="拖动调整高度，双击收起/展开"></div>
           <div id="messages" class="messages"></div>
           <footer class="composer">
             <button id="voice-btn" class="icon-btn voice-btn" type="button" title="按住说话">🎤</button>
@@ -706,50 +696,29 @@
         <h2>管理员后台</h2>
         <button id="admin-logout-btn" class="ghost-btn" type="button">退出</button>
       </header>
-      <div class="admin-body">
-        <!-- 左栏：用户列表 -->
-        <div class="admin-left">
-          <div class="admin-card">
-            <h3>新建账号</h3>
-            <form id="create-user-form">
-              <div class="field">
-                <label for="new-username">用户名</label>
-                <input id="new-username" type="text" placeholder="用于登录" />
-              </div>
-              <div class="field">
-                <label for="new-nickname">昵称</label>
-                <input id="new-nickname" type="text" placeholder="展示名称" />
-              </div>
-              <div class="field">
-                <label for="new-password">密码</label>
-                <input id="new-password" type="password" placeholder="至少 6 位" />
-                <div id="new-password-hint" class="hint"></div>
-              </div>
-              <button id="create-user-btn" class="primary-btn" type="submit">创建账号</button>
-            </form>
-          </div>
-          <div class="admin-card">
-            <h3>用户列表</h3>
-            <div id="users-list"></div>
-          </div>
-        </div>
-        <!-- 右栏：详情 -->
-        <div class="admin-right">
-          <div id="admin-detail" class="admin-detail">
-            <div class="hint">← 从左侧选择一个用户查看详情</div>
-          </div>
-          <div class="admin-card">
-            <h3>日程活动池管理</h3>
+      <div class="admin-content">
+        <div class="admin-card">
+          <h3>新建账号</h3>
+          <form id="create-user-form">
             <div class="field">
-              <label>选择角色</label>
-              <select id="schedule-role-select">
-                <option value="nianqi">念琦</option>
-                <option value="jingwen">璟雯</option>
-                <option value="qinghe">清禾</option>
-              </select>
+              <label for="new-username">用户名</label>
+              <input id="new-username" type="text" placeholder="用于登录" />
             </div>
-            <div id="schedule-editor"></div>
-          </div>
+            <div class="field">
+              <label for="new-nickname">昵称</label>
+              <input id="new-nickname" type="text" placeholder="展示名称" />
+            </div>
+            <div class="field">
+              <label for="new-password">密码</label>
+              <input id="new-password" type="password" placeholder="至少 6 位" />
+              <div id="new-password-hint" class="hint"></div>
+            </div>
+            <button id="create-user-btn" class="primary-btn" type="submit">创建账号</button>
+          </form>
+        </div>
+        <div class="admin-card">
+          <h3>全部用户 · 实时心理数据</h3>
+          <div id="users-list"></div>
         </div>
       </div>
     </section>
@@ -873,12 +842,12 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     let currentAudio = null;  // 当前播放的语音
     // ===== Live2D 形象配置 =====
     const LIVE2D_CONFIG = {
-      // 每个角色的模型路径（Cloudflare R2 自定义域名）
+      // 每个角色的模型路径（相对 index.html 的路径）
       // 念琦→Hiyori(温柔)  清禾→Haru(知性学姐)  璟雯→Epsilon(活泼傲娇)
       models: {
-        nianqi:  "https://r2.jinwen.online/hiyori/hiyori_free/runtime/hiyori_free_t08.model3.json",
-        qinghe:  "https://r2.jinwen.online/haru/runtime/haru.model3.json",
-        jingwen: "https://r2.jinwen.online/epsilon/epsilon_free/runtime/Epsilon_free.model3.json",
+        nianqi:  "models/hiyori/hiyori_free/runtime/hiyori_free_t08.model3.json",
+        qinghe:  "models/haru/runtime/haru.model3.json",
+        jingwen: "models/epsilon/epsilon_free/runtime/Epsilon_free.model3.json",
       },
       // 模型显示缩放（三个模型尺寸不同，可分别调整，统一用一个值先跑通）
       scale: 0.15,
@@ -1102,8 +1071,10 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       renderQQBindStatus();
       ensureConversations(currentUser.username);
       switchConversation(`single-${ROLES[0].id}`);
-      // 登录后初始化 Live2D 形象
-      setTimeout(() => initLive2D(), 300);
+      // 普通用户登录后初始化 Live2D 形象（管理员后台不需要）
+      if (currentUser.role !== "admin" && !goAdmin) {
+        setTimeout(() => initLive2D(), 300);
+      }
       if (!currentUser.nickname || currentUser.nickname === currentUser.username) {
         openNicknameModal(true);
       }
@@ -1113,9 +1084,6 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       $("#user-nickname").textContent = currentUser.nickname;
       $("#user-role-text").textContent = currentUser.role === "admin" ? "管理员" : "普通用户";
       $("#user-avatar").textContent = (currentUser.nickname || currentUser.username).slice(0, 1).toUpperCase();
-      // 更新故事模式按钮文字
-      const isPast = currentUser.username.endsWith("_past");
-      $("#story-mode-btn").textContent = `📖 故事模式：${isPast ? "青梅竹马线" : "新相遇线"}`;
     }
 
     // ===== WebSocket =====
@@ -1639,9 +1607,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       const stageH = stage?.clientHeight || 260;
       // 设置缩放
       model.scale.set(LIVE2D_CONFIG.scale);
-      // 锚点设为底部中心
-      model.anchor.set(0.5, 1);
-      // 对齐舞台底部中心
+      // Live2D 模型原点在底部中心，直接对齐舞台底部中心
       model.x = stageW / 2;
       model.y = stageH - LIVE2D_CONFIG.yOffset;
       // 初始嘴闭合
@@ -1797,17 +1763,36 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       el.className = `live2d-status ${status}`;
       if (textEl && text) textEl.textContent = text;
     }
+    let lastStageHeight = 260; // 收起前记录的Live2D区高度
     function toggleLive2DStage() {
       const stage = $("#live2d-stage");
       const btn = $("#live2d-toggle");
       if (!stage) return;
       live2dCollapsed = !live2dCollapsed;
+      if (live2dCollapsed) {
+        // 记住当前高度，收起为0（分隔条仍在，可再双击展开）
+        const h = stage.getBoundingClientRect().height;
+        if (h > 40) lastStageHeight = h;
+        stage.style.height = "0px";
+      } else {
+        stage.style.height = lastStageHeight + "px";
+      }
       stage.classList.toggle("collapsed", live2dCollapsed);
       if (btn) btn.textContent = live2dCollapsed ? "▴" : "▾";
       // 收起时暂停渲染以节省性能
       if (live2dApp) {
         if (live2dCollapsed) live2dApp.stop();
-        else live2dApp.start();
+        else {
+          live2dApp.start();
+          // 展开后重绘画布尺寸与模型位置
+          requestAnimationFrame(() => {
+            live2dApp.renderer.resize(stage.clientWidth, stage.clientHeight);
+            if (live2dModel) {
+              live2dModel.x = stage.clientWidth / 2;
+              live2dModel.y = stage.clientHeight - LIVE2D_CONFIG.yOffset;
+            }
+          });
+        }
       }
     }
     // ===== 语音录音 =====
@@ -2299,174 +2284,37 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       users.forEach(user => {
         const row = document.createElement("div");
         row.className = "user-row";
-        row.dataset.username = user.username;
+        const head = document.createElement("div");
+        head.className = "user-row-head";
         const qqBadge = user.qq
           ? `<span class="qq-badge">QQ: ${escapeHtml(user.qq)}</span>`
-          : `<span class="qq-badge none">未绑定</span>`;
-        row.innerHTML = `<div class="user-row-head">
-          <div><strong>${escapeHtml(user.nickname)}</strong> <span class="uinfo">@${escapeHtml(user.username)}</span></div>
-          <div style="display:flex;align-items:center;gap:6px">${qqBadge}<span class="arrow">›</span></div>
-        </div>`;
-        row.addEventListener("click", () => selectUser(user.username, row));
+          : `<span class="qq-badge none">未绑定QQ</span>`;
+        head.innerHTML = `<div><strong>${escapeHtml(user.nickname)}</strong> <span class="uinfo">@${escapeHtml(user.username)} · ${user.is_admin ? "管理员" : "普通用户"}</span></div>${qqBadge}`;
+        row.appendChild(head);
+
+        // 心理状态编辑区（异步加载）
+        const psychArea = document.createElement("div");
+        psychArea.className = "psych-area";
+        psychArea.innerHTML = '<div class="hint">加载中...</div>';
+        row.appendChild(psychArea);
+
         box.appendChild(row);
+        loadUserPsych(user.username, psychArea);
       });
     }
 
-    let selectedUser = null;
-    let selectedTimeline = "new";
-
-    async function selectUser(username, rowEl) {
-      document.querySelectorAll(".user-row").forEach(r => r.classList.remove("active"));
-      rowEl.classList.add("active");
-      selectedUser = username;
-      selectedTimeline = "new";
-      renderUserDetail(username);
-    }
-
-    function renderUserDetail(username) {
-      const detail = $("#admin-detail");
-      detail.innerHTML = `
-        <h3 style="margin:0 0 12px">@${escapeHtml(username)}</h3>
-        <div class="timeline-tabs">
-          <div class="timeline-tab active" data-tl="new">📖 新相遇线</div>
-          <div class="timeline-tab" data-tl="past">🌙 过往线（青梅竹马）</div>
-        </div>
-        <div id="roles-container"></div>
-      `;
-      detail.querySelectorAll(".timeline-tab").forEach(tab => {
-        tab.addEventListener("click", () => {
-          detail.querySelectorAll(".timeline-tab").forEach(t => t.classList.remove("active"));
-          tab.classList.add("active");
-          selectedTimeline = tab.dataset.tl;
-          loadRolesForTimeline(username, selectedTimeline);
-        });
-      });
-      loadRolesForTimeline(username, "new");
-    }
-
-    async function loadRolesForTimeline(username, timeline) {
-      const container = $("#roles-container");
-      const effectiveUser = timeline === "past" ? username + "_past" : username;
-      container.innerHTML = '<div class="hint">加载中...</div>';
+    async function loadUserPsych(username, container) {
+      adminUserContainers[username] = container;  // v4.0.4: 记录容器，用于实时刷新
       try {
-        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/users/${encodeURIComponent(effectiveUser)}/psych`, {
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/users/${encodeURIComponent(username)}/psych`, {
           headers: { Authorization: `Bearer ${currentUser.token}` }
         });
-        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        if (!resp.ok) throw new Error();
         const data = await resp.json();
-        const states = data.states || {};
-        container.innerHTML = "";
-        ROLES.forEach(role => {
-          const st = states[role.id] || {};
-          const fold = document.createElement("div");
-          fold.className = "role-fold";
-          fold.innerHTML = `
-            <div class="role-fold-head">
-              <span>${role.emoji} ${role.name}</span>
-              <span class="arrow">›</span>
-            </div>
-            <div class="role-fold-body"></div>
-          `;
-          const body = fold.querySelector(".role-fold-body");
-          fold.querySelector(".role-fold-head").addEventListener("click", () => {
-            fold.classList.toggle("open");
-            if (fold.classList.contains("open") && !body.dataset.loaded) {
-              loadRoleDetail(effectiveUser, role.id, body);
-              body.dataset.loaded = "1";
-            }
-          });
-          container.appendChild(fold);
-        });
+        renderPsychEditor(username, data.states || {}, container);
       } catch (e) {
-        container.innerHTML = `<div class="hint error">加载失败: ${e.message}</div>`;
+        container.innerHTML = '<div class="hint error">加载失败</div>';
       }
-    }
-
-    async function loadRoleDetail(username, roleId, body) {
-      body.innerHTML = '<div class="hint">加载中...</div>';
-      try {
-        // 两层亲密度
-        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/get_both_intimacy/${encodeURIComponent(username)}`, {
-          headers: { Authorization: `Bearer ${currentUser.token}` }
-        });
-        let layer1 = 0, layer2 = 0, avg = 0;
-        if (resp.ok) {
-          const data = await resp.json();
-          layer1 = (data.layer1_basic || {})[roleId] || 0;
-          layer2 = (data.layer2_realtime || {})[roleId] || 0;
-          avg = (data.average || {})[roleId] || 0;
-        }
-        // 心理状态
-        const psychResp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/users/${encodeURIComponent(username)}/psych`, {
-          headers: { Authorization: `Bearer ${currentUser.token}` }
-        });
-        const psychData = psychResp.ok ? await psychResp.json() : { states: {} };
-        const st = (psychData.states || {})[roleId] || {};
-
-        body.innerHTML = `
-          <div class="intimacy-bar">
-            <div class="intimacy-bar-title">两层亲密度</div>
-            <div class="intimacy-bar-grid">
-              <div class="intimacy-item layer1">
-                <span class="intimacy-label">第一层(基础)</span>
-                <span class="intimacy-val">${layer1}</span>
-                <input type="number" min="0" max="100" class="intimacy-input" placeholder="0-100" value="${layer1}" id="l1-input-${roleId}" />
-                <button class="intimacy-save-btn" type="button" id="l1-save-${roleId}">保存</button>
-              </div>
-              <div class="intimacy-item layer2">
-                <span class="intimacy-label">第二层(当下)</span>
-                <span class="intimacy-val">${layer2}</span>
-              </div>
-              <div class="intimacy-item avg">
-                <span class="intimacy-label">平均值</span>
-                <span class="intimacy-val">${avg}</span>
-              </div>
-            </div>
-          </div>
-          <div style="margin-top:12px">
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-              <div>亲密度 <input type="number" value="${st.intimacy||30}" id="psych-intimacy-${roleId}" style="width:100%"></div>
-              <div>信任感 <input type="number" value="${st.trust||50}" id="psych-trust-${roleId}" style="width:100%"></div>
-              <div>安全感 <input type="number" value="${st.security||50}" id="psych-security-${roleId}" style="width:100%"></div>
-              <div>依恋度 <input type="number" value="${st.attachment||30}" id="psych-attachment-${roleId}" style="width:100%"></div>
-              <div>醋意 <input type="number" value="${st.jealousy||0}" id="psych-jealousy-${roleId}" style="width:100%"></div>
-              <div>疲劳度 <input type="number" value="${st.fatigue||0}" id="psych-fatigue-${roleId}" style="width:100%"></div>
-              <div>心情 <input type="number" value="${st.mood||50}" id="psych-mood-${roleId}" style="width:100%"></div>
-            </div>
-            <button class="primary-btn" style="margin-top:10px" onclick="savePsych('${username}','${roleId}')">保存心理状态</button>
-          </div>
-        `;
-        // 保存第一层亲密度
-        $(`#l1-save-${roleId}`).addEventListener("click", async () => {
-          const val = parseInt($(`#l1-input-${roleId}`).value) || 0;
-          try {
-            await fetch(`${CONFIG.HTTP_BASE}/api/admin/set_intimacy`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentUser.token}` },
-              body: JSON.stringify({ username, role_id: roleId, value: val })
-            });
-            showToast("已保存", "success");
-          } catch (e) { showToast("保存失败", "error"); }
-        });
-      } catch (e) {
-        body.innerHTML = `<div class="hint error">加载失败: ${e.message}</div>`;
-      }
-    }
-
-    window.savePsych = async function(username, roleId) {
-      const vals = {};
-      ["intimacy","trust","security","attachment","jealousy","fatigue","mood"].forEach(k => {
-        const el = $(`#psych-${k}-${roleId}`);
-        if (el) vals[k] = parseInt(el.value) || 0;
-      });
-      try {
-        await fetch(`${CONFIG.HTTP_BASE}/api/admin/users/${encodeURIComponent(username)}/psych`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentUser.token}` },
-          body: JSON.stringify({ states: { [roleId]: vals } })
-        });
-        showToast("已保存", "success");
-      } catch (e) { showToast("保存失败", "error"); }
     }
 
     function renderPsychEditor(username, states, container) {
@@ -2511,11 +2359,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
             const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/get_both_intimacy/${encodeURIComponent(username)}`, {
               headers: { Authorization: `Bearer ${currentUser.token}` }
             });
-            if (!resp.ok) {
-              const l1El = document.getElementById(`layer1-val-${role.id}`);
-              if (l1El) l1El.textContent = "错误:" + resp.status;
-              return;
-            }
+            if (!resp.ok) return;
             const data = await resp.json();
             const layer1 = (data.layer1_basic || {})[role.id] || 0;
             const layer2 = (data.layer2_realtime || {})[role.id] || 0;
@@ -2673,153 +2517,6 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       $("#messages").innerHTML = "";
     }
 
-    // ===== 故事模式切换（双时间线）=====
-    async function switchStoryMode() {
-      if (!currentUser) return;
-      const isPast = currentUser.username.endsWith("_past");
-      const targetMode = isPast ? "new" : "past";
-      const modeName = targetMode === "past" ? "青梅竹马继承线" : "新相遇线";
-
-      if (!confirm(`确定切换到「${modeName}」吗？\n\n切换后将使用独立的存档（亲密度、聊天记录、记忆互不影响），当前连接会自动重连。`)) return;
-
-      try {
-        const resp = await fetch(`${CONFIG.BACKEND_URL}/api/story_mode/switch`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${currentUser.token}` },
-          body: JSON.stringify({ mode: targetMode })
-        });
-        const data = await resp.json();
-        if (!data.success) {
-          showToast(data.error || "切换失败", "error");
-          return;
-        }
-
-        // 关闭旧连接
-        if (ws) { ws.onclose = null; ws.close(); }
-        ws = null;
-        clearTimeout(reconnectTimer);
-
-        // 更新用户信息
-        currentUser = {
-          username: data.username,
-          nickname: data.nickname,
-          role: data.is_admin ? "admin" : "user",
-          token: data.token,
-          intimacy: data.intimacy || {},
-          qqBound: false
-        };
-
-        // 更新UI
-        $("#user-nickname").textContent = currentUser.nickname;
-        $("#user-role-text").textContent = currentUser.role === "admin" ? "管理员" : "普通用户";
-        $("#user-avatar").textContent = (currentUser.nickname || currentUser.username).slice(0, 1).toUpperCase();
-        $("#story-mode-btn").textContent = `📖 故事模式：${targetMode === "past" ? "青梅竹马线" : "新相遇线"}`;
-
-        // 清空当前消息，加载新用户的会话
-        $("#messages").innerHTML = "";
-        ensureConversations(currentUser.username);
-        renderConversationList();
-        const convs = getCurrentConversations();
-        const firstConv = Object.values(convs).find(c => c.type === "single");
-        if (firstConv) switchConversation(firstConv.id);
-
-        // 重新连接 WebSocket
-        connectWebSocket(data.token);
-        showToast(`已切换到「${modeName}」`, "success");
-      } catch (e) {
-        showToast("切换失败：" + e.message, "error");
-      }
-    }
-
-    // ===== v14.0: 日程活动池管理 =====
-    const SCHEDULE_BUCKET_NAMES = {
-      weekday_morning: "工作日 上午",
-      weekday_afternoon: "工作日 下午",
-      weekday_evening: "工作日 晚上",
-      weekend_morning: "周末 上午",
-      weekend_afternoon: "周末 下午",
-      weekend_evening: "周末 晚上",
-    };
-
-    async function loadSchedule() {
-      const rid = $("#schedule-role-select").value;
-      try {
-        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/schedule/${rid}`, {
-          headers: { Authorization: `Bearer ${currentUser.token}` }
-        });
-        if (!resp.ok) throw new Error("HTTP " + resp.status);
-        const data = await resp.json();
-        const editor = $("#schedule-editor");
-        let html = "";
-        for (const [bucket, name] of Object.entries(SCHEDULE_BUCKET_NAMES)) {
-          const acts = data.buckets[bucket] || [];
-          html += `<div style="margin:12px 0;padding:10px;border:1px solid #333;border-radius:8px">
-            <strong>${name}</strong>
-            <div id="acts-${bucket}" style="margin:8px 0">`;
-          acts.forEach((a, i) => {
-            html += `<div style="display:flex;gap:6px;margin:4px 0">
-              <input type="text" value="${escapeHtml(a.text)}" data-id="${a.id}" data-bucket="${bucket}" style="flex:1">
-              <button class="ghost-btn" onclick="deleteScheduleItem(${a.id},'${bucket}')">×</button>
-            </div>`;
-          });
-          html += `</div>
-            <div style="display:flex;gap:6px">
-              <input type="text" placeholder="新增活动..." id="new-${bucket}" style="flex:1">
-              <button class="ghost-btn" onclick="addScheduleItem('${bucket}')">+ 添加</button>
-            </div>
-            <button class="primary-btn" style="margin-top:6px" onclick="saveSchedule('${bucket}')">保存${name}</button>
-          </div>`;
-        }
-        editor.innerHTML = html;
-      } catch (e) {
-        showToast("加载日程失败：" + e.message, "error");
-      }
-    }
-
-    window.saveSchedule = async function(bucket) {
-      const rid = $("#schedule-role-select").value;
-      const inputs = document.querySelectorAll(`#acts-${bucket} input`);
-      const activities = Array.from(inputs).map(i => i.value.trim()).filter(Boolean);
-      try {
-        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/schedule/${rid}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentUser.token}` },
-          body: JSON.stringify({ time_bucket: bucket, activities })
-        });
-        if (!resp.ok) throw new Error("HTTP " + resp.status);
-        showToast("已保存", "success");
-        loadSchedule();
-      } catch (e) {
-        showToast("保存失败：" + e.message, "error");
-      }
-    };
-
-    window.addScheduleItem = function(bucket) {
-      const input = $(`#new-${bucket}`);
-      if (!input.value.trim()) return;
-      const div = document.createElement("div");
-      div.style = "display:flex;gap:6px;margin:4px 0";
-      div.innerHTML = `<input type="text" value="${escapeHtml(input.value.trim())}" data-bucket="${bucket}" style="flex:1">
-        <button class="ghost-btn" onclick="this.parentElement.remove()">×</button>`;
-      $(`#acts-${bucket}`).appendChild(div);
-      input.value = "";
-    };
-
-    window.deleteScheduleItem = async function(id, bucket) {
-      const rid = $("#schedule-role-select").value;
-      try {
-        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/schedule/${rid}/${id}`, {
-          method: "DELETE",
-          headers: { Authorization: `Bearer ${currentUser.token}` }
-        });
-        if (!resp.ok) throw new Error("HTTP " + resp.status);
-        showToast("已删除", "success");
-        loadSchedule();
-      } catch (e) {
-        showToast("删除失败：" + e.message, "error");
-      }
-    };
-
     // ===== 事件绑定 =====
     function bindEvents() {
       $("#login-form").addEventListener("submit", e => handleLogin(e, false));
@@ -2866,6 +2563,59 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         live2dToggleBtn.addEventListener("click", () => toggleLive2DStage());
       }
 
+      // ===== Live2D区与聊天区 可拖动分隔条 =====
+      (function setupStageSplitter() {
+        const splitter = $("#stage-splitter");
+        const stage = $("#live2d-stage");
+        if (!splitter || !stage) return;
+
+        function clampHeight(h) {
+          const min = 80;
+          const max = Math.round(window.innerHeight * 0.7);
+          return Math.max(min, Math.min(max, h));
+        }
+
+        let dragging = false;
+        splitter.addEventListener("pointerdown", (e) => {
+          // 如果当前是收起状态，先展开再拖
+          if (live2dCollapsed) toggleLive2DStage();
+          dragging = true;
+          splitter.classList.add("dragging");
+          stage.classList.add("no-transition");
+          splitter.setPointerCapture(e.pointerId);
+          const startY = e.clientY;
+          const startH = stage.getBoundingClientRect().height;
+
+          const onMove = (ev) => {
+            if (!dragging) return;
+            const dy = ev.clientY - startY;
+            const newH = clampHeight(startH + dy);
+            stage.style.height = newH + "px";
+            if (live2dApp && live2dModel) {
+              live2dApp.renderer.resize(stage.clientWidth, stage.clientHeight);
+              live2dModel.x = stage.clientWidth / 2;
+              live2dModel.y = stage.clientHeight - LIVE2D_CONFIG.yOffset;
+            }
+          };
+          const onUp = (ev) => {
+            dragging = false;
+            splitter.classList.remove("dragging");
+            stage.classList.remove("no-transition");
+            lastStageHeight = stage.getBoundingClientRect().height;
+            splitter.releasePointerCapture(ev.pointerId);
+            splitter.removeEventListener("pointermove", onMove);
+            splitter.removeEventListener("pointerup", onUp);
+            splitter.removeEventListener("pointercancel", onUp);
+          };
+          splitter.addEventListener("pointermove", onMove);
+          splitter.addEventListener("pointerup", onUp);
+          splitter.addEventListener("pointercancel", onUp);
+        });
+
+        // 双击分隔条 = 收起/展开
+        splitter.addEventListener("dblclick", () => toggleLive2DStage());
+      })();
+
       // 语音按钮：点击开始/停止录音
       const voiceBtn = $("#voice-btn");
       voiceBtn.addEventListener("click", (e) => {
@@ -2899,8 +2649,6 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       $("#group-form").addEventListener("submit", createGroup);
       $("#group-cancel-btn").addEventListener("click", () => $("#group-modal").classList.add("hidden"));
 
-      $("#story-mode-btn").addEventListener("click", switchStoryMode);
-
       $("#edit-nickname-btn").addEventListener("click", () => openNicknameModal(false));
       $("#nickname-save-btn").addEventListener("click", saveNickname);
       $("#nickname-cancel-btn").addEventListener("click", () => $("#nickname-modal").classList.add("hidden"));
@@ -2910,10 +2658,6 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       $("#qq-confirm-btn").addEventListener("click", confirmBindQQ);
 
       $("#create-user-form").addEventListener("submit", handleCreateUser);
-
-      // v14.0: 日程活动池管理
-      $("#schedule-role-select").addEventListener("change", loadSchedule);
-      loadSchedule();
 
       $("#sidebar-toggle").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
 
