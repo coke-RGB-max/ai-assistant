@@ -493,6 +493,32 @@
     .intimacy-save-btn:hover { background: #096dd9; }
     .intimacy-hint { font-size: 10px; color: var(--muted); }
 
+    /* ===== 管理员后台 层级折叠 ===== */
+    .user-row { border: 1px solid var(--border-soft); border-radius: 14px; margin-bottom: 10px; overflow: hidden; background: var(--panel); }
+    .user-row-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; cursor: pointer; user-select: none; }
+    .user-row-head:hover { background: var(--panel-2); }
+    .user-row-head .arrow { transition: transform .2s; color: var(--muted); font-size: 12px; }
+    .user-row.open > .user-row-head .arrow { transform: rotate(90deg); }
+    .line-block { border-top: 1px dashed var(--border-soft); margin: 0 10px; }
+    .line-head { display: flex; align-items: center; gap: 8px; padding: 10px 8px; cursor: pointer; user-select: none; font-size: 13px; border-radius: 8px; }
+    .line-head:hover { background: var(--panel-2); }
+    .line-head .arrow { transition: transform .2s; color: var(--muted); font-size: 11px; }
+    .line-block.open > .line-head .arrow { transform: rotate(90deg); }
+    .line-tag { font-size: 10px; padding: 2px 8px; border-radius: 999px; }
+    .line-tag.fresh { background: rgba(24,144,255,.15); color: #1890ff; }
+    .line-tag.past { background: rgba(150,110,255,.18); color: #966eff; }
+    .line-roles { padding: 4px 8px 10px; display: none; }
+    .line-block.open > .line-roles { display: block; }
+    .role-item { border: 1px solid var(--border-soft); border-radius: 10px; margin-bottom: 8px; overflow: hidden; background: var(--panel); }
+    .role-item-head { display: flex; align-items: center; gap: 8px; padding: 9px 12px; cursor: pointer; user-select: none; font-size: 13px; }
+    .role-item-head:hover { background: var(--panel-2); }
+    .role-item-head .arrow { transition: transform .2s; color: var(--muted); font-size: 11px; margin-left: auto; }
+    .role-item.open > .role-item-head .arrow { transform: rotate(90deg); }
+    .role-item-body { display: none; padding: 10px 12px; border-top: 1px solid var(--border-soft); }
+    .role-item.open > .role-item-body { display: block; }
+    .lines-wrap { display: none; }
+    .user-row.open > .lines-wrap { display: block; }
+
     /* ===== Toast ===== */
     .toast {
       position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(20px);
@@ -2466,30 +2492,173 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     function renderUsersList(users) {
       const box = $("#users-list");
       box.innerHTML = "";
-      if (!users.length) {
-        box.innerHTML = '<div class="hint">暂无用户</div>';
-        return;
-      }
-      users.forEach(user => {
+      if (!users.length) { box.innerHTML = '<div class="hint">暂无用户</div>'; return; }
+      // 按真人分组：主账号（新线） + 它的 _past（过往线）
+      const groups = {};
+      users.forEach(u => {
+        if (u.username && u.username.endsWith("_past")) {
+          const mainKey = u.username.slice(0, -5);
+          (groups[mainKey] = groups[mainKey] || {}).past = u;
+        } else {
+          (groups[u.username] = groups[u.username] || {}).main = u;
+        }
+      });
+      Object.values(groups).forEach(g => {
+        const mainUser = g.main;
+        const disp = mainUser || g.past;
+        const mainKey = mainUser ? mainUser.username : g.past.username.replace(/_past$/, "");
         const row = document.createElement("div");
         row.className = "user-row";
         const head = document.createElement("div");
         head.className = "user-row-head";
-        const qqBadge = user.qq
-          ? `<span class="qq-badge">QQ: ${escapeHtml(user.qq)}</span>`
+        const qqBadge = disp.qq
+          ? `<span class="qq-badge">QQ: ${escapeHtml(disp.qq)}</span>`
           : `<span class="qq-badge none">未绑定QQ</span>`;
-        head.innerHTML = `<div><strong>${escapeHtml(user.nickname)}</strong> <span class="uinfo">@${escapeHtml(user.username)} · ${user.is_admin ? "管理员" : "普通用户"}</span></div>${qqBadge}`;
+        const roleTag = mainUser && mainUser.is_admin ? "管理员" : "普通用户";
+        head.innerHTML = `<div><strong>${escapeHtml(disp.nickname || mainKey)}</strong> <span class="uinfo">@${escapeHtml(mainKey)} · ${roleTag}</span></div><div style="display:flex;align-items:center;gap:8px;">${qqBadge}<span class="arrow">▶</span></div>`;
         row.appendChild(head);
 
-        // 心理状态编辑区（异步加载）
-        const psychArea = document.createElement("div");
-        psychArea.className = "psych-area";
-        psychArea.innerHTML = '<div class="hint">加载中...</div>';
-        row.appendChild(psychArea);
-
+        const linesWrap = document.createElement("div");
+        linesWrap.className = "lines-wrap";
+        if (mainUser) linesWrap.appendChild(buildLineBlock(mainUser, "fresh", "新线"));
+        if (g.past) linesWrap.appendChild(buildLineBlock(g.past, "past", "过往线"));
+        row.appendChild(linesWrap);
+        head.addEventListener("click", () => row.classList.toggle("open"));
         box.appendChild(row);
-        loadUserPsych(user.username, psychArea);
       });
+    }
+
+    function buildLineBlock(user, kind, label) {
+      const block = document.createElement("div");
+      block.className = "line-block";
+      const tagClass = kind === "past" ? "past" : "fresh";
+      const head = document.createElement("div");
+      head.className = "line-head";
+      head.innerHTML = `<span class="arrow">▶</span><span class="line-tag ${tagClass}">${label}</span><span style="color:var(--muted);font-size:12px;">@${escapeHtml(user.username)}</span>`;
+      const rolesWrap = document.createElement("div");
+      rolesWrap.className = "line-roles";
+      ROLES.forEach(role => {
+        const item = document.createElement("div");
+        item.className = "role-item";
+        const rh = document.createElement("div");
+        rh.className = "role-item-head";
+        rh.innerHTML = `<span>${role.emoji} ${role.name}</span><span class="arrow">▶</span>`;
+        const body = document.createElement("div");
+        body.className = "role-item-body";
+        body.innerHTML = '<div class="hint">点击展开亲密度/心理数据</div>';
+        let loaded = false;
+        rh.addEventListener("click", () => {
+          const open = item.classList.toggle("open");
+          if (open && !loaded) { loaded = true; body.innerHTML = '<div class="hint">加载中...</div>'; loadRoleDetail(user.username, role, body); }
+        });
+        item.appendChild(rh); item.appendChild(body);
+        rolesWrap.appendChild(item);
+      });
+      head.addEventListener("click", () => block.classList.toggle("open"));
+      block.appendChild(head); block.appendChild(rolesWrap);
+      return block;
+    }
+
+    async function loadRoleDetail(username, role, body) {
+      try {
+        const [psychResp, intResp] = await Promise.all([
+          fetch(`${CONFIG.HTTP_BASE}/api/admin/users/${encodeURIComponent(username)}/psych`, { headers: { Authorization: `Bearer ${currentUser.token}` } }),
+          fetch(`${CONFIG.HTTP_BASE}/api/admin/get_both_intimacy/${encodeURIComponent(username)}`, { headers: { Authorization: `Bearer ${currentUser.token}` } })
+        ]);
+        const psychData = psychResp.ok ? await psychResp.json() : {};
+        const intData = intResp.ok ? await intResp.json() : {};
+        renderSingleRole(body, username, role, (psychData.states || {})[role.id] || {}, intData);
+      } catch (e) { body.innerHTML = '<div class="hint error">加载失败</div>'; }
+    }
+
+    function renderSingleRole(container, username, role, st, intData) {
+      container.innerHTML = "";
+      const block = document.createElement("div");
+      block.className = "psych-role-block";
+      const layer1 = (intData.layer1_basic || {})[role.id] ?? 0;
+      const layer2 = (intData.layer2_realtime || {})[role.id] ?? 0;
+      const avg = (intData.average || {})[role.id] ?? 0;
+
+      const intimacyBar = document.createElement("div");
+      intimacyBar.className = "intimacy-bar";
+      intimacyBar.innerHTML = `
+        <div class="intimacy-bar-title">两层亲密度（自拍取平均值）</div>
+        <div class="intimacy-bar-grid">
+          <div class="intimacy-item layer1">
+            <span class="intimacy-label">第一层(基础)</span>
+            <span class="intimacy-val">${layer1}</span>
+            <input type="number" min="0" max="100" class="intimacy-input" placeholder="0-100" />
+            <button class="intimacy-save-btn" type="button">保存</button>
+          </div>
+          <div class="intimacy-item layer2">
+            <span class="intimacy-label">第二层(当下)</span>
+            <span class="intimacy-val">${layer2}</span>
+            <span class="intimacy-hint">实时好感，不可编辑</span>
+          </div>
+          <div class="intimacy-item avg">
+            <span class="intimacy-label">平均值(自拍用)</span>
+            <span class="intimacy-val">${avg}</span>
+          </div>
+        </div>`;
+      block.appendChild(intimacyBar);
+      const l1Input = intimacyBar.querySelector(".intimacy-input");
+      const l1Val = intimacyBar.querySelector(".intimacy-item.layer1 .intimacy-val");
+      const avgVal = intimacyBar.querySelector(".intimacy-item.avg .intimacy-val");
+      l1Input.value = layer1;
+      intimacyBar.querySelector(".intimacy-save-btn").addEventListener("click", async () => {
+        const val = parseInt(l1Input.value) || 0;
+        try {
+          const r = await fetch(`${CONFIG.HTTP_BASE}/api/admin/set_intimacy`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentUser.token}` },
+            body: JSON.stringify({ username, role_id: role.id, value: val })
+          });
+          const rd = await r.json();
+          if (r.ok && rd.success) {
+            showToast(`${role.name} 第一层亲密度已更新为 ${val}`, "success");
+            l1Val.textContent = val;
+            avgVal.textContent = layer2 > 0 ? Math.round((val + layer2) / 2) : val;
+          } else { showToast(rd.error || rd.detail || "保存失败", "error"); }
+        } catch (e) { showToast("网络错误", "error"); }
+      });
+
+      const grid = document.createElement("div");
+      grid.className = "psych-grid";
+      PSYCH_FIELDS.forEach(field => {
+        const wrap = document.createElement("div");
+        wrap.className = "psych-field";
+        const val = st[field.key] ?? (field.key === "intimacy" ? CONFIG.DEFAULT_INTIMACY : 0);
+        wrap.innerHTML = `<label><span>${field.label}</span><span class="val-display">${Math.round(val)}</span></label><input type="number" min="${field.min}" max="${field.max}" step="1" value="${Math.round(val)}" data-field="${field.key}" />`;
+        const input = wrap.querySelector("input");
+        const display = wrap.querySelector(".val-display");
+        input.addEventListener("input", () => {
+          const v = Math.max(field.min, Math.min(field.max, parseInt(input.value) || 0));
+          display.textContent = v;
+        });
+        grid.appendChild(wrap);
+      });
+      block.appendChild(grid);
+
+      const saveBtn = document.createElement("button");
+      saveBtn.className = "save-psych-btn";
+      saveBtn.type = "button";
+      saveBtn.textContent = "保存心理数据";
+      saveBtn.addEventListener("click", async () => {
+        const payload = { role_id: role.id };
+        grid.querySelectorAll("input").forEach(input => { payload[input.dataset.field] = parseInt(input.value) || 0; });
+        try {
+          const resp = await fetch(`${CONFIG.HTTP_BASE}/api/admin/users/${encodeURIComponent(username)}/psych`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentUser.token}` },
+            body: JSON.stringify(payload)
+          });
+          const data = await resp.json();
+          if (!resp.ok || !data.success) showToast(data.error || "保存失败", "error");
+          else showToast(`${role.name} 数据已保存`, "success");
+        } catch (e) { showToast("网络错误", "error"); }
+      });
+      block.appendChild(saveBtn);
+      container.appendChild(block);
     }
 
     async function loadUserPsych(username, container) {
