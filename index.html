@@ -266,6 +266,8 @@
     .live2d-status.listening .status-dot { background: var(--success); animation: pulse-dot 1s infinite; }
     .live2d-status.speaking .status-dot { background: var(--primary); animation: pulse-dot 0.6s infinite; }
     .live2d-status.thinking .status-dot { background: var(--warning); animation: pulse-dot 1.2s infinite; }
+    .live2d-status.idle .status-dot { background: var(--success); }
+    .live2d-status.offline .status-dot { background: #9ca3af; animation: none; }
     @keyframes pulse-dot {
       0%, 100% { opacity: 1; transform: scale(1); }
       50% { opacity: 0.5; transform: scale(1.3); }
@@ -662,9 +664,9 @@
           </header>
           <!-- Live2D 形象窗口 -->
           <div id="live2d-stage" class="live2d-stage">
-            <div id="live2d-status" class="live2d-status">
+            <div id="live2d-status" class="live2d-status offline">
               <span class="status-dot"></span>
-              <span id="live2d-status-text">待机中</span>
+              <span id="live2d-status-text">离线</span>
             </div>
             <button id="live2d-toggle" class="live2d-toggle" type="button" title="收起/展开形象">▾</button>
             <div id="live2d-placeholder" class="live2d-placeholder">
@@ -828,6 +830,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     let ws = null;
     let reconnectTimer = null;
     let wsAuthFailed = false;
+    let wsConnected = false; // WebSocket是否已连接，用于联动Live2D在线/离线状态
     let nicknameForced = false;
     let isTyping = false;
     let streamingAI = null;  // 流式输出时的临时AI气泡
@@ -846,9 +849,9 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       // 每个角色的模型路径（相对 index.html 的路径）
       // 念琦→Hiyori(温柔)  清禾→Haru(知性学姐)  璟雯→Epsilon(活泼傲娇)
       models: {
-        nianqi:  "models/hiyori/hiyori_free/runtime/hiyori_free_t08.model3.json",
-        qinghe:  "models/haru/runtime/haru.model3.json",
-        jingwen: "models/epsilon/epsilon_free/runtime/Epsilon_free.model3.json",
+        nianqi:  "https://r2.jinwen.online/hiyori/hiyori_free/runtime/hiyori_free_t08.model3.json",
+        qinghe:  "https://r2.jinwen.online/haru/runtime/haru.model3.json",
+        jingwen: "https://r2.jinwen.online/epsilon/epsilon_free/runtime/Epsilon_free.model3.json",
       },
       // 模型显示缩放（三个模型尺寸不同，可分别调整，统一用一个值先跑通）
       scale: 0.15,
@@ -1108,8 +1111,15 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     }
 
     function updateConnectionStatus(connected) {
+      wsConnected = connected;
       $("#ws-dot").className = connected ? "dot" : "dot orange";
       $("#ws-status-text").textContent = connected ? "已连接" : "正在重连...";
+      // 联动左上角Live2D状态：在线=待机中，断开=离线
+      if (connected) {
+        setLive2DStatus("idle", "待机中");
+      } else {
+        setLive2DStatus("offline", "离线");
+      }
     }
 
     function sendWS(payload) {
@@ -1760,6 +1770,8 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       const el = $("#live2d-status");
       const textEl = $("#live2d-status-text");
       if (!el) return;
+      // 断线时锁定"离线"，思考/说话等状态不得覆盖
+      if (!wsConnected && status !== "offline") return;
       el.className = `live2d-status ${status}`;
       if (textEl && text) textEl.textContent = text;
     }
