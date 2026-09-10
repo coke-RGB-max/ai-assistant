@@ -1601,6 +1601,7 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
         timer.mark("主回复LLM生成")
 
         # v14.0: 承诺检测——回复中说了"下课找你"之类的话，存到session供proactive_server使用
+        is_group = request.mode == ChatMode.GROUP  # 修复：必须在首次引用前正确判定群聊
         if not is_group and request.session_id and session_data is not None:
             promise = detect_promise(reply)
             if promise:
@@ -1627,7 +1628,7 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
 
         # 记忆分析
         mem_cand = None
-        is_group = debug.get("mode") == "group"
+        # is_group 已在承诺检测前用 request.mode 正确判定，此处不再从 debug 取（debug 无 mode 键）
 
         # v11.0: 对话质量自检（OOC检测）— 如果人设偏离则重生成一次
         if QUALITY_CHECK_ENABLED and not is_group:

@@ -29,6 +29,9 @@ from psych import InnerState
 
 logger = logging.getLogger("emotion")
 
+# 记忆服务内部调用令牌：必须与 vector_server.py 的 VECTOR_API_TOKEN 一致，否则 /api/memory/search 返回 403
+VECTOR_API_TOKEN = os.getenv("VECTOR_API_TOKEN", "change_me_strong_secret_key_123456")
+
 
 # ============================================================
 # DailyNoiseLayer
@@ -83,7 +86,8 @@ class DailyNoiseLayer:
                 resp = await client.post(
                     f"{self.vector_url}/api/memory/search",
                     json={"user_id": self.user_id, "query": query, "top_k": top_k,
-                          "role_id": self.role_id or ""}
+                          "role_id": self.role_id or ""},
+                    headers={"X-Vector-Token": VECTOR_API_TOKEN}
                 )
                 if resp.status_code == 200:
                     data = resp.json()
