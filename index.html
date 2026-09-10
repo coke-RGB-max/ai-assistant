@@ -1072,10 +1072,8 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       renderQQBindStatus();
       ensureConversations(currentUser.username);
       switchConversation(`single-${ROLES[0].id}`);
-      // 普通用户登录后初始化 Live2D 形象（管理员后台不需要）
-      if (currentUser.role !== "admin" && !goAdmin) {
-        setTimeout(() => initLive2D(), 300);
-      }
+      // 进入聊天主界面即初始化 Live2D 形象（管理员/普通用户都需要）
+      setTimeout(() => initLive2D(), 300);
       if (!currentUser.nickname || currentUser.nickname === currentUser.username) {
         openNicknameModal(true);
       }
@@ -1608,7 +1606,8 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       const stageH = stage?.clientHeight || 260;
       // 设置缩放
       model.scale.set(LIVE2D_CONFIG.scale);
-      // Live2D 模型原点在底部中心，直接对齐舞台底部中心
+      // 锚点设为底部中心，再对齐舞台底部中心
+      model.anchor.set(0.5, 1);
       model.x = stageW / 2;
       model.y = stageH - LIVE2D_CONFIG.yOffset;
       // 初始嘴闭合
