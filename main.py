@@ -50,6 +50,62 @@ QQ_WEBHOOK_SECRET = os.getenv("QQ_WEBHOOK_SECRET", "")
 PROACTIVE_AUTO_IMAGE = os.getenv("PROACTIVE_AUTO_IMAGE", "false").lower() == "true"
 # 主动发图的亲密度阈值（低于此值不发图，避免陌生人主动发自拍）
 PROACTIVE_IMAGE_INTIMACY_THRESHOLD = int(os.getenv("PROACTIVE_IMAGE_INTIMACY_THRESHOLD", "50"))
+
+# ==================== 邮箱注册 / 管理员 / 跨端配置 ====================
+# 发信邮箱（QQ邮箱SMTP）。授权码放在环境变量 MAIL_PASS，勿写进代码/勿提交git
+MAIL_USER = os.getenv("MAIL_USER", "")            # 例: 1706558925@qq.com
+MAIL_PASS = os.getenv("MAIL_PASS", "")            # QQ邮箱SMTP授权码（16位）
+SMTP_HOST = "smtp.qq.com"
+SMTP_PORT = 465
+# 管理员账号写死为本人邮箱（代码内锁定，不开放创建）
+ADMIN_EMAIL = "1706558925@qq.com"
+# 管理员初始密码。建议在 Railway 环境变量里设置 ADMIN_PASSWORD 并自行修改
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
+# 主人QQ白名单：该QQ私聊机器人时直接按管理员身份处理，不触发自动注册
+OWNER_QQ = os.getenv("OWNER_QQ", "1706558925")
+# 对外前端网址（自动注册时一并发给用户）
+WEB_BASE_URL = os.getenv("WEB_BASE_URL", "https://nianqi.online")
+# 验证码内存存储：email -> {code, expire_ts, last_send_ts, date, count}
+_verify_codes: Dict[str, Dict[str, Any]] = {}
+_CODE_TTL = 300               # 验证码5分钟有效
+_CODE_RESEND_INTERVAL = 60    # 同一邮箱60秒内只能发一次
+_CODE_DAILY_LIMIT = 10        # 同一邮箱每天最多发10次
+import re as _re
+QQ_EMAIL_RE = _re.compile(r"^[1-9]\d{4,10}@qq\.com$")
+def _is_qq_email(s: str) -> bool:
+    return bool(QQ_EMAIL_RE.match((s or "").strip().lower()))
+
+def _gen_code() -> str:
+    import secrets
+    return f"{secrets.randbelow(1000000):06d}"
+
+def _gen_random_password(length: int = 10) -> str:
+    import secrets, string
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+def _send_mail_sync(to_email: str, subject: str, body: str):
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.header import Header
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["From"] = f"FlexiChrono <{MAIL_USER}>"
+    msg["To"] = to_email
+    msg["Subject"] = Header(subject, "utf-8")
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15) as s:
+        s.login(MAIL_USER, MAIL_PASS)
+        s.sendmail(MAIL_USER, [to_email], msg.as_string())
+
+async def send_verify_email(to_email: str, code: str):
+    if not MAIL_USER or not MAIL_PASS:
+        raise RuntimeError("邮件服务未配置（缺少 MAIL_USER / MAIL_PASS）")
+    subject = "【FlexiChrono】你的登录验证码"
+    body = (f"你正在注册/登录 FlexiChrono，\n"
+            f"你的验证码是：{code}\n"
+            f"验证码5分钟内有效。如非本人操作，请忽略本邮件。\n")
+    await asyncio.to_thread(_send_mail_sync, to_email, subject, body)
+# ====================================================================
+
 # ---- 主动后端熔断机制 ----
 # 启动时假设可用，lifespan 健康检查后更新；运行中连续失败 3 次自动熔断，每 60s 放行一次探测
 PROACTIVE_AVAILABLE = True
@@ -168,8 +224,8 @@ class UserDB:
             with open(self.filepath, "w", encoding="utf-8") as f:
                 json.dump({
                     "users": {
-                        "admin": {
-                            "password": hash_password("admin123"), "nickname": "管理员",
+                        ADMIN_EMAIL: {
+                            "password": hash_password(ADMIN_PASSWORD), "nickname": "管理员",
                             "is_admin": True, "intimacy": {}, "session_id": None
                         }
                     },
@@ -327,6 +383,27 @@ class UserDB:
             }
             self._write(data)
         return True
+    def auto_register_from_qq(self, qq: str, email: str):
+        """QQ私聊首次来临时自动注册。
+        若该邮箱已存在（用户自己在网页注册过），只补QQ绑定，返回 None（不重发密码）。
+        若不存在，建号并绑定QQ，返回明文随机密码（用于通过QQ私聊发给用户）。"""
+        data = self._read()
+        bindings = data.setdefault("qq_bindings", {})
+        if email in data["users"]:
+            bindings[str(qq)] = email
+            self._write(data)
+            logger.info(f"[QQ自动注册] {qq} 对应邮箱 {email} 已存在，仅补绑定")
+            return None
+        pwd = _gen_random_password(10)
+        data["users"][email] = {
+            "password": hash_password(pwd), "nickname": "新朋友",
+            "is_admin": False, "intimacy": {}, "session_id": None,
+            "is_qq_auto": True
+        }
+        bindings[str(qq)] = email
+        self._write(data)
+        logger.info(f"[QQ自动注册] 为 {qq} 创建账号 {email}")
+        return pwd
     def ensure_past_user(self, username):
         """确保故事模式二（青梅竹马继承线）的虚拟用户存在。
         虚拟用户ID = {username}_past，密码与原用户相同，昵称加后缀。
@@ -360,6 +437,47 @@ class UserDB:
             return True
         return False
 user_db = UserDB()
+
+class MessageLog:
+    """跨端消息流水：按账号保存最近N条对话，网页端登录后拉取，
+    实现 QQ端发的消息 在网页端也能看到（同一份聊天历史）。"""
+    def __init__(self, filepath=None, max_per_user=200):
+        self.filepath = filepath or os.path.join(DATA_DIR, "messages.json")
+        self.max_per_user = max_per_user
+        import threading
+        self._lock = threading.Lock()
+    def add(self, user_id, role, content, source="web"):
+        if not user_id or not content:
+            return
+        try:
+            with self._lock:
+                data = {}
+                if os.path.exists(self.filepath):
+                    with open(self.filepath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                lst = data.setdefault(str(user_id), [])
+                lst.append({"ts": time.time(), "role": role,
+                            "content": str(content)[:2000], "source": source})
+                if len(lst) > self.max_per_user:
+                    del lst[:-self.max_per_user]
+                tmp = self.filepath + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False)
+                os.replace(tmp, self.filepath)
+        except Exception as e:
+            logger.warning(f"[消息流水] 写入失败 user={user_id}: {e}")
+    def get(self, user_id, limit=200):
+        try:
+            with self._lock:
+                if not os.path.exists(self.filepath):
+                    return []
+                with open(self.filepath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            return data.get(str(user_id), [])[-limit:]
+        except Exception:
+            return []
+
+message_log = MessageLog()
 
 async def _get_user_intimacy(user_id: str, role_id: str) -> int:
     """P3 修复：获取用户对角色的亲密度（两层平均值）。
@@ -1123,6 +1241,12 @@ async def process_chat_message(identity, user_message, role_ids=None, chat_histo
     # 输出耗时汇总日志
     llm_used = result.get("used_llm_analysis", False)
     timer.log(f" | 回复长度={len(raw_reply)} | LLM分析={'是' if llm_used else '否'}")
+    # 跨端消息流水：QQ/网页共用同一份聊天历史
+    try:
+        message_log.add(identity, "user", user_message)
+        message_log.add(identity, "assistant", plain_reply)
+    except Exception:
+        pass
     return {
         "reply": raw_reply,          # 原始带标记回复（含 ‖ 和 [face:]），各通道自行决定如何渲染
         "role_ids": role_ids,
@@ -1245,6 +1369,12 @@ async def process_chat_message_stream(identity, user_message, role_ids=None, cha
         background_tasks.add(_t3)
         _t3.add_done_callback(background_tasks.discard)
     timer.log(f" | 回复长度={len(raw_reply)}")
+    # 跨端消息流水：QQ/网页共用同一份聊天历史
+    try:
+        message_log.add(identity, "user", user_message)
+        message_log.add(identity, "assistant", plain_reply)
+    except Exception:
+        pass
     return {
         "reply": raw_reply,        # 原始带标记回复（含 ‖ 和 [face:]），各通道自行决定如何渲染
         "role_ids": role_ids,
@@ -2206,10 +2336,33 @@ async def qq_webhook(request: Request):
     if bound_username:
         identity = bound_username
         logger.info(f"[QQ] {qq_number} 已绑定账号 {identity}")
+    elif qq_number == OWNER_QQ:
+        # 主人QQ：直接按管理员邮箱身份处理，不触发自动注册、不发账号密码
+        identity = ADMIN_EMAIL
+        logger.info(f"[QQ] 主人QQ {qq_number}，使用管理员身份 {identity}")
     else:
-        identity = f"qq_tmp_{qq_number}"
-        user_db.ensure_tmp_user(identity)
-        logger.info(f"[QQ] {qq_number} 未绑定，使用临时身份 {identity}")
+        # 首次私聊：自动注册 {QQ}@qq.com 账号，并通过QQ把账号密码发给对方
+        auto_email = f"{qq_number}@qq.com"
+        try:
+            raw_pwd = user_db.auto_register_from_qq(qq_number, auto_email)
+        except Exception as e:
+            logger.error(f"[QQ自动注册] 失败 qq={qq_number}: {e}")
+            raw_pwd = None
+        identity = auto_email
+        if raw_pwd:
+            try:
+                await send_qq_private_msg(
+                    qq_number,
+                    f"你好呀～我已经为你开通了网页版账号：\n"
+                    f"账号：{auto_email}\n"
+                    f"初始密码：{raw_pwd}\n"
+                    f"登录后可以在网页体验更多功能：{WEB_BASE_URL}\n"
+                    f"（密码可在登录后自行修改）"
+                )
+                logger.info(f"[QQ自动注册] 已向 {qq_number} 发送账号密码")
+            except Exception as e:
+                logger.warning(f"[QQ自动注册] 发送账号密码失败 qq={qq_number}: {e}")
+        logger.info(f"[QQ] {qq_number} 自动注册完成，身份 {identity}")
     history = qq_chat_history.setdefault(identity, [])
     # ---- 语音消息：下载AMR → ffmpeg转WAV → 语音后端(ASR→LLM→TTS) → 文本+语音回复 ----
     if onebot_has_voice(body.get("message", "")):
@@ -2580,6 +2733,16 @@ async def login(request: Request):
             "intimacy": user.get("intimacy", {}), "qq_bound": user.get("qq_bound", False)
         }
     return JSONResponse({"success": False, "error": "用户名或密码错误"}, status_code=401)
+
+@app.get("/api/history")
+async def get_history(request: Request):
+    """拉取当前账号的跨端聊天历史（QQ/网页共用），网页端登录后调用以恢复消息记录。"""
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    user = user_db.authenticate_token(token)
+    if not user:
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    return {"messages": message_log.get(user["username"], 200)}
+
 @app.post("/api/admin/login")
 async def admin_login(request: Request):
     body = await request.json()
@@ -2639,23 +2802,119 @@ async def switch_story_mode(request: Request):
             "intimacy": orig_user.get("intimacy", {}),
             "message": "已切换到新相遇线，所有数据独立存档"
         }
-@app.post("/api/reset-password")
-async def reset_password(request: Request):
+# -------------------------- 邮箱注册 / 验证码 / 改密 --------------------------
+def _new_login_payload(username, password):
+    user = user_db.authenticate(username, password)
+    if not user:
+        return None
+    token = base64.b64encode(f"{user['username']}:{password}".encode()).decode()
+    return {
+        "success": True, "token": token, "username": user["username"],
+        "nickname": user["nickname"], "is_admin": user["is_admin"],
+        "intimacy": user.get("intimacy", {}), "qq_bound": user.get("qq_bound", False)
+    }
+
+def _check_code(email, code):
+    rec = _verify_codes.get(email)
+    if not rec:
+        return False, "请先获取验证码"
+    if time.time() > rec["expire"]:
+        return False, "验证码已过期，请重新获取"
+    if rec["code"] != str(code).strip():
+        return False, "验证码错误"
+    return True, ""
+
+@app.post("/api/auth/send-code")
+async def auth_send_code(request: Request):
     body = await request.json()
-    if user_db.reset_password(body.get("username", ""), body.get("new_password", "")):
-        return {"success": True}
-    return JSONResponse({"success": False, "error": "用户不存在"}, status_code=404)
+    email = (body.get("email") or "").strip().lower()
+    if not _is_qq_email(email):
+        return JSONResponse({"success": False, "error": "请输入正确的QQ邮箱（xxx@qq.com）"}, status_code=400)
+    now = time.time()
+    rec = _verify_codes.get(email)
+    if rec and now - rec["last_send"] < _CODE_RESEND_INTERVAL:
+        wait = int(_CODE_RESEND_INTERVAL - (now - rec["last_send"]))
+        return JSONResponse({"success": False, "error": f"发送太频繁，请{wait}秒后再试"}, status_code=429)
+    today = time.strftime("%Y-%m-%d")
+    if rec and rec.get("date") == today and rec.get("count", 0) >= _CODE_DAILY_LIMIT:
+        return JSONResponse({"success": False, "error": "今日验证码发送次数已达上限"}, status_code=429)
+    code = _gen_code()
+    try:
+        await send_verify_email(email, code)
+    except Exception as e:
+        logger.error(f"[邮件] 发送验证码失败 to={email}: {e}")
+        return JSONResponse({"success": False, "error": "验证码发送失败，请检查邮箱或稍后再试"}, status_code=500)
+    _verify_codes[email] = {
+        "code": code, "expire": now + _CODE_TTL, "last_send": now,
+        "date": today,
+        "count": (rec.get("count", 0) if rec and rec.get("date") == today else 0) + 1
+    }
+    return {"success": True, "message": "验证码已发送，5分钟内有效"}
+
+@app.post("/api/auth/register")
+async def auth_register(request: Request):
+    body = await request.json()
+    email = (body.get("email") or "").strip().lower()
+    code = body.get("code", "")
+    password = body.get("password", "")
+    if not _is_qq_email(email):
+        return JSONResponse({"success": False, "error": "请输入正确的QQ邮箱（xxx@qq.com）"}, status_code=400)
+    if len(password) < 6:
+        return JSONResponse({"success": False, "error": "密码至少6位"}, status_code=400)
+    ok, msg = _check_code(email, code)
+    if not ok:
+        return JSONResponse({"success": False, "error": msg}, status_code=400)
+    if not user_db.register(email, password, nickname=body.get("nickname")):
+        return JSONResponse({"success": False, "error": "该邮箱已注册，请直接登录"}, status_code=400)
+    _verify_codes.pop(email, None)
+    payload = _new_login_payload(email, password)
+    if not payload:
+        return JSONResponse({"success": False, "error": "注册后自动登录失败"}, status_code=500)
+    return payload
+
+@app.post("/api/auth/reset-password")
+async def auth_reset_password(request: Request):
+    """忘记密码：邮箱 + 验证码 + 新密码"""
+    body = await request.json()
+    email = (body.get("email") or "").strip().lower()
+    code = body.get("code", "")
+    new_password = body.get("new_password", "")
+    if not _is_qq_email(email):
+        return JSONResponse({"success": False, "error": "邮箱格式不正确"}, status_code=400)
+    if len(new_password) < 6:
+        return JSONResponse({"success": False, "error": "新密码至少6位"}, status_code=400)
+    ok, msg = _check_code(email, code)
+    if not ok:
+        return JSONResponse({"success": False, "error": msg}, status_code=400)
+    if not user_db.reset_password(email, new_password):
+        return JSONResponse({"success": False, "error": "该邮箱尚未注册"}, status_code=404)
+    _verify_codes.pop(email, None)
+    return {"success": True, "message": "密码已重置，请用新密码登录"}
+
+@app.post("/api/user/change-password")
+async def user_change_password(request: Request):
+    """登录后改密：必须验证旧密码，成功后返回新 token"""
+    body = await request.json()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    old_pwd = body.get("old_password", "")
+    new_pwd = body.get("new_password", "")
+    if len(new_pwd) < 6:
+        return JSONResponse({"success": False, "error": "新密码至少6位"}, status_code=400)
+    user = user_db.authenticate_token(token)
+    if not user:
+        return JSONResponse({"success": False, "error": "未登录或登录已过期"}, status_code=401)
+    if not user_db.authenticate(user["username"], old_pwd):
+        return JSONResponse({"success": False, "error": "原密码错误"}, status_code=400)
+    if not user_db.reset_password(user["username"], new_pwd):
+        return JSONResponse({"success": False, "error": "修改失败"}, status_code=500)
+    new_token = base64.b64encode(f"{user['username']}:{new_pwd}".encode()).decode()
+    return {"success": True, "message": "密码已修改", "token": new_token}
+
 # -------------------------- 管理员接口 --------------------------
 @app.post("/api/admin/users")
 async def admin_create_user(request: Request):
-    token = request.headers.get("Authorization", "").replace("Bearer ", "")
-    admin = user_db.authenticate_token(token)
-    if not admin or not admin["is_admin"]:
-        return JSONResponse({"error": "无权限"}, status_code=403)
-    body = await request.json()
-    if user_db.admin_create_user(body.get("username", ""), body.get("password", ""), body.get("nickname")):
-        return {"success": True}
-    return JSONResponse({"success": False, "error": "用户已存在"}, status_code=400)
+    """已停用：管理员不再手动创建账号，账号统一由QQ自动注册或邮箱注册产生。"""
+    return JSONResponse({"error": "管理员创建账号功能已关闭，请走邮箱注册或QQ自动注册"}, status_code=403)
 @app.get("/api/admin/users/{username}/psych")
 async def admin_get_user_psych(username: str, request: Request):
     """获取指定用户与所有角色的实时心理状态"""

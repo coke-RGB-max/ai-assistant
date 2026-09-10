@@ -544,17 +544,18 @@
         </div>
         <form id="login-form">
           <div class="field">
-            <label for="login-username">用户名</label>
-            <input id="login-username" type="text" autocomplete="username" placeholder="请输入用户名" />
+            <label for="login-username">QQ邮箱</label>
+            <input id="login-username" type="text" autocomplete="username" placeholder="如 123456@qq.com" />
           </div>
           <div class="field">
             <label for="login-password">密码</label>
             <input id="login-password" type="password" autocomplete="current-password" placeholder="请输入密码" />
-            <div id="login-hint" class="hint">账号由管理员创建，如需开通请联系管理员。</div>
+            <div id="login-hint" class="hint">没有账号？点击下方“注册账号”，用QQ邮箱即可注册。</div>
           </div>
           <button id="login-btn" class="primary-btn" type="submit">登录</button>
         </form>
         <div class="auth-footer">
+          <button id="goto-register" class="link-btn" type="button">注册账号</button>
           <button id="goto-admin-login" class="link-btn" type="button">管理员登录</button>
           <button id="goto-forgot-password" class="link-btn" type="button">忘记密码</button>
         </div>
@@ -589,25 +590,75 @@
       </div>
     </section>
 
-    <!-- 忘记密码 -->
+    <!-- 注册账号 -->
+    <section id="register-view" class="auth-view hidden">
+      <div class="auth-card">
+        <div class="brand">
+          <div class="brand-mark">✨</div>
+          <div>
+            <h1>注册账号</h1>
+            <p>用QQ邮箱注册，验证码发到邮箱</p>
+          </div>
+        </div>
+        <form id="register-form">
+          <div class="field">
+            <label for="reg-email">QQ邮箱</label>
+            <input id="reg-email" type="text" autocomplete="username" placeholder="如 123456@qq.com" />
+          </div>
+          <div class="field">
+            <label for="reg-code">邮箱验证码</label>
+            <div style="display:flex;gap:8px;">
+              <input id="reg-code" type="text" inputmode="numeric" maxlength="6" placeholder="6位验证码" style="flex:1;" />
+              <button id="reg-send-code-btn" class="ghost-btn" type="button" style="width:auto;padding:0 14px;white-space:nowrap;">获取验证码</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="reg-password">设置密码</label>
+            <input id="reg-password" type="password" autocomplete="new-password" placeholder="至少6位" />
+          </div>
+          <div class="field">
+            <label for="reg-nickname">昵称（选填）</label>
+            <input id="reg-nickname" type="text" maxlength="20" placeholder="想让角色怎么称呼你" />
+            <div id="reg-hint" class="hint"></div>
+          </div>
+          <button id="reg-btn" class="primary-btn" type="submit">注册并登录</button>
+        </form>
+        <div class="auth-footer">
+          <button id="register-back-btn" class="link-btn" type="button">返回登录</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 忘记密码（邮箱验证码重置） -->
     <section id="forgot-password-view" class="auth-view hidden">
       <div class="auth-card">
         <div class="brand">
           <div class="brand-mark">🔑</div>
           <div>
             <h1>重置密码</h1>
-            <p>输入用户名以重置密码</p>
+            <p>通过QQ邮箱验证码重置</p>
           </div>
         </div>
         <form id="forgot-password-form">
           <div class="field">
-            <label for="forgot-username">用户名</label>
-            <input id="forgot-username" type="text" autocomplete="username" placeholder="请输入用户名" />
+            <label for="forgot-email">QQ邮箱</label>
+            <input id="forgot-email" type="text" autocomplete="username" placeholder="如 123456@qq.com" />
+          </div>
+          <div class="field">
+            <label for="forgot-code">邮箱验证码</label>
+            <div style="display:flex;gap:8px;">
+              <input id="forgot-code" type="text" inputmode="numeric" maxlength="6" placeholder="6位验证码" style="flex:1;" />
+              <button id="forgot-send-code-btn" class="ghost-btn" type="button" style="width:auto;padding:0 14px;white-space:nowrap;">获取验证码</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="forgot-new-password">新密码</label>
+            <input id="forgot-new-password" type="password" autocomplete="new-password" placeholder="至少6位" />
             <div id="forgot-hint" class="hint"></div>
           </div>
           <div class="modal-actions">
             <button id="forgot-cancel-btn" class="ghost-btn" type="button">取消</button>
-            <button id="forgot-confirm-btn" class="primary-btn" type="submit" style="width:auto;padding:10px 22px;">确定</button>
+            <button id="forgot-confirm-btn" class="primary-btn" type="submit" style="width:auto;padding:10px 22px;">重置密码</button>
           </div>
         </form>
       </div>
@@ -624,6 +675,7 @@
               <span id="user-role-text">普通用户</span>
             </div>
             <button id="edit-nickname-btn" class="icon-btn" type="button" title="修改昵称">✎</button>
+            <button id="change-password-btn" class="icon-btn" type="button" title="修改密码">🔒</button>
             <button id="logout-btn" class="icon-btn" type="button" title="退出登录">⏻</button>
           </div>
           <div class="conn-card">
@@ -631,11 +683,6 @@
               <span id="ws-dot" class="dot orange"></span>
               <span id="ws-status-text">正在连接...</span>
             </div>
-          </div>
-          <div id="qq-bind-card" class="qq-bind-card">
-            <span class="qq-icon">💬</span>
-            <span class="qq-text" id="qq-bind-text">绑定QQ号</span>
-            <button id="qq-bind-btn" type="button">绑定</button>
           </div>
           <div class="sidebar-actions">
             <button id="create-group-btn" type="button">＋ 创建群聊</button>
@@ -701,25 +748,6 @@
       </header>
       <div class="admin-content">
         <div class="admin-card">
-          <h3>新建账号</h3>
-          <form id="create-user-form">
-            <div class="field">
-              <label for="new-username">用户名</label>
-              <input id="new-username" type="text" placeholder="用于登录" />
-            </div>
-            <div class="field">
-              <label for="new-nickname">昵称</label>
-              <input id="new-nickname" type="text" placeholder="展示名称" />
-            </div>
-            <div class="field">
-              <label for="new-password">密码</label>
-              <input id="new-password" type="password" placeholder="至少 6 位" />
-              <div id="new-password-hint" class="hint"></div>
-            </div>
-            <button id="create-user-btn" class="primary-btn" type="submit">创建账号</button>
-          </form>
-        </div>
-        <div class="admin-card">
           <h3>全部用户 · 实时心理数据</h3>
           <div id="users-list"></div>
         </div>
@@ -755,6 +783,31 @@
         <div class="modal-actions">
           <button id="qq-cancel-btn" class="ghost-btn" type="button">取消</button>
           <button id="qq-confirm-btn" class="primary-btn" type="button" style="width:auto;padding:10px 22px;">绑定</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 修改密码弹窗 -->
+    <div id="changepwd-modal" class="modal-mask hidden">
+      <div class="modal-card">
+        <h2>修改密码</h2>
+        <p>需要验证当前密码，修改后自动重新登录。</p>
+        <div class="field">
+          <label for="cp-old">当前密码</label>
+          <input id="cp-old" type="password" autocomplete="current-password" placeholder="请输入当前密码" />
+        </div>
+        <div class="field">
+          <label for="cp-new">新密码</label>
+          <input id="cp-new" type="password" autocomplete="new-password" placeholder="至少6位" />
+        </div>
+        <div class="field">
+          <label for="cp-new2">确认新密码</label>
+          <input id="cp-new2" type="password" autocomplete="new-password" placeholder="再输一次新密码" />
+          <div id="cp-hint" class="hint"></div>
+        </div>
+        <div class="modal-actions">
+          <button id="cp-cancel-btn" class="ghost-btn" type="button">取消</button>
+          <button id="cp-confirm-btn" class="primary-btn" type="button" style="width:auto;padding:10px 22px;">确认修改</button>
         </div>
       </div>
     </div>
@@ -1067,7 +1120,9 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     function finishLogin(goAdmin) {
       $("#auth-view").classList.add("hidden");
       $("#admin-login-view").classList.add("hidden");
+      $("#register-view").classList.add("hidden");
       $("#forgot-password-view").classList.add("hidden");
+      $("#changepwd-modal").classList.add("hidden");
       $("#main-view").classList.remove("hidden");
       $("#admin-panel").classList.add("hidden");
       $("#header-admin-btn").classList.toggle("hidden", currentUser.role !== "admin");
@@ -1075,6 +1130,8 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       renderQQBindStatus();
       ensureConversations(currentUser.username);
       switchConversation(`single-${ROLES[0].id}`);
+      // 拉取跨端聊天历史（QQ端发的消息网页端也能看到）
+      loadHistoryToCurrentConv();
       // 进入聊天主界面即初始化 Live2D 形象（管理员/普通用户都需要）
       setTimeout(() => initLive2D(), 300);
       if (!currentUser.nickname || currentUser.nickname === currentUser.username) {
@@ -1339,6 +1396,25 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     }
 
     // ===== 消息渲染 =====
+    async function loadHistoryToCurrentConv() {
+      try {
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/history`, {
+          headers: { "Authorization": `Bearer ${currentUser.token}` }
+        });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const msgs = (data.messages || []).filter(m => m.role === "user" || m.role === "assistant");
+        if (!msgs.length) return;
+        const conv = getCurrentConversation();
+        if (!conv) return;
+        // 把后端跨端历史转成前端消息对象，合并进当前会话（QQ/网页共用一份聊天记录）
+        conv.messages = msgs.map(m => ({
+          role: m.role === "user" ? "user" : "ai",
+          content: m.content
+        }));
+        renderMessages();
+      } catch (e) { console.warn("加载跨端历史失败", e); }
+    }
     function renderMessages() {
       const box = $("#messages");
       box.innerHTML = "";
@@ -2106,6 +2182,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     // ===== QQ 绑定 =====
     function renderQQBindStatus() {
       const card = $("#qq-bind-card");
+      if (!card) return; // 绑定QQ卡片已移除
       const text = $("#qq-bind-text");
       const btn = $("#qq-bind-btn");
       if (!currentUser) return;
@@ -2221,51 +2298,151 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       showToast("群聊已创建", "success");
     }
 
-    // ===== 忘记密码 =====
+    // ===== 邮箱验证码 / 注册 / 忘记密码 / 改密 =====
+    const QQ_EMAIL_RE = /^[1-9]\d{4,10}@qq\.com$/;
+    function _setHint(el, msg, type) { el.textContent = msg; el.className = "hint" + (type ? " " + type : ""); }
+
+    // 倒计时
+    let _codeTimer = null;
+    function _startCountdown(btn, seconds) {
+      btn.disabled = true;
+      let left = seconds;
+      btn.textContent = `${left}s后重发`;
+      if (_codeTimer) clearInterval(_codeTimer);
+      _codeTimer = setInterval(() => {
+        left--;
+        if (left <= 0) {
+          clearInterval(_codeTimer); _codeTimer = null;
+          btn.disabled = false; btn.textContent = "获取验证码";
+        } else {
+          btn.textContent = `${left}s后重发`;
+        }
+      }, 1000);
+    }
+
+    async function sendCode(emailSel, btnSel, hintSel) {
+      const email = $(emailSel).value.trim().toLowerCase();
+      const btn = $(btnSel), hint = $(hintSel);
+      if (!QQ_EMAIL_RE.test(email)) { _setHint(hint, "请输入正确的QQ邮箱（xxx@qq.com）", "error"); return; }
+      setButtonLoading(btn, true, "发送中...");
+      try {
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/auth/send-code`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email })
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || "发送失败");
+        _setHint(hint, "验证码已发送到邮箱，5分钟内有效", "success");
+        _startCountdown(btn, 60);
+      } catch (e) {
+        _setHint(hint, e.message || "发送失败，请稍后再试", "error");
+      }
+      setButtonLoading(btn, false);
+    }
+
     function openForgotPassword() {
       $("#auth-view").classList.add("hidden");
       $("#admin-login-view").classList.add("hidden");
+      $("#register-view").classList.add("hidden");
       $("#forgot-password-view").classList.remove("hidden");
-      $("#forgot-username").value = "";
-      $("#forgot-hint").textContent = "";
+      $("#forgot-email").value = "";
+      $("#forgot-code").value = "";
+      $("#forgot-new-password").value = "";
+      _setHint($("#forgot-hint"), "");
     }
 
-    function handleForgotSubmit(e) {
+    async function handleForgotReset(e) {
       e.preventDefault();
-      const username = $("#forgot-username").value.trim();
+      const email = $("#forgot-email").value.trim().toLowerCase();
+      const code = $("#forgot-code").value.trim();
+      const pwd = $("#forgot-new-password").value;
       const hint = $("#forgot-hint");
-      if (!username) { hint.textContent = "请输入用户名"; hint.className = "hint error"; return; }
-      resetTargetUsername = username;
-      $("#reset-confirm-modal").classList.remove("hidden");
-    }
-
-    async function confirmResetPassword() {
-      const username = resetTargetUsername;
-      if (!username) return;
-      const btn = $("#reset-modal-confirm-btn");
+      if (!QQ_EMAIL_RE.test(email)) { _setHint(hint, "请输入正确的QQ邮箱", "error"); return; }
+      if (!code) { _setHint(hint, "请输入验证码", "error"); return; }
+      if (pwd.length < 6) { _setHint(hint, "新密码至少6位", "error"); return; }
+      const btn = $("#forgot-confirm-btn");
       setButtonLoading(btn, true, "重置中...");
       try {
-        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/reset-password`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username, new_password: "123456" })
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/auth/reset-password`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, code, new_password: pwd })
         });
-        if (!resp.ok) throw new Error();
-        showToast("密码已重置为 123456", "success");
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || "重置失败");
+        showToast("密码已重置，请用新密码登录", "success");
+        $("#forgot-password-view").classList.add("hidden");
+        $("#auth-view").classList.remove("hidden");
+        $("#login-username").value = email;
+        $("#login-password").value = "";
+        _setHint($("#login-hint"), "密码已重置，请用新密码登录。", "success");
       } catch (e) {
-        showToast("重置失败，请确认服务已启动", "error");
-        setButtonLoading(btn, false);
-        return;
+        _setHint(hint, e.message || "重置失败", "error");
       }
       setButtonLoading(btn, false);
-      $("#reset-confirm-modal").classList.add("hidden");
-      $("#forgot-password-view").classList.add("hidden");
-      $("#auth-view").classList.remove("hidden");
-      $("#login-username").value = username;
-      $("#login-password").value = "";
-      $("#login-hint").className = "hint success";
-      $("#login-hint").textContent = "密码已重置为 123456，请使用新密码登录。";
     }
+
+    async function handleRegister(e) {
+      e.preventDefault();
+      const email = $("#reg-email").value.trim().toLowerCase();
+      const code = $("#reg-code").value.trim();
+      const pwd = $("#reg-password").value;
+      const nickname = $("#reg-nickname").value.trim();
+      const hint = $("#reg-hint");
+      if (!QQ_EMAIL_RE.test(email)) { _setHint(hint, "请输入正确的QQ邮箱", "error"); return; }
+      if (!code) { _setHint(hint, "请输入验证码", "error"); return; }
+      if (pwd.length < 6) { _setHint(hint, "密码至少6位", "error"); return; }
+      const btn = $("#reg-btn");
+      setButtonLoading(btn, true, "注册中...");
+      try {
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/auth/register`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, code, password: pwd, nickname })
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || "注册失败");
+        currentUser = {
+          username: data.username || email,
+          nickname: data.nickname || email,
+          role: data.is_admin ? "admin" : "user",
+          token: data.token,
+          intimacy: data.intimacy || {},
+          qqBound: data.qq_bound || false
+        };
+        $("#register-view").classList.add("hidden");
+        finishLogin(false);
+        connectWebSocket(data.token);
+      } catch (e) {
+        _setHint(hint, e.message || "注册失败", "error");
+      }
+      setButtonLoading(btn, false);
+    }
+
+    async function handleChangePassword() {
+      const oldPwd = $("#cp-old").value;
+      const newPwd = $("#cp-new").value;
+      const newPwd2 = $("#cp-new2").value;
+      const hint = $("#cp-hint");
+      if (newPwd.length < 6) { _setHint(hint, "新密码至少6位", "error"); return; }
+      if (newPwd !== newPwd2) { _setHint(hint, "两次输入的新密码不一致", "error"); return; }
+      const btn = $("#cp-confirm-btn");
+      setButtonLoading(btn, true, "提交中...");
+      try {
+        const resp = await fetch(`${CONFIG.HTTP_BASE}/api/user/change-password`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${currentUser.token}` },
+          body: JSON.stringify({ old_password: oldPwd, new_password: newPwd })
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || "修改失败");
+        showToast("密码已修改，已自动更新登录", "success");
+        if (data.token) currentUser.token = data.token;
+        $("#changepwd-modal").classList.add("hidden");
+      } catch (e) {
+        _setHint(hint, e.message || "修改失败", "error");
+      }
+      setButtonLoading(btn, false);
+    }
+
 
     // ===== 管理员后台 =====
     function renderAdminPanel() {
@@ -2546,9 +2723,29 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         $("#forgot-password-view").classList.add("hidden");
         $("#auth-view").classList.remove("hidden");
       });
-      $("#forgot-password-form").addEventListener("submit", handleForgotSubmit);
-      $("#reset-modal-cancel-btn").addEventListener("click", () => $("#reset-confirm-modal").classList.add("hidden"));
-      $("#reset-modal-confirm-btn").addEventListener("click", confirmResetPassword);
+      $("#forgot-password-form").addEventListener("submit", handleForgotReset);
+      $("#forgot-send-code-btn").addEventListener("click", () => sendCode("#forgot-email", "#forgot-send-code-btn", "#forgot-hint"));
+
+      // 注册
+      $("#goto-register").addEventListener("click", () => {
+        $("#auth-view").classList.add("hidden");
+        $("#register-view").classList.remove("hidden");
+      });
+      $("#register-back-btn").addEventListener("click", () => {
+        $("#register-view").classList.add("hidden");
+        $("#auth-view").classList.remove("hidden");
+      });
+      $("#reg-send-code-btn").addEventListener("click", () => sendCode("#reg-email", "#reg-send-code-btn", "#reg-hint"));
+      $("#register-form").addEventListener("submit", handleRegister);
+
+      // 修改密码
+      $("#change-password-btn").addEventListener("click", () => {
+        $("#cp-old").value = ""; $("#cp-new").value = ""; $("#cp-new2").value = "";
+        $("#cp-hint").textContent = ""; $("#cp-hint").className = "hint";
+        $("#changepwd-modal").classList.remove("hidden");
+      });
+      $("#cp-cancel-btn").addEventListener("click", () => $("#changepwd-modal").classList.add("hidden"));
+      $("#cp-confirm-btn").addEventListener("click", handleChangePassword);
 
       $("#logout-btn").addEventListener("click", logout);
       $("#admin-logout-btn").addEventListener("click", logout);
@@ -2664,12 +2861,6 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       $("#edit-nickname-btn").addEventListener("click", () => openNicknameModal(false));
       $("#nickname-save-btn").addEventListener("click", saveNickname);
       $("#nickname-cancel-btn").addEventListener("click", () => $("#nickname-modal").classList.add("hidden"));
-
-      $("#qq-bind-btn").addEventListener("click", openQQModal);
-      $("#qq-cancel-btn").addEventListener("click", () => $("#qq-modal").classList.add("hidden"));
-      $("#qq-confirm-btn").addEventListener("click", confirmBindQQ);
-
-      $("#create-user-form").addEventListener("submit", handleCreateUser);
 
       $("#sidebar-toggle").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
 
