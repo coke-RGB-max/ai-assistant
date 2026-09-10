@@ -79,6 +79,21 @@ def story_local_time_context(override_hour: Optional[int] = None, timezone_str: 
         period = "evening"; period_zh = "傍晚/晚上"; daylight = "天色渐暗，向夜晚过渡"
     else:
         period = "night"; period_zh = "夜间"; daylight = "通常是天黑的，除非设定另有说明"
+    # v15.0 角色此刻所在场景：让深夜/凌晨的行为符合真实作息，不会半夜还在外面、让对方带伞
+    if 0 <= hour < 5:
+        scene_hint = "现在是深夜凌晨，你在自己卧室里，已经躺下或正准备睡觉，房间安静、灯已关，这个时间你不会在外面走动"
+    elif 5 <= hour < 7:
+        scene_hint = "现在是清晨，你刚睡醒，还在自己卧室，有点迷糊"
+    elif 7 <= hour < 11:
+        scene_hint = "现在是上午，你在宿舍/教室/家里，正常作息活动"
+    elif 11 <= hour < 14:
+        scene_hint = "现在是午间，你在吃饭或午休"
+    elif 14 <= hour < 18:
+        scene_hint = "现在是下午，你在上课或在宿舍处理日常的事"
+    elif 18 <= hour < 22:
+        scene_hint = "现在是晚上，你已经回到宿舍/家里，放松休息"
+    else:  # 22-24
+        scene_hint = "现在是夜里，你已回到自己房间洗漱完，准备上床休息，人在室内、不会外出"
     weekday_map = {0:"周一",1:"周二",2:"周三",3:"周四",4:"周五",5:"周六",6:"周日"}
     weekday = weekday_map.get(now.weekday(), "")
     # 兼容旧的TIME_CONTEXT_MAP
@@ -92,6 +107,7 @@ def story_local_time_context(override_hour: Optional[int] = None, timezone_str: 
         "weekday": weekday, "date": now.strftime("%Y-%m-%d"),
         "time": now.strftime("%H:%M:%S"), "timezone": timezone_str,
         "daylight_expectation": daylight,
+        "scene_hint": scene_hint,
         "mood_bias": old_cfg.get("mood_bias", 0),
         "style": old_cfg.get("style", "日常"),
         "phrases": old_cfg.get("phrases", []),

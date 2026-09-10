@@ -903,6 +903,15 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     ];
 
     let currentUser = null;
+    // v15.0 登录态持久化：刷新页面不用重新登录
+    const AUTH_KEY = "flexichrono_auth";
+    function saveAuth() {
+      if (currentUser) { try { localStorage.setItem(AUTH_KEY, JSON.stringify(currentUser)); } catch (e) {} }
+    }
+    function clearAuth() { try { localStorage.removeItem(AUTH_KEY); } catch (e) {} }
+    function loadAuth() {
+      try { const raw = localStorage.getItem(AUTH_KEY); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
+    }
     let adminUserContainers = {};  // v4.0.4: 管理员页面各用户的心理状态容器，用于实时刷新
     let currentConversationId = null;
     let conversationsByUser = {};
@@ -1134,6 +1143,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
           intimacy: data.intimacy || {},
           qqBound: data.qq_bound || false
         };
+        saveAuth();
         finishLogin(adminMode);
         connectWebSocket(data.token);
       } catch (err) {
@@ -1160,7 +1170,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       loadHistoryToCurrentConv();
       // 进入聊天主界面即初始化 Live2D 形象（管理员/普通用户都需要）
       setTimeout(() => initLive2D(), 300);
-      if (!currentUser.nickname || currentUser.nickname === currentUser.username) {
+      if (!window.__autoRestoring && (!currentUser.nickname || currentUser.nickname === currentUser.username)) {
         openNicknameModal(true);
       }
     }
@@ -1299,6 +1309,27 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         currentUser.nickname = msg.nickname;
         renderUserCard();
         showToast("昵称已更新", "success");
+      } else if (msg.type === "cross_user" || msg.type === "cross_reply") {
+        // v15.0 QQ端跨端实时同步：QQ里的用户消息/AI回复实时同步到网页对应角色会话
+        const rid = (msg.role_ids && msg.role_ids[0]) || "nianqi";
+        const tConv = getCurrentConversations()[`single-${rid}`];
+        if (tConv) {
+          const isUserMsg = msg.type === "cross_user";
+          removeTypingIndicator();
+          const cm = createMessage(isUserMsg ? "user" : "ai", msg.content || "");
+          if (!isUserMsg) cm.roleId = rid;
+          tConv.messages.push(cm);
+          if (currentUser) saveConversationsToLocal(currentUser.username);
+          // 只有当前正打开该角色会话时才直接渲染到屏幕，否则只更新会话列表
+          if (currentConversationId === tConv.id) {
+            appendMessageToDOM(cm, tConv);
+            if (!isUserMsg && cm.content) typeWriter(cm._element, cm.content);
+          }
+          renderConversationList();
+          if (!isUserMsg && msg.intimacy) {
+            Object.entries(msg.intimacy).forEach(([r, s]) => updateIntimacyData(r, s));
+          }
+        }
       } else if (msg.type === "proactive") {
         removeTypingIndicator();
         if (conv) appendAIMessage(conv, msg.content, msg.role_id);
@@ -1325,7 +1356,17 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       } else if (msg.type === "error") {
         removeTypingIndicator();
         showToast(msg.message || "发生错误", "error");
-        if (msg.message === "认证失败") wsAuthFailed = true;
+        if (msg.message === "认证失败") {
+          wsAuthFailed = true;
+          // v15.0 保存的登录态已失效：清除并回到登录页
+          clearAuth();
+          currentUser = null;
+          if (ws) { try { ws.onclose = null; ws.close(); } catch (e) {} }
+          ws = null;
+          $("#main-view").classList.add("hidden");
+          $("#admin-panel").classList.add("hidden");
+          $("#auth-view").classList.remove("hidden");
+        }
       }
     }
 
@@ -2434,6 +2475,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
           intimacy: data.intimacy || {},
           qqBound: data.qq_bound || false
         };
+        saveAuth();
         $("#register-view").classList.add("hidden");
         finishLogin(false);
         connectWebSocket(data.token);
@@ -2867,6 +2909,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       if (ws) { ws.onclose = null; ws.close(); }
       ws = null;
       currentUser = null;
+      clearAuth();
       currentConversationId = null;
       clearTimeout(reconnectTimer);
       $("#main-view").classList.add("hidden");
@@ -3043,6 +3086,15 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
 
     document.addEventListener("DOMContentLoaded", () => {
       bindEvents();
+      // v15.0 自动恢复登录态：刷新页面无需重新登录
+      const saved = loadAuth();
+      if (saved && saved.token) {
+        currentUser = saved;
+        window.__autoRestoring = true;
+        try { finishLogin(currentUser.role === "admin"); } catch (e) { console.warn("自动恢复失败", e); }
+        window.__autoRestoring = false;
+        connectWebSocket(saved.token);
+      }
     });
   </script>
 </body>

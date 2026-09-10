@@ -1027,8 +1027,9 @@ class PersonalityEngine:
         topic_text = topic_initiator.build(topic_info)
 
         time_ctx = story_local_time_context(self.time_override)
-        time_text = (f"【时间感知】现在是{time_ctx['period_zh']}（{time_ctx['hour']}点，{time_ctx['weekday']}），"
+        time_text = (f"【时间感知】现在是{time_ctx['period_zh']}（{time_ctx['hour']}点，{time_ctx['weekday']}，{time_ctx.get('date','')}），"
                      f"你的状态：{time_ctx['style']}。外面{time_ctx['daylight_expectation']}。"
+                     f"{time_ctx.get('scene_hint', '')}，你的言行要符合这个时间和所处场景。"
                      f"这会影响你的语气——{random.choice(time_ctx['phrases'])}")
 
         weather_ctx = get_weather_context(self.weather)
@@ -1038,6 +1039,11 @@ class PersonalityEngine:
                            f"季节{weather_ctx['season']}。"
                            f"你的心情会受影响：{weather_ctx['style']}。"
                            f"可能会说：{random.choice(weather_ctx['phrases'])}")
+        else:
+            # v15.0 没有真实天气数据时，禁止模型凭空编造下雨/降温/带伞等具体天气
+            weather_text = ("【天气事实约束】你现在没有获取到任何实时天气数据，并不知道外面是否下雨、是否降温、气温多少。"
+                            "严禁凭空断言“要下雨/降温了/记得带伞/多穿点”这类具体天气，也不要安排对方在不合理的时间出门；"
+                            "可以泛泛地关心，但涉及天气必须承认自己并不清楚，不能把没查证的事说成事实。")
 
         scene_text = scene_engine.build()
 
@@ -1921,30 +1927,34 @@ async def generate_stream(request: StreamGenerateRequest):
         emotion_history=emotion_history, milestones=milestones, growth_state=growth_state,
         user_profile=user_profile, alter_state=alter_state, session_id=request.session_id,
         user_id=request.user_id, vector_url=VECTOR_SERVER_URL)
-    system_prompt, debug = await engine.generate(
-        msg=request.user_message, mem_ctx=request.memory_context, history=valid,
-        override=request.override_emotion, ov_int=request.emotion_intensity,
-        use_llm=use_llm, enable_mem=request.enable_memory_analysis)
-
-    # v14.0: 故事模式二（过往线）—— 注入青梅竹马版背景
-    if request.user_id and request.user_id.endswith("_past"):
-        role = ROLES_DEFINITION.get(rid, {})
-        past_story = role.get("past_story", "")
-        if past_story:
-            past_story_short = past_story[:2000] + ("……" if len(past_story) > 2000 else "")
-            system_prompt += (
-                f"\n\n【重要：你现在处于过往线（青梅竹马继承模式）】\n"
-                f"你和对方不是新认识的人，你们有共同的过去。以下是你们的故事背景摘要：\n"
-                f"{past_story_short}\n\n"
-                f"请基于这个共同过去来回复，你们的关系已经有了深厚的基础，"
-                f"不需要像刚认识那样小心翼翼，可以自然地提到共同的回忆。"
-            )
-
-    messages = [{"role":"system","content":system_prompt}]
-    messages.extend(valid)
-    messages.append({"role":"user","content":request.user_message})
-    # 先推送元信息，再流式推送 token；流式结束后累积完整回复并做记忆/会话持久化
+    # v15.0: 把耗时的情感分析/提示构建移进 SSE 生成器内部，并先下发 thinking 立即建立连接，
+    # 前端在情感分析（约10s）期间能立刻收到反馈而不是干等无响应
     async def event_generator():
+        # 立即建立SSE流（此时尚未跑情感分析LLM）
+        yield f"data: {json.dumps({'type':'thinking'})}\n\n"
+        system_prompt, debug = await engine.generate(
+            msg=request.user_message, mem_ctx=request.memory_context, history=valid,
+            override=request.override_emotion, ov_int=request.emotion_intensity,
+            use_llm=use_llm, enable_mem=request.enable_memory_analysis)
+
+        # v14.0: 故事模式二（过往线）—— 注入青梅竹马版背景
+        if request.user_id and request.user_id.endswith("_past"):
+            role = ROLES_DEFINITION.get(rid, {})
+            past_story = role.get("past_story", "")
+            if past_story:
+                past_story_short = past_story[:2000] + ("……" if len(past_story) > 2000 else "")
+                system_prompt += (
+                    f"\n\n【重要：你现在处于过往线（青梅竹马继承模式）】\n"
+                    f"你和对方不是新认识的人，你们有共同的过去。以下是你们的故事背景摘要：\n"
+                    f"{past_story_short}\n\n"
+                    f"请基于这个共同过去来回复，你们的关系已经有了深厚的基础，"
+                    f"不需要像刚认识那样小心翼翼，可以自然地提到共同的回忆。"
+                )
+
+        messages = [{"role":"system","content":system_prompt}]
+        messages.extend(valid)
+        messages.append({"role":"user","content":request.user_message})
+        # 先推送元信息，再流式推送 token；流式结束后累积完整回复并做记忆/会话持久化
         yield f"data: {json.dumps({'type':'meta','emotion':debug.get('emotion','calm'),'intimacy':debug.get('intimacy',30)})}\n\n"
         full_reply = ""
         async for token in smart_llm_stream_call(messages, request.temperature, request.max_tokens):

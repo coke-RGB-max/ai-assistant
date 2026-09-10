@@ -1042,6 +1042,20 @@ class ConnectionManager:
         if username in self.admin_connections:
             self.admin_connections.pop(username, None)
             logger.info(f"[管理员推送] 管理员 {username} 已下线")
+    async def send_to_user(self, username: str, data: dict) -> bool:
+        """向指定用户的在线网页端连接推送一条消息（用于QQ端→网页端跨端实时同步）。
+        用户不在线或连接已失效时返回False，不抛异常。"""
+        ws = self.active_connections.get(username)
+        if ws is None:
+            return False
+        try:
+            await ws.send_text(json.dumps(data, ensure_ascii=False))
+            return True
+        except Exception:
+            # 连接已失效，清理
+            self.active_connections.pop(username, None)
+            return False
+
     async def broadcast_admin_update(self, data: dict):
         """v4.0.4: 向所有在线管理员推送数据更新（亲密度变化等）"""
         if not self.admin_connections:
@@ -2493,6 +2507,11 @@ async def qq_webhook(request: Request):
     # ============================================================
     # 正常聊天流程（非自拍请求，或自拍快速响应失败降级）
     # ============================================================
+    result = None
+    # v15.0 跨端同步①：先把"用户在QQ说的话"实时推给在线网页端（网页不在线则自动忽略）
+    await manager.send_to_user(identity, {
+        "type": "cross_user", "content": text, "role_ids": ["nianqi"], "source": "qq"
+    })
     try:
         qq_msg_id = str(body.get("message_id", "")) or None
         result = await identity_queue.submit(
@@ -2509,6 +2528,16 @@ async def qq_webhook(request: Request):
 
     # 发送消息（多短气泡连发，模拟真人节奏；BUBBLE_CHAT_ENABLED=0 时回退整段发送）
     sent = await send_qq_reply_bubbles(qq_number, reply_text, is_group=False)
+
+    # v15.0 跨端同步②：把AI回复实时推给在线网页端（result为None说明上面处理异常，仍同步兜底文案）
+    await manager.send_to_user(identity, {
+        "type": "cross_reply",
+        "content": reply_text,
+        "role_ids": (result or {}).get("role_ids", ["nianqi"]),
+        "mode": (result or {}).get("mode", "single"),
+        "intimacy": (result or {}).get("intimacy", {}),
+        "source": "qq",
+    })
 
     # v13.0: 发送旁观者插话（每条以角色名开头，间隔发送）
     for br in bystander_replies:
