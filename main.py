@@ -694,6 +694,7 @@ async def call_personality_generate(role_ids, user_message, memory_context, chat
         "return_debug": True, "enable_memory_analysis": True,
         "goodbye_hint": goodbye_hint,
         "enable_bystander": enable_bystander,
+        "enable_knowledge_router": True,
     }
     if active_role_id:
         payload["active_role_id"] = active_role_id
@@ -731,6 +732,7 @@ async def call_personality_generate_stream(role_ids, user_message, memory_contex
         "memory_context": memory_context, "chat_history": chat_history,
         "temperature": temperature, "max_tokens": max_tokens,
         "enable_memory_analysis": True, "return_debug": True,
+        "enable_knowledge_router": True,
     }
     if session_id:
         payload["session_id"] = session_id

@@ -11,11 +11,37 @@ DOUBAO_API_KEY = os.getenv("DOUBAO_API_KEY", "")
 DOUBAO_BASE_URL = os.getenv("DOUBAO_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
 DOUBAO_MODEL = os.getenv("DOUBAO_MODEL", "")
 
-# v10.0: Kimi 联网搜索配置（A线）
+# v10.0: Kimi 联网搜索配置（A线主搜）
 KIMI_API_KEY = os.getenv("KIMI_API_KEY", "")
 KIMI_BASE_URL = os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1")
 KIMI_MODEL = os.getenv("KIMI_MODEL", "moonshot-v1-8k")
 KIMI_SEARCH_MODEL = os.getenv("KIMI_SEARCH_MODEL", "moonshot-v1-search")  # 支持联网搜索的模型
+
+# ============================================================
+# v13.0: 火山「豆包搜索」独立联网搜索（Kimi 失败时的兜底 / B线）
+# 这是一个独立的搜索服务（open.feedcoopapi.com），不是方舟自带 web_search 插件。
+# 注意：此 API Key 要在火山引擎「联网搜索控制台」单独创建，
+#       与方舟大模型的 DOUBAO_API_KEY 不通用。
+# 免费额度：每个火山账号每月 500 次，每月 1 号重置，默认 5 QPS。
+# ============================================================
+DOUBAO_SEARCH_API_KEY = os.getenv("DOUBAO_SEARCH_API_KEY", "")
+DOUBAO_SEARCH_URL = os.getenv(
+    "DOUBAO_SEARCH_URL",
+    "https://open.feedcoopapi.com/search_api/web_search",
+)
+DOUBAO_SEARCH_TYPE = os.getenv("DOUBAO_SEARCH_TYPE", "web")
+# web=返回站点列表(自己拼带来源文本，精细可控)；web_summary=额外给一段 LLM 总结
+DOUBAO_SEARCH_COUNT = int(os.getenv("DOUBAO_SEARCH_COUNT", "8"))
+DOUBAO_SEARCH_TIMERANGE = os.getenv("DOUBAO_SEARCH_TIMERANGE", "")
+# 空=不限时间；可选 OneDay / OneWeek / OneMonth / OneYear
+DOUBAO_SEARCH_TIMEOUT = float(os.getenv("DOUBAO_SEARCH_TIMEOUT", "10.0"))
+
+# Kimi 搜索超时（秒）：超时即判失败，立刻走豆包兜底，避免用户干等
+KIMI_SEARCH_TIMEOUT = float(os.getenv("KIMI_SEARCH_TIMEOUT", "10.0"))
+
+# 成本护栏：本容器每日联网搜索总次数上限（Kimi + 豆包合计），
+# 防止异常刷量 / 死循环烧钱。到顶后当日不再发起任何搜索，直接走离线 B 线。
+SEARCH_DAILY_LIMIT = int(os.getenv("SEARCH_DAILY_LIMIT", "50"))
 
 # 注意：不要使用通用的 PORT 环境变量！云端平台（Sealos/Render/Railway等）
 # 通常会注入 PORT=8080 作为外部访问端口，会导致人格后端错误监听 8080 而非 8002。
@@ -77,4 +103,6 @@ def validate_config() -> list:
         warnings.append("DOUBAO_API_KEY 未配置，LLM 调用将不可用")
     if not DOUBAO_MODEL:
         warnings.append("DOUBAO_MODEL 未配置")
+    if not DOUBAO_SEARCH_API_KEY:
+        warnings.append("DOUBAO_SEARCH_API_KEY 未配置：Kimi 失败时将无兜底搜索")
     return warnings
