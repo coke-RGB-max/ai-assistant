@@ -1487,8 +1487,17 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
         knowledge_search_result = None
         knowledge_route = "B"
         if request.enable_knowledge_router and KNOWLEDGE_ROUTER_ENABLED and len(request.user_message) >= KNOWLEDGE_ROUTER_MIN_LEN:
+            # v15.0: 提前读一次用户画像里的城市，供天气类搜索拼城市（下方才是完整 session 加载）
+            _user_city = ""
+            if request.session_id:
+                _pre_sess = load_session(request.session_id)
+                if _pre_sess:
+                    _user_city = (((_pre_sess.get("user_profile") or {}).get("basic_info") or {}).get("city", "")) or ""
             kr = KnowledgeRouter()
-            route_result = await kr.route_and_search(request.user_message, ROLES_DEFINITION.get(role_ids[0],{}).get("name",""))
+            route_result = await kr.route_and_search(
+                request.user_message,
+                ROLES_DEFINITION.get(role_ids[0], {}).get("name", ""),
+                user_city=_user_city)
             knowledge_route = route_result["route"]
             knowledge_search_result = route_result.get("search_result")
             timer.mark("知识路由判断")
@@ -1880,6 +1889,8 @@ class StreamGenerateRequest(BaseModel):
     return_debug: bool = False
     # v14.0 故事模式字段（双时间线）
     user_id: Optional[str] = Field(default=None, description="用户ID，带 _past 后缀表示过往线")
+    # v15.0 流式也接入知识路由（此前流式完全不联网，是网页端天气/时效内容瞎编的根因）
+    enable_knowledge_router: bool = Field(default=False, description="是否启用知识路由(判断是否需要联网搜索)")
 
 @app.post("/api/generate_stream")
 async def generate_stream(request: StreamGenerateRequest):
@@ -1919,19 +1930,38 @@ async def generate_stream(request: StreamGenerateRequest):
             emotion_history = session_data.get("emotion_history", {}).get(rid, [])
             user_profile = session_data.get("user_profile", user_profile)
             alter_state = session_data.get("alter_system", {})
-    engine = PersonalityEngine(
-        mode=ChatMode.SINGLE, role_ids=role_ids, intimacy_map=intim_map,
-        psych_states=psych_in, event_history=event_hist, active_conflict=active_conf,
-        resilience=res_map, turn=turn, cp_usage=cp_use,
-        weather=request.weather, scene_mode=request.scene_mode, gift=request.gift,
-        emotion_history=emotion_history, milestones=milestones, growth_state=growth_state,
-        user_profile=user_profile, alter_state=alter_state, session_id=request.session_id,
-        user_id=request.user_id, vector_url=VECTOR_SERVER_URL)
+    # v15.0: PersonalityEngine 延迟到 event_generator 内构造——知识路由要在 SSE 流内联网，
+    # 若在流外构造，"正在输入"的 thinking 都要等搜索完成才建立连接，首字会被拖慢。
     # v15.0: 把耗时的情感分析/提示构建移进 SSE 生成器内部，并先下发 thinking 立即建立连接，
     # 前端在情感分析（约10s）期间能立刻收到反馈而不是干等无响应
     async def event_generator():
         # 立即建立SSE流（此时尚未跑情感分析LLM）
         yield f"data: {json.dumps({'type':'thinking'})}\n\n"
+        # v15.0: 流式知识路由（此前流式完全不联网，是网页端天气/时效内容瞎编的根因）
+        knowledge_search_result = None
+        if request.enable_knowledge_router and KNOWLEDGE_ROUTER_ENABLED and len(request.user_message) >= KNOWLEDGE_ROUTER_MIN_LEN:
+            _user_city = ((user_profile.get("basic_info") or {}).get("city", "")) or ""
+            _kr = KnowledgeRouter()
+            _rr = await _kr.route_and_search(
+                request.user_message,
+                ROLES_DEFINITION.get(rid, {}).get("name", ""),
+                user_city=_user_city)
+            if _rr.get("route") in ("A", "ASK_CITY"):
+                knowledge_search_result = _rr.get("search_result")
+            if _rr.get("ask_city"):
+                yield f"data: {json.dumps({'type':'status','message':'她想先知道你在哪个城市'}, ensure_ascii=False)}\n\n"
+            elif _rr.get("route") == "A":
+                yield f"data: {json.dumps({'type':'status','message':'正在联网查证最新信息'}, ensure_ascii=False)}\n\n"
+        # 流内构造人格引擎（把联网结果一并喂入）
+        engine = PersonalityEngine(
+            mode=ChatMode.SINGLE, role_ids=role_ids, intimacy_map=intim_map,
+            psych_states=psych_in, event_history=event_hist, active_conflict=active_conf,
+            resilience=res_map, turn=turn, cp_usage=cp_use,
+            weather=request.weather, scene_mode=request.scene_mode, gift=request.gift,
+            emotion_history=emotion_history, milestones=milestones, growth_state=growth_state,
+            knowledge_search_result=knowledge_search_result,
+            user_profile=user_profile, alter_state=alter_state, session_id=request.session_id,
+            user_id=request.user_id, vector_url=VECTOR_SERVER_URL)
         system_prompt, debug = await engine.generate(
             msg=request.user_message, mem_ctx=request.memory_context, history=valid,
             override=request.override_emotion, ov_int=request.emotion_intensity,

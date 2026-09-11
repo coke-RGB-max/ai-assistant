@@ -32,7 +32,11 @@ class KnowledgeRouter:
     知识路由架构：
     用户消息 → 判断模型（豆包）分析"这件事我知道吗？"
       - 知道 → B线：直接用人格模型回复
-      - 不知道 → A线：Kimi联网搜索 → 整理搜索结果 → 人格模型回复
+      - 不知道 → A线：Kimi联网搜索（失败兜底豆包搜索）→ 整理搜索结果 → 人格模型回复
+    v15.0 增强：
+      - 天气/气温等"地点强相关"问题，搜索词自动拼上用户城市（如「武汉 今天天气」）
+      - 地点强相关但还不知道用户城市时，不瞎搜，先让角色自然反问城市
+      - 时效性内容（天气/新闻/价格/比赛等）即使是闲聊语气也判为需要联网
     """
     # 不需要联网的关键词（角色日常对话/情感交流）
     OFFLINE_KEYWORDS = ["我","你","喜欢","爱","想","难过","开心","生气","吃醋","晚安","早安",
@@ -48,10 +52,45 @@ class KnowledgeRouter:
         "最新","最近","新闻","价格","多少钱","配置","参数","发布","上市","版本",
         "天气","气温","下雨","下雪","台风","地震","比赛","比分","冠军","选举",
         "股票","股价","行情","基金","汇率","利率","政策","法律","规定","标准",
+        # v15.0：天气/时效衍生说法（只放较无歧义的，单字"冷/热/晴/阴"不放，避免误伤性格形容）
+        "降温","升温","寒潮","暴雨","雷阵雨","空气质量","雾霾","pm2.5","带伞",
+        "冷不冷","热不热","多少度","几度","穿衣指数","紫外线",
     ]
+
+    # v15.0：地点强相关词——这类问题搜索时必须带城市，否则结果毫无意义
+    # 注意：本集合只在"已经判定需要联网"之后用于决定要不要拼城市，范围可以放宽
+    WEATHER_KEYWORDS = ["天气","气温","温度","多少度","几度","下雨","下雪","降雨","降雪",
+        "雷阵雨","暴雨","大雨","小雨","雨","雪","台风","寒潮","降温","升温","冷不冷","热不热",
+        "带伞","穿什么","穿衣","空气质量","雾霾","pm2.5","紫外线","风大","刮风"]
+
+    # 无城市需反问时，注入给人格引擎的特殊标记（build_search_context 据此换措辞）
+    ASK_CITY_MARK = "[ASK_CITY]"
 
     def __init__(self):
         self.last_decision = None
+
+    def _is_location_bound(self, msg: str) -> bool:
+        """这条消息是否属于天气等强依赖地点的问题。"""
+        low = msg.lower()
+        return any(k.lower() in low for k in self.WEATHER_KEYWORDS)
+
+    def _build_query(self, user_message: str, user_city: str) -> Tuple[str, bool]:
+        """
+        生成最终搜索词。
+        返回 (query, missing_city)：
+          - 非地点强相关：query=原消息，missing_city=False
+          - 地点强相关且有城市：query="城市 原消息"，missing_city=False
+          - 地点强相关但无城市：query=原消息，missing_city=True（调用方应改为反问城市）
+        """
+        msg = user_message.strip()
+        if not self._is_location_bound(msg):
+            return msg, False
+        city = (user_city or "").strip()
+        if city:
+            if city in msg:
+                return msg, False  # 用户自己已经说了城市，不重复拼
+            return f"{city} {msg}", False
+        return msg, True
 
     async def judge(self, user_message: str, role_name: str = "") -> Dict:
         """
@@ -78,6 +117,10 @@ class KnowledgeRouter:
         if has_online_hint and ("?" in msg or "？" in msg):
             self.last_decision = {"need_search": True, "reason": "包含事实性提示词且为疑问句", "confidence": 0.65}
             return self.last_decision
+        # v15.0：即便不是疑问句，只要命中天气/时效关键词，也直接判联网（防止"明天要带伞吗"这类陈述式提问漏网）
+        if self._is_location_bound(msg) or any(k in msg for k in ("新闻","最新","最近","价格","比赛","比分","股价","行情")):
+            self.last_decision = {"need_search": True, "reason": "命中天气/时效类关键词", "confidence": 0.7}
+            return self.last_decision
         if has_offline and not has_online_hint:
             self.last_decision = {"need_search": False, "reason": "包含情感/日常关键词，属于角色对话", "confidence": 0.85}
             return self.last_decision
@@ -87,7 +130,8 @@ class KnowledgeRouter:
             f"判断以下用户消息是否需要联网搜索才能准确回答。\n\n"
             f"用户消息：{msg}\n\n"
             f"判断标准：\n"
-            f"- 需要联网：事实性问题（新闻、天气、价格、知识科普、最新事件、人物信息、比赛结果等）\n"
+            f"- 需要联网：事实性问题（新闻、天气、气温、价格、知识科普、最新事件、人物信息、比赛结果、政策规定等）。"
+            f"尤其是天气、新闻、价格、比赛、行情这类时效性内容，即使用户用闲聊语气提到，也必须联网，不能凭印象回答。\n"
             f"- 不需要联网：情感交流、日常对话、角色扮演、个人感受、关于角色本身的问题\n\n"
             f'返回JSON：{{"need_search": true/false, "reason": "简短原因", "confidence": 0.0-1.0}}'
         )
@@ -113,10 +157,11 @@ class KnowledgeRouter:
         }
         return self.last_decision
 
-    async def route_and_search(self, user_message: str, role_name: str = "") -> Dict:
+    async def route_and_search(self, user_message: str, role_name: str = "", user_city: str = "") -> Dict:
         """
-        完整路由流程：判断 → 如果需要则Kimi搜索 → 返回搜索结果
-        返回: {need_search, search_result, route, reason}
+        完整路由流程：判断 → 拼城市/反问 → Kimi搜索（失败兜底豆包）→ 返回搜索结果
+        参数 user_city：用户画像里记录的所在城市（basic_info.city），天气类搜索用
+        返回: {need_search, search_result, route, reason, ask_city}
         """
         decision = await self.judge(user_message, role_name)
         if not decision["need_search"]:
@@ -124,25 +169,50 @@ class KnowledgeRouter:
                 "need_search": False,
                 "route": "B",
                 "search_result": None,
+                "ask_city": False,
                 "reason": decision["reason"],
             }
 
-        # A线：Kimi联网搜索
-        search_result = await kimi_search_call(user_message)
+        # v15.0：根据用户城市改写搜索词
+        query, missing_city = self._build_query(user_message, user_city)
+
+        # 天气等地点强相关、却还没有用户城市：不瞎搜，先让角色反问城市
+        if missing_city:
+            logger.info("[KnowledgeRouter] 地点强相关但缺少用户城市，改为先反问城市，不进行无效搜索")
+            ask_text = (
+                self.ASK_CITY_MARK +
+                "用户问的是天气/气温这类必须先知道所在城市才能准确回答的问题，"
+                "但目前并不知道用户在哪个城市。请你用角色的语气、自然地先问一句 TA 在哪个城市"
+                "（例如「你在哪个城市呀？我帮你看看那边天气」）。"
+                "在用户告诉你城市之前，绝对不允许编造任何天气、气温、会不会下雨/降温之类的具体内容。"
+            )
+            return {
+                "need_search": True,
+                "route": "ASK_CITY",
+                "search_result": ask_text,
+                "ask_city": True,
+                "reason": "地点强相关但缺城市，先反问",
+            }
+
+        # A线：联网搜索（query 已拼好城市；kimi_search_call 内部已含豆包搜索兜底）
+        search_result = await kimi_search_call(query)
         if search_result:
             return {
                 "need_search": True,
                 "route": "A",
                 "search_result": search_result,
+                "ask_city": False,
                 "reason": decision["reason"],
+                "query": query,
             }
         else:
             # 搜索失败，降级到B线
-            logger.warning("[KnowledgeRouter] Kimi搜索失败，降级到B线直答")
+            logger.warning("[KnowledgeRouter] 联网搜索失败（Kimi与豆包兜底均失败），降级到B线直答")
             return {
                 "need_search": True,
                 "route": "B_fallback",
                 "search_result": None,
+                "ask_city": False,
                 "reason": f"搜索失败降级: {decision['reason']}",
             }
 
@@ -150,6 +220,10 @@ class KnowledgeRouter:
         """将搜索结果整理成Prompt上下文。"""
         if not search_result:
             return ""
+        # v15.0：缺城市反问分支，用"对话引导"措辞而不是"搜索结果"措辞
+        if search_result.startswith(self.ASK_CITY_MARK):
+            body = search_result[len(self.ASK_CITY_MARK):].strip()
+            return f"【对话引导要求】{body}"
         return (f"【联网搜索结果】（以下是刚刚搜索到的最新信息，请用角色的语气自然地融入回答，"
                 f"不要说'根据搜索结果'或'我查了一下'，就像你本来就知道一样）：\n{search_result[:1000]}")
 
