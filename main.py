@@ -8,7 +8,7 @@ v4.0.1: 修复QQ消息发送/主动后端熔断/消息去重/WS认证超时
 v4.0.2: QQ语音消息完整链路（AMR下载→ffmpeg转WAV→ASR→LLM→TTS→AMR发送）
 v4.0.3: 修复NapCat新版本QQ偏移不全时语音url残缺问题，增加get_record fallback
 """
-import asyncio, json, logging, base64, os, time, hmac, hashlib
+import asyncio, json, logging, base64, os, time, hmac, hashlib, secrets, sys, contextvars
 from typing import Optional, Dict, List, Any
 from contextlib import asynccontextmanager
 from collections import deque
@@ -18,16 +18,54 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Header, HT
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-logging.basicConfig(level=logging.INFO)
+# v15.1：为每个请求注入 request_id，全链路日志可追踪
+_REQUEST_ID = contextvars.ContextVar("request_id", default="-")
+class _RequestIdFilter(logging.Filter):
+    def filter(self, record):
+        record.request_id = _REQUEST_ID.get()
+        return True
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(request_id)s] %(levelname)s %(name)s: %(message)s",
+)
+for _h in logging.getLogger().handlers:
+    _h.addFilter(_RequestIdFilter())
 logger = logging.getLogger("main_server")
 PERSONALITY_SERVER_URL = os.getenv("PERSONALITY_SERVER_URL", "http://127.0.0.1:8002")
 VECTOR_SERVER_URL = os.getenv("VECTOR_SERVER_URL", "http://127.0.0.1:8001")
 PROACTIVE_SERVER_URL = os.getenv("PROACTIVE_SERVER_URL", "http://127.0.0.1:8003")
 VOICE_SERVER_URL = os.getenv("VOICE_SERVER_URL", "http://127.0.0.1:8004")
-INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN", "change_me_internal_secret_2026")  # 与 proactive_server.py 保持一致
-VECTOR_API_TOKEN = os.getenv("VECTOR_API_TOKEN", "change_me_strong_secret_key_123456")  # 与 vector_server.py 保持一致
-if INTERNAL_TOKEN == "change_me_internal_secret_2026":
-    logger.warning("[安全] INTERNAL_TOKEN 仍为默认值，生产部署前务必通过环境变量修改！")
+# ==================== 运行环境与安全配置（v15.1） ====================
+# APP_ENV=production 显式声明生产；Railway 上 RAILWAY_ENVIRONMENT=production 时也自动视为生产
+APP_ENV = (os.getenv("APP_ENV", "") or "").lower()
+IS_PRODUCTION = APP_ENV == "production" or os.getenv("RAILWAY_ENVIRONMENT", "") == "production"
+# 应急逃生开关：明知存在默认密钥仍允许启动（强烈不建议，仅用于临时排障）
+ALLOW_INSECURE_START = os.getenv("ALLOW_INSECURE_START", "false").lower() == "true"
+
+INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN", "change_me_internal_secret_2026")  # 五个进程必须一致
+VECTOR_API_TOKEN = os.getenv("VECTOR_API_TOKEN", "change_me_strong_secret_key_123456")  # 与 vector_server.py 一致
+_INTERNAL_TOKEN_DEFAULT = "change_me_internal_secret_2026"
+_VECTOR_TOKEN_DEFAULT = "change_me_strong_secret_key_123456"
+
+# 旧版 base64(username:password) 令牌兼容开关：过渡期默认放行，保证旧前端不会立刻登不上；
+# 等前端全部改用会话令牌后，设 ALLOW_LEGACY_TOKEN=false 即可彻底关闭这条可逆解码的高危通道
+ALLOW_LEGACY_TOKEN = os.getenv("ALLOW_LEGACY_TOKEN", "true").lower() == "true"
+# 会话有效期（秒），默认 7 天，每次访问滑动续期
+SESSION_TTL = int(os.getenv("SESSION_TTL", str(7 * 24 * 3600)))
+# QQ 自动注册后投递方式：link=一次性登录链接（推荐，不再发明文密码）；password=旧版发初始密码（前端未改造时兜底）
+QQ_SEND_MODE = os.getenv("QQ_SEND_MODE", "link").lower()
+MAGIC_LINK_TTL = int(os.getenv("MAGIC_LINK_TTL", "900"))  # 一次性登录链接有效期 15 分钟
+
+# ---- 防爆破参数 ----
+LOGIN_FAIL_LIMIT = int(os.getenv("LOGIN_FAIL_LIMIT", "5"))         # 同一账号连续登录失败上限
+LOGIN_LOCK_SECONDS = int(os.getenv("LOGIN_LOCK_SECONDS", "900"))   # 达到上限后锁定 15 分钟
+CODE_FAIL_LIMIT = int(os.getenv("CODE_FAIL_LIMIT", "5"))           # 验证码连续输错上限，达到即作废重发
+
+# ---- CORS 白名单（不再使用通配 *）----
+_default_origins = "https://nianqi.online,https://www.nianqi.online,http://localhost:5173,http://127.0.0.1:5173"
+CORS_ALLOW_ORIGINS = [o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", _default_origins).split(",") if o.strip()]
+CORS_LOCAL_REGEX = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"  # 本地开发允许任意 localhost 端口
+
 PORT = int(os.getenv("MAIN_PORT", "8000"))
 # 数据目录：Docker 中挂载到 /data，本地默认脚本所在目录
 DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
@@ -42,7 +80,10 @@ NAPCAT_HTTP_URL = os.getenv("NAPCAT_HTTP_URL", "")  # 例: http://127.0.0.1:3000
 # 配置方法: export NAPCAT_ACCESS_TOKEN="你的token"
 NAPCAT_ACCESS_TOKEN = os.getenv("NAPCAT_ACCESS_TOKEN", "")
 # Webhook 签名校验密钥（NapCat 配置中的 secret，留空则不校验）
+# 生产环境强制要求配置（NapCat 侧也要填同一个 secret），否则任何人都能伪造 QQ 入站事件；
+# 若 NapCat 暂时无法配置签名，可设 REQUIRE_WEBHOOK_SECRET=false 临时跳过（会打严重警告）
 QQ_WEBHOOK_SECRET = os.getenv("QQ_WEBHOOK_SECRET", "")
+REQUIRE_WEBHOOK_SECRET = os.getenv("REQUIRE_WEBHOOK_SECRET", "true").lower() == "true"
 
 # P3：主动联系时自动发图（自拍）
 # 启用后，proactive_server 主动联系用户时，会自动生成一张角色自拍图片一起发到QQ
@@ -65,6 +106,8 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 OWNER_QQ = os.getenv("OWNER_QQ", "1706558925")
 # 对外前端网址（自动注册时一并发给用户）
 WEB_BASE_URL = os.getenv("WEB_BASE_URL", "https://nianqi.online")
+# 后端自身的公网地址（Railway 域名），用于拼接 QQ 一次性登录链接；该链接命中后端后会 302 跳回前端
+API_PUBLIC_URL = (os.getenv("API_PUBLIC_URL", "") or "").rstrip("/")
 # 验证码内存存储：email -> {code, expire_ts, last_send_ts, date, count}
 _verify_codes: Dict[str, Dict[str, Any]] = {}
 _CODE_TTL = 300               # 验证码5分钟有效
@@ -213,6 +256,156 @@ async def _report_goodbye(user_id: str, role_id: str):
     except Exception as e:
         logger.debug(f"[意图检测] 报告晚安到主动后端失败: {e}")
 
+# ============================================================
+# v15.1 安全基础设施：生产密钥强校验 / 登录防爆破 / 有状态会话
+# ============================================================
+def _assert_production_secrets():
+    """生产环境启动时强制校验关键密钥；仍是默认值/缺失则拒绝启动，防止带着弱密钥上线。"""
+    weak = []
+    if INTERNAL_TOKEN == _INTERNAL_TOKEN_DEFAULT: weak.append("INTERNAL_TOKEN")
+    if VECTOR_API_TOKEN == _VECTOR_TOKEN_DEFAULT: weak.append("VECTOR_API_TOKEN")
+    if ADMIN_PASSWORD == "admin123": weak.append("ADMIN_PASSWORD")
+    if REQUIRE_WEBHOOK_SECRET and not QQ_WEBHOOK_SECRET: weak.append("QQ_WEBHOOK_SECRET")
+    if not IS_PRODUCTION:
+        if weak:
+            logger.warning(f"[安全] 以下密钥未达生产标准（开发环境仅警告）：{', '.join(weak)}")
+        return
+    problems = []
+    if INTERNAL_TOKEN == _INTERNAL_TOKEN_DEFAULT or len(INTERNAL_TOKEN) < 16:
+        problems.append("INTERNAL_TOKEN 仍是默认值或长度不足16")
+    if VECTOR_API_TOKEN == _VECTOR_TOKEN_DEFAULT or len(VECTOR_API_TOKEN) < 16:
+        problems.append("VECTOR_API_TOKEN 仍是默认值或长度不足16")
+    if ADMIN_PASSWORD == "admin123" or len(ADMIN_PASSWORD) < 8:
+        problems.append("ADMIN_PASSWORD 仍是 admin123 或长度不足8")
+    if REQUIRE_WEBHOOK_SECRET and not QQ_WEBHOOK_SECRET:
+        problems.append("QQ_WEBHOOK_SECRET 未配置（NapCat 入站签名，用于防伪造 QQ 消息）")
+    if not problems:
+        logger.info("[安全] 生产环境关键密钥校验通过")
+        return
+    for p in problems:
+        logger.error(f"[启动阻断] {p}")
+    if ALLOW_INSECURE_START:
+        logger.error("[启动阻断] ALLOW_INSECURE_START=true，已冒险继续启动，请尽快补齐安全配置！")
+        return
+    logger.error("生产环境存在未达标的安全配置，已拒绝启动。请在 Railway 配置上述环境变量后重新部署；"
+                 "确需临时跳过可设 ALLOW_INSECURE_START=true（不推荐）。")
+    sys.exit(2)
+
+
+# ---------- 登录失败锁定（按 账号 / IP 维度，内存计数） ----------
+_login_failures: Dict[str, List[float]] = {}
+def _login_lock_remaining(key: str) -> int:
+    """返回该 key 仍需锁定的秒数，0 表示当前未锁定。"""
+    now = time.time()
+    arr = [t for t in _login_failures.get(key, []) if now - t < LOGIN_LOCK_SECONDS]
+    _login_failures[key] = arr
+    if len(arr) >= LOGIN_FAIL_LIMIT:
+        return max(1, int(LOGIN_LOCK_SECONDS - (now - arr[0])))
+    return 0
+def _record_login_fail(key: str):
+    _login_failures.setdefault(key, []).append(time.time())
+def _clear_login_fail(key: str):
+    _login_failures.pop(key, None)
+
+
+# ---------- 有状态会话（替代 base64(账号:密码)，可过期 / 可吊销 / 可登出） ----------
+class SessionManager:
+    SESS_PREFIX = "sess_"
+    MAGIC_PREFIX = "mag_"
+    def __init__(self, filepath=None):
+        self.filepath = filepath or os.path.join(DATA_DIR, "sessions.json")
+        import threading
+        self._lock = threading.Lock()
+        self._sess: Dict[str, Dict[str, Any]] = {}    # sid -> {username, created, expire, last}
+        self._magic: Dict[str, Dict[str, Any]] = {}   # 一次性登录链接 mid -> {username, expire}
+        self._load()
+    def _load(self):
+        try:
+            if os.path.exists(self.filepath):
+                with open(self.filepath, "r", encoding="utf-8") as f:
+                    blob = json.load(f)
+                self._sess = blob.get("sess", {})
+                self._magic = blob.get("magic", {})
+        except Exception as e:
+            logger.warning(f"[会话] 读取 sessions.json 失败，将从空会话开始: {e}")
+    def _persist(self):
+        try:
+            tmp = self.filepath + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"sess": self._sess, "magic": self._magic}, f, ensure_ascii=False)
+            os.replace(tmp, self.filepath)
+        except Exception as e:
+            logger.warning(f"[会话] 持久化 sessions.json 失败: {e}")
+    @staticmethod
+    def _new_sid() -> str:
+        return SessionManager.SESS_PREFIX + secrets.token_urlsafe(24)
+    def create(self, username: str) -> str:
+        now = time.time()
+        sid = self._new_sid()
+        with self._lock:
+            self._sess[sid] = {"username": username, "created": now,
+                               "expire": now + SESSION_TTL, "last": now}
+            self._gc(now); self._persist()
+        return sid
+    def resolve(self, sid: str) -> Optional[str]:
+        """校验会话并滑动续期，返回 username；无效或过期返回 None。"""
+        if not sid or not sid.startswith(self.SESS_PREFIX):
+            return None
+        now = time.time()
+        with self._lock:
+            rec = self._sess.get(sid)
+            if not rec:
+                return None
+            if now > rec["expire"]:
+                self._sess.pop(sid, None); self._persist()
+                return None
+            rec["last"] = now
+            rec["expire"] = now + SESSION_TTL
+            self._persist()
+            return rec["username"]
+    def revoke(self, sid: str):
+        with self._lock:
+            if self._sess.pop(sid, None) is not None:
+                self._persist()
+    def revoke_user(self, username: str) -> int:
+        """吊销某用户的全部会话（改密/重置后强制其所有设备重新登录），返回吊销数量。"""
+        with self._lock:
+            hit = [s for s, r in self._sess.items() if r.get("username") == username]
+            for s in hit:
+                self._sess.pop(s, None)
+            if hit:
+                self._persist()
+        return len(hit)
+    def create_magic(self, username: str) -> str:
+        now = time.time()
+        mid = self.MAGIC_PREFIX + secrets.token_urlsafe(18)
+        with self._lock:
+            self._magic[mid] = {"username": username, "expire": now + MAGIC_LINK_TTL}
+            self._persist()
+        return mid
+    def consume_magic(self, mid: str) -> Optional[str]:
+        """一次性消费登录链接令牌，校验通过后换发正式会话 sid（链接用后即焚）。"""
+        if not mid or not mid.startswith(self.MAGIC_PREFIX):
+            return None
+        now = time.time()
+        with self._lock:
+            rec = self._magic.pop(mid, None)  # 无论成败都取出，保证只能用一次
+            if not rec or now > rec["expire"]:
+                self._persist(); return None
+            username = rec["username"]
+            sid = self._new_sid()
+            self._sess[sid] = {"username": username, "created": now,
+                               "expire": now + SESSION_TTL, "last": now}
+            self._gc(now); self._persist()
+        return sid
+    def _gc(self, now: float):
+        for col in (self._sess, self._magic):
+            for k in [k for k, v in col.items() if now > v.get("expire", 0)]:
+                col.pop(k, None)
+
+session_mgr = SessionManager()
+
+
 class UserDB:
     def __init__(self, filepath=None):
         self.filepath = filepath or os.path.join(DATA_DIR, "userdb.json")
@@ -265,7 +458,32 @@ class UserDB:
             "session_id": user.get("session_id"),
             "qq_bound": self.get_qq_by_username(username, data) is not None
         }
+    def _public_user(self, username):
+        """会话令牌已证明身份后，按用户名组装对外用户信息（不再校验密码）。"""
+        data = self._read()
+        user = data["users"].get(username)
+        if not user or user.get("disabled"):
+            return None
+        return {
+            "username": username,
+            "nickname": user.get("nickname", username),
+            "is_admin": user.get("is_admin", False),
+            "intimacy": user.get("intimacy", {}),
+            "session_id": user.get("session_id"),
+            "qq_bound": self.get_qq_by_username(username, data) is not None
+        }
     def authenticate_token(self, token):
+        if not token:
+            return None
+        # 1) 新版有状态会话令牌：服务端校验 + 过期 + 可吊销
+        if token.startswith(SessionManager.SESS_PREFIX):
+            uname = session_mgr.resolve(token)
+            if not uname:
+                return None
+            return self._public_user(uname)
+        # 2) 兼容旧版 base64(账号:密码) 令牌（可逆解码，过渡期保留；ALLOW_LEGACY_TOKEN=false 可彻底关闭）
+        if not ALLOW_LEGACY_TOKEN:
+            return None
         try:
             decoded = base64.b64decode(token).decode("utf-8")
             u, p = decoded.split(":", 1)
@@ -385,15 +603,15 @@ class UserDB:
         return True
     def auto_register_from_qq(self, qq: str, email: str):
         """QQ私聊首次来临时自动注册。
-        若该邮箱已存在（用户自己在网页注册过），只补QQ绑定，返回 None（不重发密码）。
-        若不存在，建号并绑定QQ，返回明文随机密码（用于通过QQ私聊发给用户）。"""
+        若邮箱已存在（用户在网页注册过），仅补 QQ 绑定，返回 {"new": False, "password": None}。
+        若为新建，内部设置随机密码（不直接外发），返回 {"new": True, "password": 随机密码}。"""
         data = self._read()
         bindings = data.setdefault("qq_bindings", {})
         if email in data["users"]:
             bindings[str(qq)] = email
             self._write(data)
             logger.info(f"[QQ自动注册] {qq} 对应邮箱 {email} 已存在，仅补绑定")
-            return None
+            return {"new": False, "password": None}
         pwd = _gen_random_password(10)
         data["users"][email] = {
             "password": hash_password(pwd), "nickname": "新朋友",
@@ -403,7 +621,7 @@ class UserDB:
         bindings[str(qq)] = email
         self._write(data)
         logger.info(f"[QQ自动注册] 为 {qq} 创建账号 {email}")
-        return pwd
+        return {"new": True, "password": pwd}
     def ensure_past_user(self, username):
         """确保故事模式二（青梅竹马继承线）的虚拟用户存在。
         虚拟用户ID = {username}_past，密码与原用户相同，昵称加后缀。
@@ -428,8 +646,13 @@ class UserDB:
         if username.endswith("_past"):
             return username[:-5]
         return username
+    # 允许通过 set_user_field 修改的字段白名单（敏感字段一律禁止，防止越权提权/改密）
+    SETTABLE_FIELDS = {"disabled", "nickname"}
     def set_user_field(self, username, field, value):
-        """设置用户的任意字段（如 disabled），用户不存在时返回 False"""
+        """只允许写白名单内的非敏感字段（如 disabled/nickname）；越权字段直接拒绝。"""
+        if field not in self.SETTABLE_FIELDS:
+            logger.warning(f"[安全] 拒绝写入非白名单用户字段: {field} (user={username})")
+            raise ValueError(f"字段 {field} 不允许通过 set_user_field 修改")
         data = self._read()
         if username in data["users"]:
             data["users"][username][field] = value
@@ -1890,6 +2113,7 @@ async def send_qq_private_record(qq_number, audio_b64: str, audio_format: str = 
 @asynccontextmanager
 async def lifespan(app):
     global PROACTIVE_AVAILABLE, FFMPEG_AVAILABLE
+    _assert_production_secrets()  # v15.1：生产环境弱密钥/缺签名直接拒绝启动
     logger.info("主后端 v4.0.3 启动 - 端口 8000")
     if not NAPCAT_HTTP_URL:
         logger.warning("=" * 60)
@@ -1952,8 +2176,30 @@ async def lifespan(app):
     yield
     logger.info("主后端关闭")
 app = FastAPI(title="FlexiChrono 主后端", version="4.0.3", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False,
-                   allow_methods=["*"], allow_headers=["*"])
+# v15.1：CORS 收敛为白名单（正式域名 + 本地开发正则），不再对任意域名开放
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ALLOW_ORIGINS,
+    allow_origin_regex=CORS_LOCAL_REGEX,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """为每个请求生成/透传 request_id，写入响应头并贯穿本次所有日志。"""
+    rid = request.headers.get("X-Request-ID") or secrets.token_hex(4)
+    ctx_token = _REQUEST_ID.set(rid)
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    finally:
+        _REQUEST_ID.reset(ctx_token)
+    dur_ms = (time.perf_counter() - start) * 1000
+    response.headers["X-Request-ID"] = rid
+    logger.info(f"{request.method} {request.url.path} -> {response.status_code} ({dur_ms:.0f}ms)")
+    return response
 @app.get("/")
 async def root():
     return {"status": "ok", "service": "FlexiChrono 主后端", "version": "4.0.3"}
@@ -2360,24 +2606,30 @@ async def qq_webhook(request: Request):
         # 首次私聊：自动注册 {QQ}@qq.com 账号，并通过QQ把账号密码发给对方
         auto_email = f"{qq_number}@qq.com"
         try:
-            raw_pwd = user_db.auto_register_from_qq(qq_number, auto_email)
+            reg_info = user_db.auto_register_from_qq(qq_number, auto_email)
         except Exception as e:
             logger.error(f"[QQ自动注册] 失败 qq={qq_number}: {e}")
-            raw_pwd = None
+            reg_info = {"new": False, "password": None}
         identity = auto_email
-        if raw_pwd:
+        if reg_info.get("new"):
             try:
-                await send_qq_private_msg(
-                    qq_number,
-                    f"你好呀～我已经为你开通了网页版账号：\n"
-                    f"账号：{auto_email}\n"
-                    f"初始密码：{raw_pwd}\n"
-                    f"登录后可以在网页体验更多功能：{WEB_BASE_URL}\n"
-                    f"（密码可在登录后自行修改）"
-                )
-                logger.info(f"[QQ自动注册] 已向 {qq_number} 发送账号密码")
+                if QQ_SEND_MODE == "link" and API_PUBLIC_URL:
+                    # v15.1：默认下发一次性登录链接，不再在 QQ 明文发送密码
+                    _mid = session_mgr.create_magic(auto_email)
+                    _link = f"{API_PUBLIC_URL}/api/auth/magic/{_mid}"
+                    _msg = (f"你好呀～我已经帮你开通网页版账号：{auto_email}\n"
+                            f"点下面链接就能直接进入（15分钟内有效，且只能使用一次）：\n{_link}\n"
+                            f"以后也可以用这个QQ邮箱收验证码登录网页版～")
+                else:
+                    if QQ_SEND_MODE == "link":
+                        logger.warning("[QQ自动注册] 未配置 API_PUBLIC_URL，无法生成一次性链接，临时回退为发送初始密码")
+                    _msg = (f"你好呀～我已经为你开通了网页版账号：\n"
+                            f"账号：{auto_email}\n初始密码：{reg_info.get('password')}\n"
+                            f"登录后可以在网页体验更多功能：{WEB_BASE_URL}\n（请登录后尽快修改密码）")
+                await send_qq_private_msg(qq_number, _msg)
+                logger.info(f"[QQ自动注册] 已向 {qq_number} 发送登录指引（模式={QQ_SEND_MODE}）")
             except Exception as e:
-                logger.warning(f"[QQ自动注册] 发送账号密码失败 qq={qq_number}: {e}")
+                logger.warning(f"[QQ自动注册] 发送登录指引失败 qq={qq_number}: {e}")
         logger.info(f"[QQ] {qq_number} 自动注册完成，身份 {identity}")
     history = qq_chat_history.setdefault(identity, [])
     # ---- 语音消息：下载AMR → ffmpeg转WAV → 语音后端(ASR→LLM→TTS) → 文本+语音回复 ----
@@ -2755,15 +3007,20 @@ async def _deliver_proactive_to_qq(user_id, qq_number, role_id, content, msg):
 @app.post("/api/login")
 async def login(request: Request):
     body = await request.json()
-    user = user_db.authenticate(body.get("username", ""), body.get("password", ""))
+    username = (body.get("username", "") or "").strip()
+    password = body.get("password", "")
+    ip = request.client.host if request.client else "?"
+    lock_key = f"{username.lower()}|{ip}"  # v15.1：账号+IP 维度防爆破
+    wait = _login_lock_remaining(lock_key)
+    if wait:
+        return JSONResponse({"success": False, "error": f"失败次数过多，请{wait}秒后再试"}, status_code=429)
+    user = user_db.authenticate(username, password)
     if user:
-        token = base64.b64encode(f"{user['username']}:{body.get('password','')}".encode()).decode()
-        return {
-            "success": True, "token": token, "username": user["username"],
-            "nickname": user["nickname"], "is_admin": user["is_admin"],
-            "intimacy": user.get("intimacy", {}), "qq_bound": user.get("qq_bound", False)
-        }
-    return JSONResponse({"success": False, "error": "用户名或密码错误"}, status_code=401)
+        _clear_login_fail(lock_key)
+        return _session_payload(user)
+    _record_login_fail(lock_key)
+    left = max(0, LOGIN_FAIL_LIMIT - len(_login_failures.get(lock_key, [])))
+    return JSONResponse({"success": False, "error": "用户名或密码错误", "attempts_left": left}, status_code=401)
 
 @app.get("/api/history")
 async def get_history(request: Request):
@@ -2777,10 +3034,18 @@ async def get_history(request: Request):
 @app.post("/api/admin/login")
 async def admin_login(request: Request):
     body = await request.json()
-    user = user_db.authenticate(body.get("username", ""), body.get("password", ""))
+    username = (body.get("username", "") or "").strip()
+    password = body.get("password", "")
+    ip = request.client.host if request.client else "?"
+    lock_key = f"admin|{username.lower()}|{ip}"
+    wait = _login_lock_remaining(lock_key)
+    if wait:
+        return JSONResponse({"success": False, "error": f"失败次数过多，请{wait}秒后再试"}, status_code=429)
+    user = user_db.authenticate(username, password)
     if user and user["is_admin"]:
-        token = base64.b64encode(f"{user['username']}:{body.get('password','')}".encode()).decode()
-        return {"success": True, "token": token}
+        _clear_login_fail(lock_key)
+        return {"success": True, "token": session_mgr.create(user["username"])}
+    _record_login_fail(lock_key)
     return JSONResponse({"success": False, "error": "管理员验证失败"}, status_code=401)
 
 # -------------------------- 故事模式切换（双时间线） --------------------------
@@ -2798,61 +3063,57 @@ async def switch_story_mode(request: Request):
     if not user:
         return JSONResponse({"success": False, "error": "未登录"}, status_code=401)
 
-    # 从 token 解码出原始密码（用于生成新 token）
-    try:
-        decoded = base64.b64decode(token).decode("utf-8")
-        _, password = decoded.split(":", 1)
-    except Exception:
-        return JSONResponse({"success": False, "error": "token 无效"}, status_code=400)
-
-    # 获取原始用户名（如果当前已经是过往线虚拟用户，还原出原始用户名）
+    # v15.1：会话令牌本身不含密码，切换时间线时直接为目标账号签发新会话，无需再解码密码
     original_username = user_db.get_original_user(user["username"])
 
     if mode == "past":
-        # 切换到过往线：确保虚拟用户存在，返回虚拟用户的 token
-        past_username = user_db.ensure_past_user(original_username)
-        new_token = base64.b64encode(f"{past_username}:{password}".encode()).decode()
-        past_user = user_db.authenticate(past_username, password)
-        return {
-            "success": True, "mode": "past",
-            "token": new_token, "username": past_username,
-            "nickname": past_user.get("nickname", past_username),
-            "is_admin": past_user.get("is_admin", False),
-            "intimacy": past_user.get("intimacy", {}),
-            "message": "已切换到过往线（青梅竹马继承模式），所有数据独立存档"
-        }
+        # 切换到过往线：确保虚拟用户存在，为其签发会话
+        target = user_db.ensure_past_user(original_username)
+        msg = "已切换到过往线（青梅竹马继承模式），所有数据独立存档"
     else:
-        # 切换回新相遇线：返回原始用户的 token
-        new_token = base64.b64encode(f"{original_username}:{password}".encode()).decode()
-        orig_user = user_db.authenticate(original_username, password)
-        return {
-            "success": True, "mode": "new",
-            "token": new_token, "username": original_username,
-            "nickname": orig_user.get("nickname", original_username),
-            "is_admin": orig_user.get("is_admin", False),
-            "intimacy": orig_user.get("intimacy", {}),
-            "message": "已切换到新相遇线，所有数据独立存档"
-        }
+        # 切换回新相遇线：为原始账号签发会话
+        target = original_username
+        msg = "已切换到新相遇线，所有数据独立存档"
+    target_user = user_db._public_user(target)
+    if not target_user:
+        return JSONResponse({"success": False, "error": "目标账号不存在"}, status_code=404)
+    if token.startswith(SessionManager.SESS_PREFIX):
+        session_mgr.revoke(token)  # 旧时间线会话作废
+    return {
+        "success": True, "mode": mode,
+        "token": session_mgr.create(target), "username": target,
+        "nickname": target_user.get("nickname", target),
+        "is_admin": target_user.get("is_admin", False),
+        "intimacy": target_user.get("intimacy", {}),
+        "message": msg
+    }
 # -------------------------- 邮箱注册 / 验证码 / 改密 --------------------------
-def _new_login_payload(username, password):
-    user = user_db.authenticate(username, password)
-    if not user:
-        return None
-    token = base64.b64encode(f"{user['username']}:{password}".encode()).decode()
+def _session_payload(user: Dict[str, Any]) -> Dict[str, Any]:
+    """对已通过认证的用户签发有状态会话令牌，并组装前端需要的字段。"""
+    token = session_mgr.create(user["username"])
     return {
         "success": True, "token": token, "username": user["username"],
         "nickname": user["nickname"], "is_admin": user["is_admin"],
         "intimacy": user.get("intimacy", {}), "qq_bound": user.get("qq_bound", False)
     }
+def _new_login_payload(username, password):
+    user = user_db.authenticate(username, password)
+    return _session_payload(user) if user else None
 
 def _check_code(email, code):
     rec = _verify_codes.get(email)
     if not rec:
         return False, "请先获取验证码"
     if time.time() > rec["expire"]:
+        _verify_codes.pop(email, None)
         return False, "验证码已过期，请重新获取"
     if rec["code"] != str(code).strip():
-        return False, "验证码错误"
+        rec["fails"] = rec.get("fails", 0) + 1  # v15.1：连续输错计数，达到上限作废，防六位数字爆破
+        if rec["fails"] >= CODE_FAIL_LIMIT:
+            _verify_codes.pop(email, None)
+            return False, "验证码错误次数过多已作废，请重新获取"
+        left = CODE_FAIL_LIMIT - rec["fails"]
+        return False, f"验证码错误，还可尝试{left}次"
     return True, ""
 
 @app.post("/api/auth/send-code")
@@ -2877,7 +3138,7 @@ async def auth_send_code(request: Request):
         return JSONResponse({"success": False, "error": "验证码发送失败，请检查邮箱或稍后再试"}, status_code=500)
     _verify_codes[email] = {
         "code": code, "expire": now + _CODE_TTL, "last_send": now,
-        "date": today,
+        "date": today, "fails": 0,
         "count": (rec.get("count", 0) if rec and rec.get("date") == today else 0) + 1
     }
     return {"success": True, "message": "验证码已发送，5分钟内有效"}
@@ -2920,6 +3181,9 @@ async def auth_reset_password(request: Request):
     if not user_db.reset_password(email, new_password):
         return JSONResponse({"success": False, "error": "该邮箱尚未注册"}, status_code=404)
     _verify_codes.pop(email, None)
+    revoked = session_mgr.revoke_user(email)  # v15.1：改密即吊销该账号全部旧会话
+    if revoked:
+        logger.info(f"[安全] 重置密码后吊销 {email} 的 {revoked} 个旧会话")
     return {"success": True, "message": "密码已重置，请用新密码登录"}
 
 @app.post("/api/user/change-password")
@@ -2938,8 +3202,46 @@ async def user_change_password(request: Request):
         return JSONResponse({"success": False, "error": "原密码错误"}, status_code=400)
     if not user_db.reset_password(user["username"], new_pwd):
         return JSONResponse({"success": False, "error": "修改失败"}, status_code=500)
-    new_token = base64.b64encode(f"{user['username']}:{new_pwd}".encode()).decode()
-    return {"success": True, "message": "密码已修改", "token": new_token}
+    # v15.1：改密后吊销该账号全部会话（其他设备被踢下线），再为当前设备签发新会话
+    session_mgr.revoke_user(user["username"])
+    new_token = session_mgr.create(user["username"])
+    return {"success": True, "message": "密码已修改，其他设备已下线", "token": new_token}
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request):
+    """登出：吊销当前会话令牌。"""
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if token.startswith(SessionManager.SESS_PREFIX):
+        session_mgr.revoke(token)
+    return {"success": True}
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    """用当前令牌换取用户资料（一次性登录链接落地、前端恢复登录态时使用）。"""
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    user = user_db.authenticate_token(token)
+    if not user:
+        return JSONResponse({"success": False, "error": "未登录或登录已过期"}, status_code=401)
+    return {
+        "success": True, "username": user["username"],
+        "nickname": user.get("nickname", user["username"]),
+        "is_admin": user.get("is_admin", False),
+        "intimacy": user.get("intimacy", {}),
+        "qq_bound": user.get("qq_bound", False),
+    }
+
+@app.get("/api/auth/magic/{mid}")
+async def auth_magic_login(mid: str):
+    """一次性登录链接：QQ 自动注册/找回时下发，点击即用，用后即焚，成功后跳回前端并带上会话令牌。"""
+    sid = session_mgr.consume_magic(mid)
+    if not sid:
+        return JSONResponse({"success": False, "error": "链接已失效或已被使用，请重新获取"}, status_code=401)
+    # 302 回前端，会话令牌放在 URL hash（不会发到服务器日志/不进 Referer）
+    from urllib.parse import urlencode
+    frag = urlencode({"login_token": sid})
+    base = WEB_BASE_URL.rstrip("/")
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=f"{base}/?{frag}", status_code=302)
 
 # -------------------------- 管理员接口 --------------------------
 @app.post("/api/admin/users")

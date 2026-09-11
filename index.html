@@ -2906,6 +2906,15 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
 
     // ===== 退出 =====
     function logout() {
+      // v15.1：通知后端吊销本次会话令牌（best-effort，不阻塞界面切换）
+      try {
+        if (currentUser && currentUser.token && currentUser.token.startsWith("sess_")) {
+          fetch(`${CONFIG.HTTP_BASE}/api/auth/logout`, {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${currentUser.token}` }
+          }).catch(() => {});
+        }
+      } catch (e) {}
       if (ws) { ws.onclose = null; ws.close(); }
       ws = null;
       currentUser = null;
@@ -3084,10 +3093,40 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       });
     }
 
-    document.addEventListener("DOMContentLoaded", () => {
+    document.addEventListener("DOMContentLoaded", async () => {
       bindEvents();
+      // v15.1 一次性登录链接：地址栏带 login_token 时（QQ 自动注册/找回落地），用它换取登录态并立刻清掉 URL
+      let magicToken = null;
+      try {
+        const u = new URL(location.href);
+        magicToken = u.searchParams.get("login_token");
+        if (magicToken) {
+          u.searchParams.delete("login_token");
+          history.replaceState(null, "", u.pathname + u.search + u.hash);
+        }
+      } catch (e) {}
+      let saved = loadAuth();
+      if (magicToken && (!saved || saved.token !== magicToken)) {
+        try {
+          const r = await fetch(`${CONFIG.HTTP_BASE}/api/auth/me`, {
+            headers: { "Authorization": `Bearer ${magicToken}` }
+          });
+          const d = await r.json().catch(() => ({}));
+          if (r.ok && d.success) {
+            currentUser = {
+              username: d.username,
+              nickname: d.nickname || d.username,
+              role: d.is_admin ? "admin" : "user",
+              token: magicToken,
+              intimacy: d.intimacy || {},
+              qqBound: d.qq_bound || false
+            };
+            saveAuth();
+            saved = currentUser;
+          }
+        } catch (e) { console.warn("一次性登录链接换取登录态失败", e); }
+      }
       // v15.0 自动恢复登录态：刷新页面无需重新登录
-      const saved = loadAuth();
       if (saved && saved.token) {
         currentUser = saved;
         window.__autoRestoring = true;
