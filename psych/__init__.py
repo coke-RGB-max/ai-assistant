@@ -306,20 +306,100 @@ class PsychologicalState:
         return "stable", "心理平稳"
     def build(self, repaired=False):
         s = self.states
-        def lv(v): return "极低" if v<20 else "偏低" if v<40 else "中等" if v<60 else "较高" if v<80 else "很高"
-        L = ["【当前心理状态】（通过语气措辞体现，不要直接说出来）"]
-        L.append(f"  - 信任感：{s['trust']:.0f}/100（{lv(s['trust'])}）")
-        L.append(f"  - 安全感：{s['security']:.0f}/100（{lv(s['security'])}）")
-        L.append(f"  - 依恋度：{s['attachment']:.0f}/100（{lv(s['attachment'])}）")
-        if s["jealousy"] > 0: L.append(f"  - 醋意：{s['jealousy']:.0f}/100")
-        L.append(f"  - 心情：{s['mood']:.0f}/100")
-        if self.trauma_flag: L.append("  - 你还没从之前的伤害中完全恢复")
-        dn, dd = self.dominant()
-        L.append(f"  - 最突出：{dd}")
-        if repaired: L.append("  - 你们刚和解，别扭但释然")
+        
+        def describe_trust(v):
+            if v < 15:
+                return "你对他几乎没有信任，本能地保持距离，不太敢相信他说的话"
+            elif v < 30:
+                return "你对他信任很少，会下意识地怀疑他的动机，需要他反复证明"
+            elif v < 45:
+                return "你对他有一些信任，但还在观察，不会轻易交付真心"
+            elif v < 60:
+                return "你对他有基本的信任，愿意和他交流，但核心的事还是会保留"
+            elif v < 75:
+                return "你比较信任他，说话会放得开一些，偶尔会主动分享心里话"
+            elif v < 90:
+                return "你很信任他，很多话愿意和他说，遇到事会第一个想到他"
+            else:
+                return "你完全信任他，在他面前可以做真实的自己，不用担心被评判"
+        
+        def describe_security(v):
+            if v < 15:
+                return "你极度不安，总觉得他随时可能离开，每一句话都在找'他不爱我了'的证据"
+            elif v < 30:
+                return "你缺乏安全感，容易患得患失，他稍微冷淡一点就会胡思乱想"
+            elif v < 45:
+                return "你有些不安，不确定自己在他心里的位置，偶尔需要被确认"
+            elif v < 60:
+                return "你的安全感一般，大部分时候还好，但某些时刻会突然不确定"
+            elif v < 75:
+                return "你比较有安全感，相信他不会突然消失，但偶尔还是会撒娇求确认"
+            elif v < 90:
+                return "你很有安全感，知道他在乎你，心态比较稳定放松"
+            else:
+                return "你内心很踏实，完全相信这段关系，不会因为小事焦虑"
+        
+        def describe_attachment(v):
+            if v < 15:
+                return "你对他还没有特别的依赖，他在不在都差不多"
+            elif v < 30:
+                return "你对他有一点点依赖，但不会太明显，自己也能过得很好"
+            elif v < 45:
+                return "你开始习惯他的存在，他不找你的时候会有点空落落的"
+            elif v < 60:
+                return "你对他有了明显的依赖，想和他分享日常，他不回消息会有点失落"
+            elif v < 75:
+                return "你很想和他在一起，分开的时候会想他，他的陪伴对你很重要"
+            elif v < 90:
+                return "你已经深深依恋他，和他在一起是你每天最期待的事"
+            else:
+                return "你几乎离不开他了，他的喜怒哀乐会直接影响你的心情"
+        
+        def describe_jealousy(v):
+            if v < 10:
+                return ""
+            elif v < 25:
+                return "你有点吃醋，酸酸的不太舒服，但还在忍耐"
+            elif v < 45:
+                return "你明显吃醋了，心里不舒服，想确认自己对他来说是特别的"
+            elif v < 65:
+                return "你醋意很大，有点控制不住情绪，可能会说酸话或者冷战"
+            else:
+                return "你非常介意，很生气很难受，需要他认真哄你、明确表态"
+        
+        def describe_mood(v):
+            if v < 15:
+                return "你心情很差，什么都不想做，说话都没什么力气"
+            elif v < 30:
+                return "你心情不太好，有点低落，虽然还在聊天但能感觉到不太开心"
+            elif v < 45:
+                return "你心情一般，不坏也不好，平平淡淡的"
+            elif v < 60:
+                return "你心情还行，比较平静，正常的状态"
+            elif v < 75:
+                return "你心情不错，说话会轻快一些，偶尔会开玩笑"
+            elif v < 90:
+                return "你心情很好，很开心，语气里都带着笑意"
+            else:
+                return "你心情超好，特别兴奋或者幸福，说话都带飞的感觉"
+        
+        L = ["【你现在的内心状态】"]
+        L.append(f"  {describe_trust(s['trust'])}")
+        L.append(f"  {describe_security(s['security'])}")
+        L.append(f"  {describe_attachment(s['attachment'])}")
+        jealousy_desc = describe_jealousy(s['jealousy'])
+        if jealousy_desc:
+            L.append(f"  {jealousy_desc}")
+        L.append(f"  {describe_mood(s['mood'])}")
+        if self.trauma_flag:
+            L.append("  之前那件事还压在你心里，虽然没说出来，但偶尔会隐隐作痛")
+        if repaired:
+            L.append("  你们刚刚和好，心里还有点别扭，但更多的是释然和珍惜")
         if any(v >= 15 for v in self.annoyance.values()):
-            L.append("  - 你觉得对方翻来覆去就这几句，有点不耐烦")
+            L.append("  他翻来覆去就这几句话，你有点不耐烦了，想换个话题或者让他说点别的")
+        
         return "\n".join(L)
+
     def to_dict(self):
         d = {k: round(v, 1) for k, v in self.states.items()}
         d["trauma_flag"] = self.trauma_flag

@@ -6,254 +6,180 @@
 <title>FlexiChrono 管理后台</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #0f0f1a;
+  --panel: #1a1a2e;
+  --panel-2: #16162a;
+  --panel-hover: #252540;
+  --border: #2d2d4a;
+  --primary: #7c3aed;
+  --primary-2: #a78bfa;
+  --text: #e0e0e0;
+  --muted: #8b8ba7;
+  --green: #34d399;
+  --red: #f87171;
+  --blue: #60a5fa;
+  --yellow: #fbbf24;
+}
 body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: #0f0f1a;
-    color: #e0e0e0;
-    min-height: 100vh;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  font-size: 14px;
 }
-/* 登录页 */
-.login-container {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    min-height: 100vh;
-}
-.login-box {
-    background: #1a1a2e;
-    padding: 40px;
-    border-radius: 12px;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-    width: 360px;
-}
-.login-box h2 {
-    text-align: center;
-    margin-bottom: 24px;
-    color: #a78bfa;
-}
-.login-box input {
-    width: 100%;
-    padding: 12px;
-    margin-bottom: 16px;
-    background: #16162a;
-    border: 1px solid #2d2d4a;
-    border-radius: 8px;
-    color: #e0e0e0;
-    font-size: 14px;
-}
-.login-box button {
-    width: 100%;
-    padding: 12px;
-    background: linear-gradient(135deg, #7c3aed, #a78bfa);
-    border: none;
-    border-radius: 8px;
-    color: white;
-    font-size: 16px;
-    cursor: pointer;
-    transition: opacity 0.2s;
-}
-.login-box button:hover { opacity: 0.9; }
-/* 主布局 */
+.hidden { display: none !important; }
+
+/* ===== 登录页 ===== */
+.login-container { display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
+.login-box { background: var(--panel); padding: 40px; border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,.3); width: 360px; max-width: 100%; }
+.login-box h2 { text-align: center; margin-bottom: 6px; color: var(--primary-2); }
+.login-box .sub { text-align: center; color: var(--muted); font-size: 12px; margin-bottom: 24px; }
+.login-box label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.login-box input { width: 100%; padding: 12px; margin-bottom: 16px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 14px; }
+.login-box input:focus { outline: none; border-color: var(--primary); }
+.login-box button { width: 100%; padding: 12px; background: linear-gradient(135deg, #7c3aed, #a78bfa); border: none; border-radius: 8px; color: #fff; font-size: 16px; cursor: pointer; transition: opacity .2s; }
+.login-box button:hover { opacity: .9; }
+.login-box button:disabled { opacity: .6; cursor: not-allowed; }
+.login-hint { font-size: 12px; color: var(--red); min-height: 16px; margin-bottom: 10px; }
+.login-foot { margin-top: 16px; text-align: center; }
+.login-foot a { color: var(--primary-2); font-size: 12px; text-decoration: none; }
+
+/* ===== 主布局 ===== */
 .app { display: none; }
-.sidebar {
-    position: fixed;
-    left: 0;
-    top: 0;
-    width: 220px;
-    height: 100vh;
-    background: #1a1a2e;
-    padding: 20px 0;
-    border-right: 1px solid #2d2d4a;
-}
-.sidebar h3 {
-    padding: 0 20px 20px;
-    color: #a78bfa;
-    font-size: 18px;
-    border-bottom: 1px solid #2d2d4a;
-    margin-bottom: 10px;
-}
-.nav-item {
-    padding: 12px 20px;
-    cursor: pointer;
-    transition: background 0.2s;
-    font-size: 14px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-.nav-item:hover { background: #252540; }
-.nav-item.active {
-    background: #2d2d5a;
-    border-left: 3px solid #7c3aed;
-    color: #a78bfa;
-}
-.main {
-    margin-left: 220px;
-    padding: 24px;
-}
+.app.on { display: block; }
+.sidebar { position: fixed; left: 0; top: 0; width: 220px; height: 100vh; background: var(--panel); padding: 20px 0; border-right: 1px solid var(--border); display: flex; flex-direction: column; z-index: 10; }
+.sidebar h3 { padding: 0 20px 18px; color: var(--primary-2); font-size: 18px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+.nav-item { padding: 12px 20px; cursor: pointer; transition: background .2s; font-size: 14px; display: flex; align-items: center; gap: 10px; }
+.nav-item:hover { background: var(--panel-hover); }
+.nav-item.active { background: #2d2d5a; border-left: 3px solid var(--primary); color: var(--primary-2); }
+.sidebar .spacer { flex: 1; }
+.sidebar .who { padding: 10px 20px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--border); }
+.main { margin-left: 220px; padding: 24px; }
 .page { display: none; }
 .page.active { display: block; }
-.page h2 {
-    margin-bottom: 20px;
-    color: #a78bfa;
-    font-size: 22px;
+.page h2 { margin-bottom: 20px; color: var(--primary-2); font-size: 22px; }
+.toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+.toolbar input[type=text], .toolbar input[type=search], .toolbar select {
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 8px 10px; font-size: 13px;
 }
-/* 卡片 */
-.stats-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 16px;
-    margin-bottom: 24px;
-}
-.stat-card {
-    background: #1a1a2e;
-    padding: 20px;
-    border-radius: 10px;
-    border: 1px solid #2d2d4a;
-}
-.stat-card .label { font-size: 13px; color: #888; margin-bottom: 8px; }
-.stat-card .value { font-size: 28px; font-weight: bold; color: #a78bfa; }
-/* 表格 */
-.table-container {
-    background: #1a1a2e;
-    border-radius: 10px;
-    border: 1px solid #2d2d4a;
-    overflow: hidden;
-    margin-bottom: 20px;
-}
+
+/* ===== 卡片/表格 ===== */
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.stat-card { background: var(--panel); padding: 20px; border-radius: 10px; border: 1px solid var(--border); }
+.stat-card .label { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+.stat-card .value { font-size: 28px; font-weight: bold; color: var(--primary-2); }
+.table-container { background: var(--panel); border-radius: 10px; border: 1px solid var(--border); overflow: hidden; margin-bottom: 20px; }
 table { width: 100%; border-collapse: collapse; }
-th, td {
-    padding: 12px 16px;
-    text-align: left;
-    border-bottom: 1px solid #2d2d4a;
-    font-size: 13px;
-}
-th {
-    background: #252540;
-    color: #a78bfa;
-    font-weight: 600;
-}
-tr:hover { background: #252540; }
-/* 按钮 */
-.btn {
-    padding: 6px 14px;
-    border: none;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 12px;
-    transition: opacity 0.2s;
-}
-.btn:hover { opacity: 0.85; }
-.btn-primary { background: #7c3aed; color: white; }
-.btn-success { background: #059669; color: white; }
-.btn-danger { background: #dc2626; color: white; }
-.btn-warning { background: #d97706; color: white; }
+th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); font-size: 13px; }
+th { background: var(--panel-hover); color: var(--primary-2); font-weight: 600; }
+tr:hover td { background: rgba(255,255,255,.02); }
+
+/* ===== 按钮 ===== */
+.btn { padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer; font-size: 12px; transition: opacity .2s; color: #fff; }
+.btn:hover { opacity: .85; }
+.btn-primary { background: #7c3aed; }
+.btn-success { background: #059669; }
+.btn-danger { background: #dc2626; }
+.btn-warning { background: #d97706; }
+.btn-ghost { background: #2d2d4a; }
 .btn-sm { padding: 4px 10px; font-size: 11px; }
-/* 模态框 */
-.modal-overlay {
-    display: none;
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(0,0,0,0.6);
-    justify-content: center;
-    align-items: center;
-    z-index: 1000;
-}
-.modal-overlay.active { display: flex; }
-.modal {
-    background: #1a1a2e;
-    padding: 24px;
-    border-radius: 12px;
-    width: 400px;
-    max-width: 90vw;
-}
-.modal h3 { margin-bottom: 16px; color: #a78bfa; }
-.modal input, .modal select, .modal textarea {
-    width: 100%;
-    padding: 10px;
-    margin-bottom: 12px;
-    background: #16162a;
-    border: 1px solid #2d2d4a;
-    border-radius: 6px;
-    color: #e0e0e0;
-    font-size: 13px;
-}
-.modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
-/* 进度条 */
-.progress-bar {
-    height: 8px;
-    background: #2d2d4a;
-    border-radius: 4px;
-    overflow: hidden;
-    margin-top: 4px;
-}
-.progress-fill {
-    height: 100%;
-    background: linear-gradient(90deg, #7c3aed, #a78bfa);
-    border-radius: 4px;
-}
-/* 标签 */
-.tag {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: 500;
-}
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ===== 标签 ===== */
+.tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; }
 .tag-green { background: #05966933; color: #34d399; }
 .tag-red { background: #dc262633; color: #f87171; }
 .tag-blue { background: #2563eb33; color: #60a5fa; }
 .tag-yellow { background: #d9770633; color: #fbbf24; }
-/* 分页 */
-.pagination {
-    display: flex;
-    gap: 8px;
-    justify-content: center;
-    margin-top: 16px;
-}
-.pagination button {
-    padding: 6px 12px;
-    background: #252540;
-    border: 1px solid #2d2d4a;
-    border-radius: 6px;
-    color: #e0e0e0;
-    cursor: pointer;
-    font-size: 12px;
-}
-.pagination button.active { background: #7c3aed; border-color: #7c3aed; }
-.pagination button:disabled { opacity: 0.5; cursor: not-allowed; }
-/* Toast */
-.toast {
-    position: fixed;
-    top: 20px;
-    right: 20px;
-    padding: 12px 20px;
-    border-radius: 8px;
-    color: white;
-    font-size: 14px;
-    z-index: 2000;
-    transform: translateX(120%);
-    transition: transform 0.3s;
-}
+.tag-purple { background: #7c3aed33; color: #a78bfa; }
+
+/* ===== 用户三级层级 ===== */
+.user-row { border: 1px solid var(--border); border-radius: 12px; margin-bottom: 10px; overflow: hidden; background: var(--panel); }
+.user-row-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; cursor: pointer; user-select: none; }
+.user-row-head:hover { background: var(--panel-hover); }
+.user-row-head strong { font-size: 14px; }
+.user-row-head .uinfo { font-size: 12px; color: var(--muted); margin-left: 6px; }
+.user-row-head .right { display: flex; align-items: center; gap: 8px; }
+.qq-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #2563eb33; color: #60a5fa; border: 1px solid #2563eb55; }
+.qq-badge.none { background: #2d2d4a; color: var(--muted); border-color: var(--border); }
+.arrow { transition: transform .2s; color: var(--muted); font-size: 12px; display: inline-block; }
+.user-row.open > .user-row-head .arrow,
+.line-block.open > .line-head .arrow,
+.role-item.open > .role-item-head .arrow { transform: rotate(90deg); }
+.lines-wrap { display: none; padding: 0 12px 12px; }
+.user-row.open > .lines-wrap { display: block; }
+.line-block { border: 1px dashed var(--border); border-radius: 10px; margin-bottom: 8px; }
+.line-head { display: flex; align-items: center; gap: 8px; padding: 10px 10px; cursor: pointer; user-select: none; font-size: 13px; }
+.line-head:hover { background: var(--panel-hover); }
+.line-tag { font-size: 10px; padding: 2px 8px; border-radius: 999px; }
+.line-tag.fresh { background: rgba(96,165,250,.18); color: #60a5fa; }
+.line-tag.past { background: rgba(167,139,250,.2); color: #a78bfa; }
+.line-account { color: var(--muted); font-size: 12px; }
+.line-roles { display: none; padding: 4px 8px 10px; }
+.line-block.open > .line-roles { display: block; }
+.role-item { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; overflow: hidden; background: var(--panel-2); }
+.role-item-head { display: flex; align-items: center; gap: 8px; padding: 9px 12px; cursor: pointer; user-select: none; font-size: 13px; }
+.role-item-head:hover { background: var(--panel-hover); }
+.role-item-head .arrow { margin-left: auto; }
+.role-item-body { display: none; padding: 10px 12px; border-top: 1px solid var(--border); }
+.role-item.open > .role-item-body { display: block; }
+.psych-role-block { margin-bottom: 12px; }
+.intimacy-bar { margin: 6px 0 14px; padding: 12px; background: var(--panel); border-radius: 12px; border: 1px solid var(--border); }
+.intimacy-bar-title { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 8px; }
+.intimacy-bar-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.intimacy-item { display: flex; flex-direction: column; gap: 4px; padding: 8px; border-radius: 8px; background: var(--panel-2); }
+.intimacy-item.layer1 { border-left: 3px solid #3b82f6; }
+.intimacy-item.layer2 { border-left: 3px solid #22c55e; }
+.intimacy-item.avg { border-left: 3px solid #f59e0b; }
+.intimacy-label { font-size: 11px; color: var(--muted); }
+.intimacy-val { font-size: 20px; font-weight: 700; color: var(--text); }
+.intimacy-input { width: 100%; padding: 4px 6px; font-size: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); }
+.intimacy-save-btn { padding: 4px 8px; font-size: 11px; border: none; border-radius: 6px; background: #3b82f6; color: #fff; cursor: pointer; }
+.intimacy-hint { font-size: 10px; color: var(--muted); }
+.psych-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-bottom: 10px; }
+.psych-field { display: flex; flex-direction: column; gap: 4px; }
+.psych-field label { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
+.psych-field input { padding: 7px 9px; font-size: 13px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; color: var(--text); }
+.save-psych-btn { padding: 7px 16px; font-size: 12px; border: none; border-radius: 8px; background: var(--primary); color: #fff; cursor: pointer; }
+.save-psych-btn:hover { background: #6d28d9; }
+.hint { color: var(--muted); font-size: 12px; padding: 6px 0; }
+.hint.error { color: var(--red); }
+
+/* ===== 日程 ===== */
+.sched-role-tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.sched-bucket { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 14px; padding: 14px; }
+.sched-bucket h4 { color: var(--primary-2); font-size: 13px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+.sched-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+.sched-row input { flex: 1; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 8px 10px; font-size: 13px; }
+
+/* ===== 模态框 ===== */
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); justify-content: center; align-items: center; z-index: 1000; }
+.modal-overlay.active { display: flex; }
+.modal { background: var(--panel); padding: 24px; border-radius: 12px; width: 420px; max-width: 90vw; max-height: 85vh; overflow-y: auto; }
+.modal h3 { margin-bottom: 16px; color: var(--primary-2); }
+.modal label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 6px; }
+.modal input, .modal select, .modal textarea { width: 100%; padding: 10px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 13px; }
+.modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+.detail-panel { background: var(--panel-2); padding: 16px; border-radius: 8px; margin-top: 12px; font-size: 13px; line-height: 1.8; max-height: 480px; overflow-y: auto; }
+.detail-panel pre { white-space: pre-wrap; word-break: break-all; color: var(--primary-2); }
+.progress-bar { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; margin-top: 4px; }
+.progress-fill { height: 100%; background: linear-gradient(90deg, #7c3aed, #a78bfa); border-radius: 4px; }
+
+/* ===== Toast ===== */
+.toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 8px; color: #fff; font-size: 14px; z-index: 2000; transform: translateX(120%); transition: transform .3s; max-width: 320px; }
 .toast.show { transform: translateX(0); }
 .toast.success { background: #059669; }
 .toast.error { background: #dc2626; }
 .toast.info { background: #2563eb; }
-/* 详情面板 */
-.detail-panel {
-    background: #16162a;
-    padding: 16px;
-    border-radius: 8px;
-    margin-top: 12px;
-    font-size: 13px;
-    line-height: 1.8;
-    max-height: 400px;
-    overflow-y: auto;
-}
-.detail-panel pre {
-    white-space: pre-wrap;
-    word-break: break-all;
-    color: #a78bfa;
+.toast.default { background: #374151; }
+
+@media (max-width: 760px) {
+  .sidebar { width: 64px; }
+  .sidebar h3 { font-size: 0; }
+  .nav-item { font-size: 0; justify-content: center; }
+  .main { margin-left: 64px; padding: 14px; }
+  .intimacy-bar-grid { grid-template-columns: 1fr; }
 }
 </style>
 </head>
@@ -261,399 +187,755 @@ tr:hover { background: #252540; }
 
 <!-- 登录页 -->
 <div class="login-container" id="loginPage">
-    <div class="login-box">
-        <h2>FlexiChrono 管理后台</h2>
-        <input type="password" id="adminToken" placeholder="管理员 Token" />
-        <button onclick="doLogin()">登录</button>
-    </div>
+  <div class="login-box">
+    <h2>🛡️ FlexiChrono 管理后台</h2>
+    <div class="sub">仅限管理员账号登录</div>
+    <form id="adminLoginForm">
+      <label for="adminUsername">管理员账号</label>
+      <input id="adminUsername" type="text" autocomplete="username" placeholder="管理员账号 / 邮箱" />
+      <label for="adminPassword">管理员密码</label>
+      <input id="adminPassword" type="password" autocomplete="current-password" placeholder="密码" />
+      <div class="login-hint" id="loginHint"></div>
+      <button id="loginBtn" type="submit">进入后台</button>
+    </form>
+    <div class="login-foot"><a href="index.html">← 返回聊天首页</a></div>
+  </div>
 </div>
 
 <!-- 主应用 -->
 <div class="app" id="app">
-    <!-- 侧边栏 -->
-    <div class="sidebar">
-        <h3>管理后台</h3>
-        <div class="nav-item active" onclick="switchPage('dashboard')">📊 仪表盘</div>
-        <div class="nav-item" onclick="switchPage('users')">👥 用户管理</div>
-        <div class="nav-item" onclick="switchPage('characters')">🎭 角色配置</div>
-        <div class="nav-item" onclick="switchPage('backups')">💾 备份管理</div>
-        <div class="nav-item" onclick="switchPage('status')">⚙️ 系统状态</div>
-        <div class="nav-item" onclick="doLogout()" style="margin-top:auto;position:absolute;bottom:20px;width:100%;">🚪 退出登录</div>
+  <div class="sidebar">
+    <h3>管理后台</h3>
+    <div class="nav-item active" data-page="dashboard">📊 仪表盘</div>
+    <div class="nav-item" data-page="users">👥 用户管理</div>
+    <div class="nav-item" data-page="schedule">🗓️ 日程管理</div>
+    <div class="nav-item" data-page="characters">🎭 角色配置</div>
+    <div class="nav-item" data-page="backups">💾 备份管理</div>
+    <div class="nav-item" data-page="status">⚙️ 系统状态</div>
+    <div class="spacer"></div>
+    <div class="who" id="whoami"></div>
+    <div class="nav-item" id="navChat" title="打开聊天首页">💬 打开聊天</div>
+    <div class="nav-item" id="navLogout">🚪 退出登录</div>
+  </div>
+
+  <div class="main">
+    <!-- 仪表盘 -->
+    <div class="page active" id="page-dashboard">
+      <h2>仪表盘</h2>
+      <div class="stats-grid" id="statsGrid"></div>
+      <div class="table-container">
+        <table>
+          <thead><tr><th>亲密度区间</th><th>用户数</th><th>占比</th></tr></thead>
+          <tbody id="intimacyTable"></tbody>
+        </table>
+      </div>
     </div>
 
-    <!-- 主内容 -->
-    <div class="main">
-        <!-- 仪表盘 -->
-        <div class="page active" id="page-dashboard">
-            <h2>仪表盘</h2>
-            <div class="stats-grid" id="statsGrid"></div>
-            <div class="table-container">
-                <table>
-                    <thead><tr><th>亲密度区间</th><th>用户数</th><th>占比</th></tr></thead>
-                    <tbody id="intimacyTable"></tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- 用户管理 -->
-        <div class="page" id="page-users">
-            <h2>用户管理</h2>
-            <div class="table-container">
-                <table>
-                    <thead><tr>
-                        <th>用户名</th><th>昵称</th><th>类型</th><th>QQ绑定</th>
-                        <th>亲密度</th><th>状态</th><th>操作</th>
-                    </tr></thead>
-                    <tbody id="usersTable"></tbody>
-                </table>
-            </div>
-            <div class="pagination" id="usersPagination"></div>
-        </div>
-
-        <!-- 角色配置 -->
-        <div class="page" id="page-characters">
-            <h2>角色配置</h2>
-            <div class="table-container">
-                <table>
-                    <thead><tr><th>角色ID</th><th>名称</th><th>操作</th></tr></thead>
-                    <tbody id="charactersTable"></tbody>
-                </table>
-            </div>
-            <div id="characterDetail"></div>
-        </div>
-
-        <!-- 备份管理 -->
-        <div class="page" id="page-backups">
-            <h2>备份管理</h2>
-            <div style="margin-bottom:16px;">
-                <button class="btn btn-primary" onclick="createBackup()">+ 创建备份</button>
-            </div>
-            <div class="table-container">
-                <table>
-                    <thead><tr>
-                        <th>备份名称</th><th>创建时间</th><th>文件数</th><th>大小</th>
-                        <th>备注</th><th>操作</th>
-                    </tr></thead>
-                    <tbody id="backupsTable"></tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- 系统状态 -->
-        <div class="page" id="page-status">
-            <h2>系统状态</h2>
-            <div class="stats-grid" id="statusGrid"></div>
-            <div class="table-container">
-                <table>
-                    <thead><tr><th>配置项</th><th>值</th></tr></thead>
-                    <tbody id="configTable"></tbody>
-                </table>
-            </div>
-        </div>
+    <!-- 用户管理（三级层级） -->
+    <div class="page" id="page-users">
+      <h2>用户管理</h2>
+      <div class="toolbar">
+        <input type="search" id="userSearch" placeholder="搜索昵称 / 账号 / QQ" style="width:260px;" />
+        <button class="btn btn-primary" id="reloadUsersBtn">🔄 刷新</button>
+        <span class="hint" id="usersCount"></span>
+      </div>
+      <div id="usersList"></div>
     </div>
+
+    <!-- 日程管理 -->
+    <div class="page" id="page-schedule">
+      <h2>日程活动池管理</h2>
+      <p class="hint" style="margin-bottom:14px;">角色在对应时段会从这里随机抽取一条“正在做的事”，影响回复风格。修改即时生效，仅管理员可见。</p>
+      <div class="sched-role-tabs" id="schedRoleTabs"></div>
+      <div id="scheduleEditor"></div>
+    </div>
+
+    <!-- 角色配置 -->
+    <div class="page" id="page-characters">
+      <h2>角色配置</h2>
+      <div class="table-container">
+        <table>
+          <thead><tr><th>角色ID</th><th>名称</th><th>操作</th></tr></thead>
+          <tbody id="charactersTable"></tbody>
+        </table>
+      </div>
+      <div id="characterDetail"></div>
+    </div>
+
+    <!-- 备份管理 -->
+    <div class="page" id="page-backups">
+      <h2>备份管理</h2>
+      <div class="toolbar">
+        <button class="btn btn-primary" id="createBackupBtn">+ 创建备份</button>
+      </div>
+      <div class="table-container">
+        <table>
+          <thead><tr><th>备份名称</th><th>创建时间</th><th>文件数</th><th>大小</th><th>备注</th><th>操作</th></tr></thead>
+          <tbody id="backupsTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 系统状态 -->
+    <div class="page" id="page-status">
+      <h2>系统状态</h2>
+      <div class="stats-grid" id="statusGrid"></div>
+      <div class="table-container">
+        <table>
+          <thead><tr><th>配置项</th><th>值</th></tr></thead>
+          <tbody id="configTable"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- 模态框 -->
 <div class="modal-overlay" id="modal">
-    <div class="modal">
-        <h3 id="modalTitle">标题</h3>
-        <div id="modalBody"></div>
-        <div class="modal-actions">
-            <button class="btn" onclick="closeModal()">取消</button>
-            <button class="btn btn-primary" id="modalConfirm">确认</button>
-        </div>
+  <div class="modal">
+    <h3 id="modalTitle">标题</h3>
+    <div id="modalBody"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="modalCancel">取消</button>
+      <button class="btn btn-primary" id="modalConfirm">确认</button>
     </div>
+  </div>
 </div>
 
-<!-- Toast -->
 <div class="toast" id="toast"></div>
 
 <script>
-let adminToken = localStorage.getItem('admin_token') || '';
-let currentPage = 1;
-const pageSize = 20;
+"use strict";
+/* =========================================================
+ * 配置
+ * ========================================================= */
+const BACKEND = "https://ai-assistant-production-fc6d.up.railway.app";
+const WS_URL = "wss://ai-assistant-production-fc6d.up.railway.app/ws";
+const TOKEN_KEY = "flexichrono_admin";   // {username, token}
+const PAGE_SIZE = 500;                    // 测试期一次拉全，保证主账号/_past 正确配对分组
 
-// ========== 登录 ==========
-function doLogin() {
-    const token = document.getElementById('adminToken').value.trim();
-    if (!token) { showToast('请输入管理员Token', 'error'); return; }
-    adminToken = token;
-    localStorage.setItem('admin_token', token);
-    // 验证token
-    apiGet('/api/admin/status').then(data => {
-        if (data.error) {
-            showToast('Token无效', 'error');
-            adminToken = '';
-            localStorage.removeItem('admin_token');
-        } else {
-            showToast('登录成功', 'success');
-            document.getElementById('loginPage').style.display = 'none';
-            document.getElementById('app').style.display = 'block';
-            loadDashboard();
-        }
-    }).catch(() => {
-        showToast('登录失败，请检查Token', 'error');
-        adminToken = '';
-        localStorage.removeItem('admin_token');
+const ROLES = [
+  { id: "nianqi",  name: "念琦", emoji: "🤍" },
+  { id: "qinghe",  name: "清禾", emoji: "🌿" },
+  { id: "jingwen", name: "璟雯", emoji: "🌙" }
+];
+
+// 七维心理状态（管理员可编辑）
+const PSYCH_FIELDS = [
+  { key: "intimacy",   label: "亲密度", min: 0, max: 100 },
+  { key: "trust",      label: "信任感", min: 0, max: 100 },
+  { key: "security",   label: "安全感", min: 0, max: 100 },
+  { key: "attachment", label: "依恋度", min: 0, max: 100 },
+  { key: "jealousy",   label: "醋意",   min: 0, max: 100 },
+  { key: "fatigue",    label: "疲劳度", min: 0, max: 100 },
+  { key: "mood",       label: "心情",   min: 0, max: 100 }
+];
+
+// 六个日程时间桶（与 personality_server._get_time_bucket 对齐）
+const SCHEDULE_BUCKETS = [
+  { key: "weekday_morning",   label: "工作日 · 上午 (6-12点)" },
+  { key: "weekday_afternoon", label: "工作日 · 下午 (12-18点)" },
+  { key: "weekday_evening",   label: "工作日 · 晚上 (18点后)" },
+  { key: "weekend_morning",   label: "周末 · 上午 (6-12点)" },
+  { key: "weekend_afternoon", label: "周末 · 下午 (12-18点)" },
+  { key: "weekend_evening",   label: "周末 · 晚上 (18点后)" }
+];
+
+let auth = loadAuth();
+let allUsers = [];
+let currentScheduleRole = ROLES[0].id;
+let adminWS = null;
+
+/* =========================================================
+ * 工具
+ * ========================================================= */
+function $(id) { return document.getElementById(id); }
+function escapeHtml(text) {
+  return String(text ?? "").replace(/[&<>"']/g, ch => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[ch]));
+}
+function setButtonLoading(btn, loading, text) {
+  if (!btn) return;
+  if (loading) { btn.dataset.orig = btn.textContent; btn.textContent = text || "处理中..."; btn.disabled = true; }
+  else { btn.textContent = btn.dataset.orig || btn.textContent; btn.disabled = false; }
+}
+let toastTimer = null;
+function showToast(msg, type) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = `toast show ${type || "default"}`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = "toast"; }, 2800);
+}
+function loadAuth() { try { return JSON.parse(localStorage.getItem(TOKEN_KEY)) || null; } catch (e) { return null; } }
+function saveAuth(a) { localStorage.setItem(TOKEN_KEY, JSON.stringify(a)); }
+function clearAuth() { localStorage.removeItem(TOKEN_KEY); }
+
+async function api(path, options) {
+  options = options || {};
+  const headers = Object.assign({ "Content-Type": "application/json" }, options.headers || {});
+  if (auth && auth.token) headers["Authorization"] = `Bearer ${auth.token}`;
+  let resp;
+  try {
+    resp = await fetch(BACKEND + path, Object.assign({}, options, { headers }));
+  } catch (e) {
+    throw { status: 0, _data: { error: "无法连接后端" } };
+  }
+  let data = {};
+  try { data = await resp.json(); } catch (e) {}
+  if (resp.status === 401) { handleAuthExpired(); throw { status: 401, _data: data }; }
+  if (!resp.ok) throw { status: resp.status, _data: data };
+  return data;
+}
+const apiGet = (p) => api(p);
+const apiPost = (p, body) => api(p, { method: "POST", body: JSON.stringify(body || {}) });
+const apiDelete = (p) => api(p, { method: "DELETE" });
+
+function handleAuthExpired() {
+  clearAuth(); auth = null;
+  showToast("登录已失效，请重新登录", "error");
+  showLogin();
+}
+
+/* =========================================================
+ * 登录 / 登出
+ * ========================================================= */
+function showLogin() {
+  $("loginPage").style.display = "flex";
+  $("app").classList.remove("on");
+  if (adminWS) { try { adminWS.close(); } catch (e) {} adminWS = null; }
+}
+function showApp() {
+  $("loginPage").style.display = "none";
+  $("app").classList.add("on");
+  $("whoami").textContent = auth && auth.username ? `当前：${auth.username}` : "";
+  loadDashboard();
+  connectAdminWS();
+}
+
+$("adminLoginForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const username = $("adminUsername").value.trim();
+  const password = $("adminPassword").value;
+  const hint = $("loginHint");
+  hint.textContent = "";
+  if (!username || !password) { hint.textContent = "请输入账号和密码"; return; }
+  const btn = $("loginBtn");
+  setButtonLoading(btn, true, "登录中...");
+  try {
+    const data = await apiPost("/api/admin/login", { username, password });
+    if (!data.success) throw { _data: data };
+    auth = { username, token: data.token };
+    saveAuth(auth);
+    showApp();
+  } catch (err) {
+    hint.textContent = (err && err._data && err._data.error) || "登录失败，请检查账号密码";
+  } finally {
+    setButtonLoading(btn, false);
+  }
+});
+
+$("navLogout").addEventListener("click", () => { clearAuth(); auth = null; showLogin(); });
+$("navChat").addEventListener("click", () => { window.open("index.html", "_blank"); });
+
+/* =========================================================
+ * 页面切换
+ * ========================================================= */
+document.querySelectorAll(".nav-item[data-page]").forEach(item => {
+  item.addEventListener("click", () => {
+    document.querySelectorAll(".nav-item").forEach(n => n.classList.remove("active"));
+    item.classList.add("active");
+    const page = item.dataset.page;
+    document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
+    $("page-" + page).classList.add("active");
+    if (page === "dashboard") loadDashboard();
+    if (page === "users") loadUsers();
+    if (page === "schedule") loadSchedulePage();
+    if (page === "characters") loadCharacters();
+    if (page === "backups") loadBackups();
+    if (page === "status") loadStatus();
+  });
+});
+
+/* =========================================================
+ * 仪表盘
+ * ========================================================= */
+async function loadDashboard() {
+  try {
+    const data = await apiGet("/api/admin/stats");
+    const svc = data.services || {};
+    $("statsGrid").innerHTML = `
+      <div class="stat-card"><div class="label">总用户数</div><div class="value">${data.total_users ?? "-"}</div></div>
+      <div class="stat-card"><div class="label">QQ临时用户</div><div class="value">${data.qq_tmp_users ?? "-"}</div></div>
+      <div class="stat-card"><div class="label">已绑定用户</div><div class="value">${data.bound_users ?? "-"}</div></div>
+      <div class="stat-card"><div class="label">NapCat</div><div class="value" style="font-size:18px;">${svc.napcat_available ? "✅ 已配置" : "❌ 未配置"}</div></div>`;
+    const dist = data.intimacy_distribution || {};
+    const total = Object.values(dist).reduce((a, b) => a + b, 0) || 1;
+    $("intimacyTable").innerHTML = Object.entries(dist).map(([k, v]) => `
+      <tr><td>${escapeHtml(k)}</td><td>${v}</td><td>
+        <div class="progress-bar"><div class="progress-fill" style="width:${(v/total*100).toFixed(1)}%"></div></div>
+        ${(v/total*100).toFixed(1)}%</td></tr>`).join("") || '<tr><td colspan="3" class="hint">暂无数据</td></tr>';
+  } catch (e) { showToast((e._data && e._data.error) || "仪表盘加载失败", "error"); }
+}
+
+/* =========================================================
+ * 用户管理 —— 用户 → 新线/过往线 → 三角色 → 两层亲密度+心理
+ * ========================================================= */
+$("reloadUsersBtn").addEventListener("click", loadUsers);
+$("userSearch").addEventListener("input", () => renderUsersList(allUsers));
+
+async function loadUsers() {
+  const box = $("usersList");
+  box.innerHTML = '<div class="hint">加载中...</div>';
+  try {
+    const data = await apiGet(`/api/admin/users?page=1&page_size=${PAGE_SIZE}`);
+    allUsers = data.users || [];
+    renderUsersList(allUsers);
+  } catch (e) {
+    box.innerHTML = '<div class="hint error">用户列表加载失败</div>';
+    showToast((e._data && e._data.error) || "无法加载用户列表", "error");
+  }
+}
+
+function renderUsersList(users) {
+  const box = $("usersList");
+  const kw = ($("userSearch").value || "").trim().toLowerCase();
+  let list = users;
+  if (kw) {
+    list = users.filter(u =>
+      (u.username || "").toLowerCase().includes(kw) ||
+      (u.nickname || "").toLowerCase().includes(kw) ||
+      String(u.qq || "").includes(kw));
+  }
+  box.innerHTML = "";
+  $("usersCount").textContent = `共 ${users.length} 个账号${kw ? `，筛选出 ${list.length} 个` : ""}`;
+  if (!list.length) { box.innerHTML = '<div class="hint">没有匹配的用户</div>'; return; }
+
+  // 按真人分组：主账号（新线） + 它的 _past（过往线）
+  const groups = {};
+  list.forEach(u => {
+    if (u.username && u.username.endsWith("_past")) {
+      const mainKey = u.username.slice(0, -5);
+      (groups[mainKey] = groups[mainKey] || {}).past = u;
+    } else {
+      (groups[u.username] = groups[u.username] || {}).main = u;
+    }
+  });
+
+  Object.values(groups).forEach(g => {
+    const mainUser = g.main;
+    const disp = mainUser || g.past;
+    const mainKey = mainUser ? mainUser.username : g.past.username.replace(/_past$/, "");
+    const row = document.createElement("div");
+    row.className = "user-row";
+
+    const head = document.createElement("div");
+    head.className = "user-row-head";
+    const qqBadge = disp.qq
+      ? `<span class="qq-badge">QQ: ${escapeHtml(disp.qq)}</span>`
+      : `<span class="qq-badge none">未绑定QQ</span>`;
+    const roleTag = (mainUser && mainUser.is_admin)
+      ? `<span class="tag tag-purple">管理员</span>`
+      : `<span class="tag tag-blue">普通用户</span>`;
+    const stateTag = disp.disabled
+      ? `<span class="tag tag-red">已禁用</span>`
+      : `<span class="tag tag-green">正常</span>`;
+    head.innerHTML = `
+      <div><strong>${escapeHtml(disp.nickname || mainKey)}</strong>
+        <span class="uinfo">@${escapeHtml(mainKey)}</span>${roleTag}${stateTag}</div>
+      <div class="right">${qqBadge}
+        <button class="btn btn-sm btn-warning" data-act="resetpwd">重置密码</button>
+        <button class="btn btn-sm ${disp.disabled ? "btn-success" : "btn-danger"}" data-act="toggle">${disp.disabled ? "启用" : "禁用"}</button>
+        <span class="arrow">▶</span>
+      </div>`;
+    // 操作按钮（阻止冒泡，不触发展开）
+    head.querySelector('[data-act=resetpwd]').addEventListener("click", (ev) => {
+      ev.stopPropagation(); resetPassword(mainKey);
+    });
+    head.querySelector('[data-act=toggle]').addEventListener("click", (ev) => {
+      ev.stopPropagation(); toggleDisable(mainKey, !disp.disabled);
+    });
+
+    const linesWrap = document.createElement("div");
+    linesWrap.className = "lines-wrap";
+    if (mainUser) linesWrap.appendChild(buildLineBlock(mainUser, "fresh", "新线"));
+    if (g.past) linesWrap.appendChild(buildLineBlock(g.past, "past", "过往线"));
+
+    head.addEventListener("click", () => row.classList.toggle("open"));
+    row.appendChild(head);
+    row.appendChild(linesWrap);
+    box.appendChild(row);
+  });
+}
+
+function buildLineBlock(user, kind, label) {
+  const block = document.createElement("div");
+  block.className = "line-block";
+  const head = document.createElement("div");
+  head.className = "line-head";
+  head.innerHTML = `<span class="arrow">▶</span><span class="line-tag ${kind}">${label}</span><span class="line-account">@${escapeHtml(user.username)}</span>`;
+  const rolesWrap = document.createElement("div");
+  rolesWrap.className = "line-roles";
+  ROLES.forEach(role => {
+    const item = document.createElement("div");
+    item.className = "role-item";
+    const rh = document.createElement("div");
+    rh.className = "role-item-head";
+    rh.innerHTML = `<span>${role.emoji} ${role.name}</span><span class="arrow">▶</span>`;
+    const body = document.createElement("div");
+    body.className = "role-item-body";
+    body.innerHTML = '<div class="hint">点击展开亲密度 / 心理数据</div>';
+    let loaded = false;
+    rh.addEventListener("click", () => {
+      const open = item.classList.toggle("open");
+      if (open && !loaded) { loaded = true; body.innerHTML = '<div class="hint">加载中...</div>'; loadRoleDetail(user.username, role, body); }
+    });
+    item.appendChild(rh); item.appendChild(body);
+    rolesWrap.appendChild(item);
+  });
+  head.addEventListener("click", () => block.classList.toggle("open"));
+  block.appendChild(head); block.appendChild(rolesWrap);
+  return block;
+}
+
+async function loadRoleDetail(username, role, body) {
+  try {
+    const [psychData, intData] = await Promise.all([
+      apiGet(`/api/admin/users/${encodeURIComponent(username)}/psych`).catch(() => ({})),
+      apiGet(`/api/admin/get_both_intimacy/${encodeURIComponent(username)}`).catch(() => ({}))
+    ]);
+    renderSingleRole(body, username, role, (psychData.states || {})[role.id] || {}, intData);
+  } catch (e) { body.innerHTML = '<div class="hint error">加载失败</div>'; }
+}
+
+function renderSingleRole(container, username, role, st, intData) {
+  container.innerHTML = "";
+  const block = document.createElement("div");
+  block.className = "psych-role-block";
+  const layer1 = (intData.layer1_basic || {})[role.id] ?? 0;
+  const layer2 = (intData.layer2_realtime || {})[role.id] ?? 0;
+  const avg = (intData.average || {})[role.id] ?? 0;
+
+  const intimacyBar = document.createElement("div");
+  intimacyBar.className = "intimacy-bar";
+  intimacyBar.innerHTML = `
+    <div class="intimacy-bar-title">两层亲密度（自拍取平均值）</div>
+    <div class="intimacy-bar-grid">
+      <div class="intimacy-item layer1">
+        <span class="intimacy-label">第一层(基础)</span>
+        <span class="intimacy-val">${layer1}</span>
+        <input type="number" min="0" max="100" class="intimacy-input" placeholder="0-100" />
+        <button class="intimacy-save-btn" type="button">保存</button>
+      </div>
+      <div class="intimacy-item layer2">
+        <span class="intimacy-label">第二层(当下)</span>
+        <span class="intimacy-val">${layer2}</span>
+        <span class="intimacy-hint">实时好感，不可编辑</span>
+      </div>
+      <div class="intimacy-item avg">
+        <span class="intimacy-label">平均值(自拍用)</span>
+        <span class="intimacy-val">${avg}</span>
+      </div>
+    </div>`;
+  block.appendChild(intimacyBar);
+  const l1Input = intimacyBar.querySelector(".intimacy-input");
+  const l1Val = intimacyBar.querySelector(".intimacy-item.layer1 .intimacy-val");
+  const avgVal = intimacyBar.querySelector(".intimacy-item.avg .intimacy-val");
+  l1Input.value = layer1;
+  intimacyBar.querySelector(".intimacy-save-btn").addEventListener("click", async () => {
+    const val = Math.max(0, Math.min(100, parseInt(l1Input.value) || 0));
+    try {
+      const rd = await apiPost("/api/admin/set_intimacy", { username, role_id: role.id, value: val });
+      if (rd.success) {
+        showToast(`${role.name} 第一层亲密度已更新为 ${val}`, "success");
+        l1Val.textContent = val;
+        avgVal.textContent = layer2 > 0 ? Math.round((val + layer2) / 2) : val;
+      } else { showToast(rd.error || "保存失败", "error"); }
+    } catch (e) { showToast((e._data && e._data.error) || "网络错误", "error"); }
+  });
+
+  const grid = document.createElement("div");
+  grid.className = "psych-grid";
+  PSYCH_FIELDS.forEach(field => {
+    const wrap = document.createElement("div");
+    wrap.className = "psych-field";
+    const val = st[field.key] ?? (field.key === "intimacy" ? 30 : 0);
+    wrap.innerHTML = `<label><span>${field.label}</span><span class="val-display">${Math.round(val)}</span></label>
+      <input type="number" min="${field.min}" max="${field.max}" step="1" value="${Math.round(val)}" data-field="${field.key}" />`;
+    const input = wrap.querySelector("input");
+    const display = wrap.querySelector(".val-display");
+    input.addEventListener("input", () => {
+      const v = Math.max(field.min, Math.min(field.max, parseInt(input.value) || 0));
+      display.textContent = v;
+    });
+    grid.appendChild(wrap);
+  });
+  block.appendChild(grid);
+
+  const saveBtn = document.createElement("button");
+  saveBtn.className = "save-psych-btn";
+  saveBtn.type = "button";
+  saveBtn.textContent = "保存心理数据";
+  saveBtn.addEventListener("click", async () => {
+    const payload = { role_id: role.id };
+    grid.querySelectorAll("input").forEach(input => { payload[input.dataset.field] = parseInt(input.value) || 0; });
+    setButtonLoading(saveBtn, true, "保存中...");
+    try {
+      const data = await apiPost(`/api/admin/users/${encodeURIComponent(username)}/psych`, payload);
+      if (!data.success) showToast(data.error || "保存失败", "error");
+      else showToast(`${role.name} 心理数据已保存`, "success");
+    } catch (e) { showToast((e._data && e._data.error) || "网络错误", "error"); }
+    setButtonLoading(saveBtn, false);
+  });
+  block.appendChild(saveBtn);
+  container.appendChild(block);
+}
+
+async function resetPassword(username) {
+  showModal("重置密码", `<label>为 @${escapeHtml(username)} 设置新密码</label>
+    <input id="mNewPassword" type="password" placeholder="输入新密码（至少6位）" />`,
+    async () => {
+      const pwd = $("mNewPassword").value;
+      if (!pwd || pwd.length < 6) { showToast("密码至少 6 位", "error"); return; }
+      try {
+        const r = await apiPost(`/api/admin/users/${encodeURIComponent(username)}/password`, { password: pwd });
+        if (r.success) { showToast("密码已重置", "success"); closeModal(); }
+        else showToast(r.error || "重置失败", "error");
+      } catch (e) { showToast((e._data && e._data.error) || "重置失败", "error"); }
     });
 }
 
-function doLogout() {
-    adminToken = '';
-    localStorage.removeItem('admin_token');
-    document.getElementById('app').style.display = 'none';
-    document.getElementById('loginPage').style.display = 'flex';
+async function toggleDisable(username, disabled) {
+  try {
+    const r = await apiPost(`/api/admin/users/${encodeURIComponent(username)}/disable`, { disabled });
+    if (r.success) { showToast(disabled ? "已禁用" : "已启用", "success"); loadUsers(); }
+    else showToast(r.error || "操作失败", "error");
+  } catch (e) { showToast((e._data && e._data.error) || "操作失败", "error"); }
 }
 
-// 自动登录
-if (adminToken) {
-    document.getElementById('loginPage').style.display = 'none';
-    document.getElementById('app').style.display = 'block';
-    loadDashboard();
+/* =========================================================
+ * 日程管理
+ * ========================================================= */
+function loadSchedulePage() {
+  const tabs = $("schedRoleTabs");
+  tabs.innerHTML = "";
+  ROLES.forEach(role => {
+    const b = document.createElement("button");
+    b.className = "btn " + (role.id === currentScheduleRole ? "btn-primary" : "btn-ghost");
+    b.textContent = `${role.emoji} ${role.name}`;
+    b.addEventListener("click", () => { currentScheduleRole = role.id; loadSchedulePage(); loadSchedule(); });
+    tabs.appendChild(b);
+  });
+  loadSchedule();
 }
 
-// ========== API ==========
-function apiGet(path) {
-    return fetch(path, { headers: { 'Authorization': `Bearer ${adminToken}` } }).then(r => r.json());
-}
-function apiPost(path, body) {
-    return fetch(path, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body || {})
-    }).then(r => r.json());
-}
-function apiDelete(path) {
-    return fetch(path, { method: 'DELETE', headers: { 'Authorization': `Bearer ${adminToken}` } }).then(r => r.json());
-}
-
-// ========== 页面切换 ==========
-function switchPage(page) {
-    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    event.target.classList.add('active');
-    document.getElementById('page-' + page).classList.add('active');
-    if (page === 'dashboard') loadDashboard();
-    if (page === 'users') loadUsers();
-    if (page === 'characters') loadCharacters();
-    if (page === 'backups') loadBackups();
-    if (page === 'status') loadStatus();
-}
-
-// ========== 仪表盘 ==========
-function loadDashboard() {
-    apiGet('/api/admin/stats').then(data => {
-        if (data.error) { showToast(data.error, 'error'); return; }
-        document.getElementById('statsGrid').innerHTML = `
-            <div class="stat-card"><div class="label">总用户数</div><div class="value">${data.total_users}</div></div>
-            <div class="stat-card"><div class="label">QQ临时用户</div><div class="value">${data.qq_tmp_users}</div></div>
-            <div class="stat-card"><div class="label">已绑定用户</div><div class="value">${data.bound_users}</div></div>
-            <div class="stat-card"><div class="label">NapCat配置</div><div class="value" style="font-size:18px;">${data.services.napcat_available ? '✅ 已配置' : '❌ 未配置'}</div></div>
-        `;
-        const dist = data.intimacy_distribution;
-        const total = Object.values(dist).reduce((a,b) => a+b, 0) || 1;
-        document.getElementById('intimacyTable').innerHTML = Object.entries(dist).map(([k,v]) => `
-            <tr><td>${k}</td><td>${v}</td><td>
-                <div class="progress-bar"><div class="progress-fill" style="width:${(v/total*100).toFixed(1)}%"></div></div>
-                ${(v/total*100).toFixed(1)}%
-            </td></tr>
-        `).join('');
+async function loadSchedule() {
+  const editor = $("scheduleEditor");
+  editor.innerHTML = '<div class="hint">加载中...</div>';
+  let data;
+  try {
+    data = await apiGet(`/api/admin/schedule/${currentScheduleRole}`);
+  } catch (e) { editor.innerHTML = '<div class="hint error">日程加载失败</div>'; return; }
+  const buckets = data.buckets || {};
+  editor.innerHTML = "";
+  SCHEDULE_BUCKETS.forEach(bk => {
+    const acts = (buckets[bk.key] || []).map(x => x.text);
+    const card = document.createElement("div");
+    card.className = "sched-bucket";
+    card.innerHTML = `<h4>${bk.label}<button class="btn btn-sm btn-primary" data-add>＋ 添加一条</button></h4>`;
+    const rowsWrap = document.createElement("div");
+    rowsWrap.className = "sched-rows";
+    const drawRows = () => {
+      rowsWrap.innerHTML = "";
+      if (!acts.length) rowsWrap.innerHTML = '<div class="hint">该时段暂无活动，添加几条吧</div>';
+      acts.forEach((text, idx) => {
+        const row = document.createElement("div");
+        row.className = "sched-row";
+        const inp = document.createElement("input");
+        inp.value = text;
+        inp.addEventListener("input", () => { acts[idx] = inp.value; });
+        const del = document.createElement("button");
+        del.className = "btn btn-sm btn-danger";
+        del.textContent = "删除";
+        del.addEventListener("click", () => { acts.splice(idx, 1); drawRows(); });
+        row.appendChild(inp); row.appendChild(del);
+        rowsWrap.appendChild(row);
+      });
+    };
+    card.querySelector("[data-add]").addEventListener("click", () => { acts.push(""); drawRows(); const last = rowsWrap.querySelector("input:last-of-type"); if (last) last.focus(); });
+    const save = document.createElement("button");
+    save.className = "btn btn-success";
+    save.textContent = "保存该时段";
+    save.addEventListener("click", async () => {
+      const cleaned = acts.map(a => a.trim()).filter(Boolean);
+      setButtonLoading(save, true, "保存中...");
+      try {
+        const r = await apiPost(`/api/admin/schedule/${currentScheduleRole}`, { time_bucket: bk.key, activities: cleaned });
+        if (r.ok) { showToast(`${bk.label} 已保存（${cleaned.length} 条）`, "success"); loadSchedule(); }
+        else showToast("保存失败", "error");
+      } catch (e) { showToast((e._data && e._data.error) || "保存失败", "error"); }
+      setButtonLoading(save, false);
     });
+    drawRows();
+    card.appendChild(rowsWrap);
+    card.appendChild(save);
+    editor.appendChild(card);
+  });
 }
 
-// ========== 用户管理 ==========
-function loadUsers() {
-    apiGet(`/api/admin/users?page=${currentPage}&page_size=${pageSize}`).then(data => {
-        if (data.error) { showToast(data.error, 'error'); return; }
-        document.getElementById('usersTable').innerHTML = data.users.map(u => {
-            const intimacy = u.intimacy || {};
-            const intimacyStr = Object.entries(intimacy).map(([r,v]) => `${r}:${v}`).join(', ') || '无';
-            return `<tr>
-                <td>${u.username}</td>
-                <td>${u.nickname || '-'}</td>
-                <td>${u.is_qq_tmp ? '<span class="tag tag-blue">QQ临时</span>' : '<span class="tag tag-green">正式</span>'}</td>
-                <td>${u.qq_bound ? '<span class="tag tag-green">已绑定</span>' : '<span class="tag tag-yellow">未绑定</span>'}</td>
-                <td style="max-width:200px;font-size:11px;">${intimacyStr}</td>
-                <td>${u.disabled ? '<span class="tag tag-red">已禁用</span>' : '<span class="tag tag-green">正常</span>'}</td>
-                <td>
-                    <button class="btn btn-sm btn-warning" onclick="editIntimacy('${u.username}')">亲密度</button>
-                    <button class="btn btn-sm btn-primary" onclick="resetPassword('${u.username}')">密码</button>
-                    <button class="btn btn-sm ${u.disabled ? 'btn-success' : 'btn-danger'}" onclick="toggleDisable('${u.username}', ${!u.disabled})">${u.disabled ? '启用' : '禁用'}</button>
-                </td>
-            </tr>`;
-        }).join('');
-        // 分页
-        const totalPages = Math.ceil(data.total / pageSize);
-        let pagHtml = `<button ${currentPage<=1?'disabled':''} onclick="changePage(${currentPage-1})">上一页</button>`;
-        for (let i = 1; i <= Math.min(totalPages, 5); i++) {
-            pagHtml += `<button class="${i===currentPage?'active':''}" onclick="changePage(${i})">${i}</button>`;
-        }
-        pagHtml += `<button ${currentPage>=totalPages?'disabled':''} onclick="changePage(${currentPage+1})">下一页</button>`;
-        document.getElementById('usersPagination').innerHTML = pagHtml;
+/* =========================================================
+ * 角色配置
+ * ========================================================= */
+async function loadCharacters() {
+  try {
+    const data = await apiGet("/api/admin/characters");
+    $("charactersTable").innerHTML = (data.characters || []).map(c => {
+      const id = c.role_id || c.id;
+      return `<tr><td>${escapeHtml(id)}</td><td>${escapeHtml(c.name || c.nickname || "-")}</td>
+        <td><button class="btn btn-sm btn-primary" onclick="viewCharacter('${id}')">查看配置</button></td></tr>`;
+    }).join("");
+  } catch (e) { showToast((e._data && e._data.error) || "角色加载失败", "error"); }
+}
+async function viewCharacter(roleId) {
+  try {
+    const data = await apiGet(`/api/admin/characters/${roleId}`);
+    $("characterDetail").innerHTML = `<div class="table-container"><div style="padding:16px;">
+      <h3 style="color:var(--primary-2);margin-bottom:12px;">${escapeHtml(roleId)} 配置详情</h3>
+      <div class="detail-panel"><pre>${escapeHtml(JSON.stringify(data.config, null, 2))}</pre></div></div></div>`;
+  } catch (e) { showToast((e._data && e._data.error) || "加载失败", "error"); }
+}
+
+/* =========================================================
+ * 备份管理
+ * ========================================================= */
+async function loadBackups() {
+  try {
+    const data = await apiGet("/api/admin/backups");
+    $("backupsTable").innerHTML = (data.backups || []).map(b => `
+      <tr><td>${escapeHtml(b.name)}</td><td>${escapeHtml(b.created_at_iso || b.created_at || "-")}</td>
+      <td>${b.file_count ?? "-"}</td><td>${escapeHtml(b.size_human || "-")}</td><td>${escapeHtml(b.note || "-")}</td>
+      <td style="white-space:nowrap;">
+        <button class="btn btn-sm btn-primary" onclick="downloadBackup('${encodeURIComponent(b.name)}')">下载</button>
+        <button class="btn btn-sm btn-warning" onclick="restoreBackup('${b.name.replace(/'/g,"\\'")}')">恢复</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteBackup('${b.name.replace(/'/g,"\\'")}')">删除</button>
+      </td></tr>`).join("") || '<tr><td colspan="6" class="hint" style="text-align:center;">暂无备份</td></tr>';
+  } catch (e) { showToast((e._data && e._data.error) || "备份加载失败", "error"); }
+}
+// 下载需带 Authorization，不能用裸 a 标签，改用 blob
+async function downloadBackup(name) {
+  try {
+    const resp = await fetch(`${BACKEND}/api/admin/backups/${name}/download`, {
+      headers: { "Authorization": `Bearer ${auth.token}` }
     });
+    if (!resp.ok) { showToast("下载失败", "error"); return; }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    let fname = decodeURIComponent(name);
+    if (!/\.\w+$/.test(fname)) fname += ".zip";
+    const a = document.createElement("a");
+    a.href = url; a.download = fname;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) { showToast("下载失败", "error"); }
+}
+$("createBackupBtn").addEventListener("click", () => {
+  showModal("创建备份", `<label>备注（可选）</label><input id="mBackupNote" placeholder="如：升级前备份" value="manual" />`, async () => {
+    const note = $("mBackupNote").value || "manual";
+    try {
+      const r = await apiPost("/api/admin/backups", { note });
+      if (r.success) { showToast("备份创建成功", "success"); closeModal(); loadBackups(); }
+      else showToast(r.error || "创建失败", "error");
+    } catch (e) { showToast((e._data && e._data.error) || "创建失败", "error"); }
+  });
+});
+async function restoreBackup(name) {
+  if (!confirm(`确定恢复备份 "${name}" 吗？这将覆盖现有数据！`)) return;
+  try {
+    const r = await apiPost(`/api/admin/backups/${encodeURIComponent(name)}/restore`, { overwrite: true });
+    if (r.success) { showToast(`恢复成功，${r.restored_count} 个文件已恢复`, "success"); loadBackups(); }
+    else showToast(r.error || "恢复失败", "error");
+  } catch (e) { showToast((e._data && e._data.error) || "恢复失败", "error"); }
+}
+async function deleteBackup(name) {
+  if (!confirm(`确定删除备份 "${name}" 吗？`)) return;
+  try {
+    const r = await apiDelete(`/api/admin/backups/${encodeURIComponent(name)}`);
+    if (r.success) { showToast("备份已删除", "success"); loadBackups(); }
+    else showToast(r.error || "删除失败", "error");
+  } catch (e) { showToast((e._data && e._data.error) || "删除失败", "error"); }
 }
 
-function changePage(p) { currentPage = p; loadUsers(); }
-
-function editIntimacy(username) {
-    showModal('修改亲密度', `
-        <label>角色ID</label>
-        <input id="intimacyRole" placeholder="如 nianqi" />
-        <label>亲密度值 (0-100)</label>
-        <input id="intimacyValue" type="number" min="0" max="100" value="50" />
-    `, () => {
-        const role = document.getElementById('intimacyRole').value.trim();
-        const value = parseInt(document.getElementById('intimacyValue').value);
-        if (!role) { showToast('请输入角色ID', 'error'); return; }
-        apiPost(`/api/admin/users/${username}/intimacy`, { role_id: role, value }).then(r => {
-            if (r.success) { showToast('亲密度已更新', 'success'); closeModal(); loadUsers(); }
-            else showToast(r.error || '更新失败', 'error');
-        });
-    });
+/* =========================================================
+ * 系统状态
+ * ========================================================= */
+async function loadStatus() {
+  try {
+    const data = await apiGet("/api/admin/status");
+    const svc = data.services || {};
+    $("statusGrid").innerHTML = `
+      <div class="stat-card"><div class="label">主后端</div><div class="value" style="font-size:18px;">✅ 运行中</div></div>
+      <div class="stat-card"><div class="label">NapCat</div><div class="value" style="font-size:18px;">${svc.napcat_configured ? "✅ 已配置" : "❌ 未配置"}</div></div>
+      <div class="stat-card"><div class="label">主动发图</div><div class="value" style="font-size:18px;">${svc.proactive_auto_image ? "✅ 已启用" : "❌ 未启用"}</div></div>`;
+    const cfg = data.config || {};
+    $("configTable").innerHTML = `
+      <tr><td>数据目录</td><td>${escapeHtml(cfg.data_dir || "-")}</td></tr>
+      <tr><td>LLM失败降级阈值</td><td>${cfg.llm_fail_threshold ?? "-"} 次</td></tr>
+      <tr><td>每用户每小时自拍上限</td><td>${cfg.max_user_images_per_hour ?? "-"} 张</td></tr>
+      <tr><td>每角色每天主动发图上限</td><td>${cfg.max_proactive_images_per_day ?? "-"} 张</td></tr>
+      <tr><td>服务器时间</td><td>${data.timestamp ? new Date(data.timestamp * 1000).toLocaleString() : "-"}</td></tr>`;
+  } catch (e) { showToast((e._data && e._data.error) || "状态加载失败", "error"); }
 }
 
-function resetPassword(username) {
-    showModal('重置密码', `
-        <label>新密码</label>
-        <input id="newPassword" type="password" placeholder="输入新密码" />
-    `, () => {
-        const pwd = document.getElementById('newPassword').value;
-        if (!pwd) { showToast('请输入新密码', 'error'); return; }
-        apiPost(`/api/admin/users/${username}/password`, { password: pwd }).then(r => {
-            if (r.success) { showToast('密码已重置', 'success'); closeModal(); }
-            else showToast(r.error || '重置失败', 'error');
-        });
-    });
+/* =========================================================
+ * WebSocket 实时刷新（亲密度/心理变化时自动刷新用户页）
+ * ========================================================= */
+function connectAdminWS() {
+  if (!auth || !auth.token) return;
+  try { adminWS = new WebSocket(WS_URL); } catch (e) { return; }
+  adminWS.onopen = () => adminWS.send(JSON.stringify({ action: "auth", token: auth.token }));
+  adminWS.onmessage = (ev) => {
+    let msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.type === "admin_update") {
+      const usersPageActive = $("page-users").classList.contains("active");
+      if (usersPageActive) {
+        // 轻量刷新：重新拉取列表（保持当前搜索）
+        loadUsers();
+      } else {
+        showToast("收到一条用户数据实时更新", "info");
+      }
+    }
+  };
+  adminWS.onclose = () => { adminWS = null; };
 }
 
-function toggleDisable(username, disabled) {
-    apiPost(`/api/admin/users/${username}/disable`, { disabled }).then(r => {
-        if (r.success) { showToast(disabled ? '已禁用' : '已启用', 'success'); loadUsers(); }
-        else showToast(r.error || '操作失败', 'error');
-    });
-}
-
-// ========== 角色配置 ==========
-function loadCharacters() {
-    apiGet('/api/admin/characters').then(data => {
-        if (data.error) { showToast(data.error, 'error'); return; }
-        document.getElementById('charactersTable').innerHTML = (data.characters || []).map(c => `
-            <tr>
-                <td>${c.role_id || c.id || '-'}</td>
-                <td>${c.name || c.nickname || '-'}</td>
-                <td><button class="btn btn-sm btn-primary" onclick="viewCharacter('${c.role_id || c.id}')">查看配置</button></td>
-            </tr>
-        `).join('');
-    });
-}
-
-function viewCharacter(roleId) {
-    apiGet(`/api/admin/characters/${roleId}`).then(data => {
-        if (data.error) { showToast(data.error, 'error'); return; }
-        document.getElementById('characterDetail').innerHTML = `
-            <div class="table-container">
-                <div style="padding:16px;">
-                    <h3 style="color:#a78bfa;margin-bottom:12px;">${roleId} 配置详情</h3>
-                    <div class="detail-panel"><pre>${JSON.stringify(data.config, null, 2)}</pre></div>
-                </div>
-            </div>
-        `;
-    });
-}
-
-// ========== 备份管理 ==========
-function loadBackups() {
-    apiGet('/api/admin/backups').then(data => {
-        if (data.error) { showToast(data.error, 'error'); return; }
-        document.getElementById('backupsTable').innerHTML = (data.backups || []).map(b => `
-            <tr>
-                <td>${b.name}</td>
-                <td>${b.created_at_iso || b.created_at}</td>
-                <td>${b.file_count}</td>
-                <td>${b.size_human}</td>
-                <td>${b.note || '-'}</td>
-                <td>
-                    <a href="/api/admin/backups/${b.name}/download" target="_blank" style="text-decoration:none;">
-                        <button class="btn btn-sm btn-primary">下载</button>
-                    </a>
-                    <button class="btn btn-sm btn-warning" onclick="restoreBackup('${b.name}')">恢复</button>
-                    <button class="btn btn-sm btn-danger" onclick="deleteBackup('${b.name}')">删除</button>
-                </td>
-            </tr>
-        `).join('') || '<tr><td colspan="6" style="text-align:center;color:#888;">暂无备份</td></tr>';
-    });
-}
-
-function createBackup() {
-    showModal('创建备份', `
-        <label>备注（可选）</label>
-        <input id="backupNote" placeholder="如：升级前备份" value="manual" />
-    `, () => {
-        const note = document.getElementById('backupNote').value || 'manual';
-        showToast('正在创建备份...', 'info');
-        apiPost('/api/admin/backups', { note }).then(r => {
-            if (r.success) { showToast('备份创建成功', 'success'); closeModal(); loadBackups(); }
-            else showToast(r.error || '创建失败', 'error');
-        });
-    });
-}
-
-function restoreBackup(name) {
-    if (!confirm(`确定要恢复备份 "${name}" 吗？这将覆盖现有数据！`)) return;
-    showToast('正在恢复备份...', 'info');
-    apiPost(`/api/admin/backups/${name}/restore`, { overwrite: true }).then(r => {
-        if (r.success) { showToast(`恢复成功，${r.restored_count}个文件已恢复`, 'success'); loadBackups(); }
-        else showToast(r.error || '恢复失败', 'error');
-    });
-}
-
-function deleteBackup(name) {
-    if (!confirm(`确定要删除备份 "${name}" 吗？`)) return;
-    apiDelete(`/api/admin/backups/${name}`).then(r => {
-        if (r.success) { showToast('备份已删除', 'success'); loadBackups(); }
-        else showToast(r.error || '删除失败', 'error');
-    });
-}
-
-// ========== 系统状态 ==========
-function loadStatus() {
-    apiGet('/api/admin/status').then(data => {
-        if (data.error) { showToast(data.error, 'error'); return; }
-        const svc = data.services;
-        document.getElementById('statusGrid').innerHTML = `
-            <div class="stat-card"><div class="label">主后端</div><div class="value" style="font-size:18px;">✅ 运行中</div></div>
-            <div class="stat-card"><div class="label">NapCat</div><div class="value" style="font-size:18px;">${svc.napcat_configured ? '✅ 已配置' : '❌ 未配置'}</div></div>
-            <div class="stat-card"><div class="label">主动发图</div><div class="value" style="font-size:18px;">${svc.proactive_auto_image ? '✅ 已启用' : '❌ 未启用'}</div></div>
-        `;
-        const cfg = data.config;
-        document.getElementById('configTable').innerHTML = `
-            <tr><td>数据目录</td><td>${cfg.data_dir}</td></tr>
-            <tr><td>LLM失败降级阈值</td><td>${cfg.llm_fail_threshold} 次</td></tr>
-            <tr><td>每用户每小时自拍上限</td><td>${cfg.max_user_images_per_hour} 张</td></tr>
-            <tr><td>每角色每天主动发图上限</td><td>${cfg.max_proactive_images_per_day} 张</td></tr>
-            <tr><td>服务器时间</td><td>${new Date(data.timestamp * 1000).toLocaleString()}</td></tr>
-        `;
-    });
-}
-
-// ========== 模态框 ==========
+/* =========================================================
+ * 模态框
+ * ========================================================= */
 function showModal(title, bodyHtml, onConfirm) {
-    document.getElementById('modalTitle').textContent = title;
-    document.getElementById('modalBody').innerHTML = bodyHtml;
-    document.getElementById('modal').classList.add('active');
-    document.getElementById('modalConfirm').onclick = onConfirm;
+  $("modalTitle").textContent = title;
+  $("modalBody").innerHTML = bodyHtml;
+  $("modal").classList.add("active");
+  $("modalConfirm").onclick = onConfirm;
 }
-function closeModal() {
-    document.getElementById('modal').classList.remove('active');
-}
+function closeModal() { $("modal").classList.remove("active"); }
+$("modalCancel").addEventListener("click", closeModal);
 
-// ========== Toast ==========
-function showToast(msg, type = 'info') {
-    const toast = document.getElementById('toast');
-    toast.textContent = msg;
-    toast.className = `toast ${type} show`;
-    setTimeout(() => toast.classList.remove('show'), 3000);
-}
+/* =========================================================
+ * 启动：已登录则校验 token 后直接进后台
+ * ========================================================= */
+(async function boot() {
+  if (auth && auth.token) {
+    try {
+      await apiGet("/api/admin/status");  // 校验 token 是否仍是管理员
+      showApp();
+    } catch (e) {
+      handleAuthExpired();
+    }
+  } else {
+    showLogin();
+  }
+})();
 </script>
 </body>
 </html>

@@ -209,6 +209,21 @@ def get_cached_persona(rid, intimacy):
     parts.append(f"你看重：{'、'.join(role.get('values', []))}")
     tb = role.get("taboos", [])
     if tb: parts.append(f"逆鳞：{'、'.join(tb)}——触碰时你会明显不悦")
+    
+    # === 说话示例（few-shot，按关系阶段）===
+    speech_examples = role.get("speech_examples", {})
+    if speech_examples:
+        stage_key = _resolve_stage_key(intimacy)
+        examples = speech_examples.get(stage_key, [])
+        if examples:
+            parts.append("\n【说话示例（参考这些对话的语气和风格，但不要照搬内容）】")
+            for ex in examples:
+                user_msg = ex.get("user", "")
+                reply_msg = ex.get("reply", "")
+                if user_msg and reply_msg:
+                    parts.append(f"  用户：{user_msg}")
+                    parts.append(f"  你：{reply_msg}")
+    
     result = "\n".join(parts)
     _PERSONA_CACHE[cache_key] = result
     return result
