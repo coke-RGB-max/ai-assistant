@@ -1605,18 +1605,18 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       // 中间可用高度（顶栏与输入框之间）
       const availH = Math.max(200, stageH - headerH - composerH);
       const availW = stageW;
-      // 用模型原始分辨率反推缩放，保证三个角色都完整显示全身
-      const om = model.internalModel;
-      const origH = om?.originalHeight || 2048;
-      const origW = om?.originalWidth || origH;
-      // 手机窄屏按宽度缩、电脑宽屏按高度缩，取较小者保证完整不裁切
-      const sByH = (availH * 0.99) / origH;
-      const sByW = (availW * 0.92) / origW;
+      // 先把缩放重置为 1，实测模型真实像素包围盒（各模型 SDK 属性不一致，实测最稳）
+      model.scale.set(1, 1);
+      const origH = model.height || 2048;
+      const origW = model.width || origH;
+      // 手机窄屏按宽度缩、电脑宽屏按高度缩，取较小者保证全身完整不裁切
+      const sByH = (availH * 0.92) / origH;
+      const sByW = (availW * 0.86) / origW;
       const s = Math.min(sByH, sByW);
-      model.scale.set(s);
+      model.scale.set(s, s);
       model.anchor.set(0.5, 1);
       model.x = stageW / 2;
-      model.y = stageH - composerH - 2; // 脚尖停在输入框上沿
+      model.y = stageH - composerH - 6; // 脚尖停在输入框上沿上方，留一点余量
     }
     function setupLive2DModel(model) {
       // 自适应缩放与居中
