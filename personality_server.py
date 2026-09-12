@@ -113,6 +113,22 @@ def init_db():
             time_bucket TEXT NOT NULL, activity_text TEXT NOT NULL,
             sort_order INTEGER DEFAULT 0, UNIQUE(role_id, time_bucket, activity_text));
         CREATE INDEX IF NOT EXISTS idx_schedule_role ON role_schedule(role_id, time_bucket);
+        -- v16.0: 角色与用户之间的「约定/待办」（带时间地点，AI 自动写入，发生后留一周自动删）
+        CREATE TABLE IF NOT EXISTS character_appointments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role_id TEXT NOT NULL,
+            user_id TEXT DEFAULT '',
+            content TEXT NOT NULL,
+            when_text TEXT DEFAULT '',
+            where_text TEXT DEFAULT '',
+            event_at REAL,                 -- 约定时间戳，解析不出为 NULL
+            status TEXT DEFAULT 'pending', -- pending / fulfilled / expired
+            created_at REAL NOT NULL,
+            delete_after REAL             -- 发生后留一周删除的时间戳
+        );
+        CREATE INDEX IF NOT EXISTS idx_appt_session ON character_appointments(session_id, role_id, status);
+        CREATE INDEX IF NOT EXISTS idx_appt_expire ON character_appointments(delete_after);
     """)
     conn.commit(); conn.close()
     logger.info(f"SQLite初始化: {DB_PATH}")
@@ -278,6 +294,125 @@ def detect_promise(reply_text):
         if kw in reply_text:
             return (kw, delay_h)
     return None
+
+# ============================================================
+# v16.0: 约定/待办系统（带时间地点，AI 自动写入，发生后留一周自动删）
+# ============================================================
+import re as _re
+
+# 明确时间锚点：出现这些词才值得花一次 LLM 判断是不是约定
+APPOINTMENT_TIME_HINTS = [
+    "明天", "后天", "大后天", "下周", "这周末", "周末", "礼拜",
+    "周一", "周二", "周三", "周四", "周五", "周六", "周日",
+    "上午", "下午", "晚上", "今晚", "凌晨",
+    "号", "学期", "放假", "约好", "说定", "说好",
+    "答应", "定好", "不见不散", "到时候", "见面", "一起去",
+]
+# 模糊的未来指向：不入库，但要让她"知道有这回事"
+FUZZY_INTENT_HINTS = [
+    "改天", "有空再", "有空约", "下次聊", "回头说", "回头聊",
+    "以后再", "以后说", "有空再说", "过两天", "这几天",
+]
+
+def appointment_hint_hit(*texts):
+    blob = "".join(t for t in texts if t)
+    return any(h in blob for h in APPOINTMENT_TIME_HINTS)
+
+def fuzzy_intent_hit(*texts):
+    blob = "".join(t for t in texts if t)
+    return any(h in blob for h in FUZZY_INTENT_HINTS)
+
+async def extract_appointment(user_message, reply_text):
+    """调 LLM 从对话里提取明确约定。失败一律返回 None，绝不影响主回复。"""
+    try:
+        msgs = [
+            {"role": "system", "content": (
+                "你是对话关系分析器。判断用户和角色刚这段对话里，是否达成了一个【带明确时间的约定或待办】。\n"
+                "判定标准：必须有『明确的未来时间』(明天下午/下周六/3号晚上) 或『约好一起做的具体事』。\n"
+                "只是『改天聊』『有空再说』这种模糊说法，一律算没有。\n"
+                '严格返回JSON：{"is_appointment":true,"content":"约定的事","when":"时间原文","where":"地点原文"} 或 {"is_appointment":false}'
+            )},
+            {"role": "user", "content": f"用户说：{user_message}\n角色回：{reply_text}"},
+        ]
+        raw = await smart_llm_call(msgs, temperature=0.1, max_tokens=200, timeout=10.0)
+        if not raw:
+            return None
+        m = _re.search(r"\{.*\}", raw, _re.S)
+        if not m:
+            return None
+        data = json.loads(m.group(0))
+        if not data.get("is_appointment"):
+            return None
+        return {
+            "content": (data.get("content") or "").strip(),
+            "when": (data.get("when") or "").strip(),
+            "where": (data.get("where") or "").strip(),
+        }
+    except Exception as e:
+        logger.debug(f"[约定] 提取失败: {e}")
+        return None
+
+def record_appointment(session_id, role_id, user_id, info):
+    """把提取到的约定写库，内容去重。自然语言日期难精确解析，暂按创建后七天清理。"""
+    try:
+        now = time.time()
+        conn = _get_db()
+        dup = conn.execute(
+            "SELECT id FROM character_appointments WHERE session_id=? AND role_id=? AND status='pending' AND content=?",
+            (session_id, role_id, info["content"])).fetchone()
+        if dup:
+            conn.close(); return None
+        delete_after = now + 7 * 86400
+        cur = conn.execute(
+            "INSERT INTO character_appointments (session_id, role_id, user_id, content, when_text, where_text, event_at, status, created_at, delete_after) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (session_id, role_id, user_id or "", info["content"], info.get("when", ""),
+             info.get("where", ""), now, "pending", now, delete_after))
+        conn.commit(); new_id = cur.lastrowid; conn.close()
+        logger.info(f"[约定] 已记录 #{new_id} role={role_id}: {info['content']}")
+        return new_id
+    except Exception as e:
+        logger.warning(f"[约定] 写库失败: {e}")
+        return None
+
+def get_pending_appointments(session_id, role_id):
+    """取出该 session+role 仍 pending 的约定，供 prompt 注入与管理页用。"""
+    try:
+        conn = _get_db()
+        rows = conn.execute(
+            "SELECT content, when_text, where_text FROM character_appointments "
+            "WHERE session_id=? AND role_id=? AND status='pending' ORDER BY id DESC LIMIT 5",
+            (session_id, role_id)).fetchall()
+        conn.close()
+        return [{"content": r["content"], "when": r["when_text"], "where": r["where_text"]} for r in rows]
+    except Exception:
+        return []
+
+def cleanup_expired_appointments():
+    """一周清理：delete_after 到期的约定直接删除。"""
+    try:
+        now = time.time()
+        conn = _get_db()
+        cur = conn.execute(
+            "DELETE FROM character_appointments WHERE delete_after IS NOT NULL AND delete_after < ?", (now,))
+        deleted = cur.rowcount
+        conn.commit(); conn.close()
+        if deleted:
+            logger.info(f"[约定] 自动清理过期约定 {deleted} 条")
+        return deleted
+    except Exception as e:
+        logger.warning(f"[约定] 清理失败: {e}")
+        return 0
+
+async def appointment_cleanup_worker():
+    """每小时清理一次到期约定。"""
+    while True:
+        try:
+            cleanup_expired_appointments()
+        except Exception as e:
+            logger.debug(f"[约定] 清理worker异常: {e}")
+        await asyncio.sleep(3600)
+
+
 
 def create_session():
     sid = hashlib.md5(f"{time.time()}{random.random()}".encode()).hexdigest()[:16]
@@ -1112,6 +1247,22 @@ class PersonalityEngine:
             activity_text = f"【你现在在做什么】{activity}。你看到他发消息了，虽然在忙但还是回他。回复要短一点、快一点，带着偷偷摸摸忙里偷闲的感觉。"
             extra_sections.append(activity_text)
 
+        # v16.0: 近期约定/待办注入——让她记得和TA说好的事，自然时可提起
+        try:
+            if self.session_id and rid:
+                _apts = get_pending_appointments(self.session_id, rid)
+                if _apts:
+                    _apt_lines = []
+                    for _a in _apts:
+                        _tm = f"（{_a['when']}）" if _a.get("when") else ""
+                        _loc = f"，地点{_a['where']}" if _a.get("where") else ""
+                        _apt_lines.append(f"{_a['content']}{_tm}{_loc}")
+                    extra_sections.append(
+                        "【你和TA之间的约定/待办】你们之前说好过：" + "；".join(_apt_lines) +
+                        "。这是真实存在的约，聊到相关处可自然提起或关心进度，不要生硬逐条背出来。")
+        except Exception:
+            pass
+
         # v14.0: 动态对话引擎——主动性/情绪记忆/节奏控制/剧情推进
         dynamic_ctx = await _DYNAMIC_ENGINE.generate(
             role_id=rid,
@@ -1239,6 +1390,7 @@ async def lifespan(app):
     global _memory_decay_task
     init_db()
     _memory_decay_task = asyncio.create_task(memory_decay_worker())
+    asyncio.create_task(appointment_cleanup_worker())
     # P4 序号5：初始化插件系统
     if PLUGINS_AVAILABLE and init_plugins:
         try:
@@ -1601,6 +1753,14 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
                 )
                 logger.info(f"[过往线] 注入 past_story，user={request.user_id} role={role_ids[0]}")
 
+        # v16.0: 模糊意图注入——TA随口提过还没了断的事，让她心里记着（48小时内）
+        if not is_group and session_data:
+            _pi = session_data.get("pending_intent")
+            if _pi and time.time() - _pi.get("created_at", 0) < 48 * 3600:
+                system_prompt += (
+                    f"\n\n【TA之前随口提过、还没了的事】{_pi.get('text','')}。"
+                    "不用主动翻出来问，心里记着，聊到相关话题自然接上就行。")
+
         messages = [{"role":"system","content":system_prompt}]
         messages.extend(valid)
         messages.append({"role":"user","content":request.user_message})
@@ -1627,6 +1787,23 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
                     "due_at": time.time() + delay_h * 3600,
                 }
                 logger.info(f"[承诺] 检测到承诺: {kw}, {delay_h}h后兑现")
+
+        # v16.0: 约定/模糊意图——含明确时间锚点则后台提取写库；模糊未来指向只短期记住
+        if not is_group and request.session_id and session_data is not None:
+            try:
+                if appointment_hint_hit(request.user_message, reply):
+                    async def _apt_bg(req=request, rid=role_ids[0] if role_ids else "nianqi", rp=reply):
+                        info = await extract_appointment(req.user_message, rp)
+                        if info and info.get("content"):
+                            record_appointment(req.session_id, rid, getattr(req, "user_id", "") or "", info)
+                    asyncio.create_task(_apt_bg())
+                elif fuzzy_intent_hit(request.user_message, reply):
+                    session_data["pending_intent"] = {
+                        "text": (request.user_message or reply)[:80],
+                        "created_at": time.time(),
+                    }
+            except Exception as e:
+                logger.debug(f"[约定] 后处理跳过: {e}")
 
         # P4 序号5：插件后处理 —— 插件可以修改LLM生成的回复
         if PLUGINS_AVAILABLE and get_plugin_manager:

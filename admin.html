@@ -209,6 +209,7 @@ tr:hover td { background: rgba(255,255,255,.02); }
     <div class="nav-item active" data-page="dashboard">📊 仪表盘</div>
     <div class="nav-item" data-page="users">👥 用户管理</div>
     <div class="nav-item" data-page="schedule">🗓️ 日程管理</div>
+    <div class="nav-item" data-page="appointments">📌 约定/待办</div>
     <div class="nav-item" data-page="characters">🎭 角色配置</div>
     <div class="nav-item" data-page="backups">💾 备份管理</div>
     <div class="nav-item" data-page="status">⚙️ 系统状态</div>
@@ -248,6 +249,24 @@ tr:hover td { background: rgba(255,255,255,.02); }
       <p class="hint" style="margin-bottom:14px;">角色在对应时段会从这里随机抽取一条“正在做的事”，影响回复风格。修改即时生效，仅管理员可见。</p>
       <div class="sched-role-tabs" id="schedRoleTabs"></div>
       <div id="scheduleEditor"></div>
+    </div>
+
+    <!-- 约定/待办（v16.0） -->
+    <div class="page" id="page-appointments">
+      <h2>约定 / 待办</h2>
+      <p class="hint" style="margin-bottom:14px;">和 TA 聊天时，带明确时间地点的约定会被自动记下；发生后保留一周自动清理。这里可查看、新增、删除，页面自动刷新。</p>
+      <div class="toolbar">
+        <select id="apptRoleFilter">
+          <option value="">全部角色</option>
+          <option value="nianqi">念琦</option>
+          <option value="qinghe">清禾</option>
+          <option value="jingwen">璟雯</option>
+        </select>
+        <button class="btn btn-primary" id="apptAddBtn">➕ 新增约定</button>
+        <button class="btn" id="apptRefreshBtn">🔄 刷新</button>
+        <span class="hint" id="apptCount"></span>
+      </div>
+      <div id="apptList"></div>
     </div>
 
     <!-- 角色配置 -->
@@ -452,6 +471,7 @@ document.querySelectorAll(".nav-item[data-page]").forEach(item => {
     if (page === "dashboard") loadDashboard();
     if (page === "users") loadUsers();
     if (page === "schedule") loadSchedulePage();
+    if (page === "appointments") loadAppointmentsPage();
     if (page === "characters") loadCharacters();
     if (page === "backups") loadBackups();
     if (page === "status") loadStatus();
@@ -484,6 +504,9 @@ async function loadDashboard() {
  * ========================================================= */
 $("reloadUsersBtn").addEventListener("click", loadUsers);
 $("userSearch").addEventListener("input", () => renderUsersList(allUsers));
+$("apptRefreshBtn") && $("apptRefreshBtn").addEventListener("click", loadAppointmentsPage);
+$("apptAddBtn") && $("apptAddBtn").addEventListener("click", openAddAppt);
+$("apptRoleFilter") && $("apptRoleFilter").addEventListener("change", loadAppointmentsPage);
 
 async function loadUsers() {
   const box = $("usersList");
@@ -782,6 +805,75 @@ async function loadSchedule() {
     card.appendChild(save);
     editor.appendChild(card);
   });
+}
+
+/* =========================================================
+ * 约定/待办管理（v16.0）
+ * ========================================================= */
+let apptTimer = null;
+const ROLE_NAME = { nianqi: "念琦", qinghe: "清禾", jingwen: "璟雯" };
+
+async function loadAppointmentsPage() {
+  try {
+    const role = $("apptRoleFilter").value;
+    const qs = role ? `?role_id=${encodeURIComponent(role)}` : "";
+    const data = await apiGet(`/api/admin/appointments${qs}`);
+    const items = data.items || [];
+    $("apptCount").textContent = `共 ${items.length} 条`;
+    if (!items.length) {
+      $("apptList").innerHTML = '<div class="hint" style="margin-top:20px;">还没有约定。和 TA 聊到带时间地点的事会自动记进来。</div>';
+    } else {
+      $("apptList").innerHTML = items.map(a => {
+        const roleName = ROLE_NAME[a.role_id] || a.role_id;
+        const when = a.when ? `🕒 ${a.when}` : "";
+        const where = a.where ? `📍 ${a.where}` : "";
+        const expire = a.expires_in_h != null ? `剩 ${a.expires_in_h}h 自动清` : "";
+        const tags = [when, where, expire].filter(Boolean).join(" · ");
+        return `<div class="card" style="padding:14px;margin-bottom:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+            <div>
+              <span class="hint">${escapeHtml(roleName)}</span>
+              <div style="font-size:16px;margin:4px 0;">${escapeHtml(a.content)}</div>
+              <div class="hint">${tags ? escapeHtml(tags) : "—"}</div>
+            </div>
+            <div style="white-space:nowrap;">
+              <button class="btn btn-sm" onclick="finishAppt(${a.id})">✓ 完成</button>
+              <button class="btn btn-sm" onclick="delAppt(${a.id})">🗑 删除</button>
+            </div>
+          </div></div>`;
+      }).join("");
+    }
+  } catch (e) {
+    $("apptList").innerHTML = `<div class="hint error">${(e._data && e._data.error) || "约定加载失败"}</div>`;
+  }
+  // 准实时：8 秒后若仍停在本页则自动再刷一次
+  if (apptTimer) clearTimeout(apptTimer);
+  apptTimer = setTimeout(() => {
+    const pg = $("page-appointments");
+    if (pg && pg.classList.contains("active")) loadAppointmentsPage();
+  }, 8000);
+}
+
+async function finishAppt(id) {
+  try {
+    await api(`/api/admin/appointments/${id}`, { method: "PUT", body: JSON.stringify({ status: "fulfilled" }) });
+    showToast("已标记完成", "success"); loadAppointmentsPage();
+  } catch (e) { showToast((e._data && e._data.error) || "操作失败", "error"); }
+}
+async function delAppt(id) {
+  if (!confirm("删除这条约定？")) return;
+  try { await apiDelete(`/api/admin/appointments/${id}`); showToast("已删除", "success"); loadAppointmentsPage(); }
+  catch (e) { showToast((e._data && e._data.error) || "删除失败", "error"); }
+}
+function openAddAppt() {
+  const role = (prompt("角色 (nianqi/qinghe/jingwen)", "nianqi") || "nianqi").trim();
+  const content = (prompt("约定内容", "") || "").trim();
+  if (!content) return;
+  const when = (prompt("时间（可空）", "") || "").trim();
+  const where = (prompt("地点（可空）", "") || "").trim();
+  apiPost("/api/admin/appointments", { role_id: role, content, when, where })
+    .then(() => { showToast("已新增", "success"); loadAppointmentsPage(); })
+    .catch(e => showToast((e._data && e._data.error) || "新增失败", "error"));
 }
 
 /* =========================================================

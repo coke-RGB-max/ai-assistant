@@ -4232,6 +4232,89 @@ async def admin_delete_schedule(role_id: str, activity_id: int):
     conn.commit(); conn.close()
     return {"ok": True}
 
+# ============================================================
+# v16.0: 约定/待办管理 API（带时间地点，AI 自动写入，管理员可改）
+# ============================================================
+@app.get("/api/admin/appointments")
+async def admin_list_appointments(request: Request, role_id: str = "", status: str = ""):
+    """列出约定/待办，可按角色、状态过滤。"""
+    _, err = _require_admin(request)
+    if err:
+        return err
+    conn = _get_schedule_db()
+    sql = "SELECT id, session_id, role_id, user_id, content, when_text, where_text, status, created_at, delete_after FROM character_appointments WHERE 1=1"
+    params = []
+    if role_id:
+        sql += " AND role_id=?"; params.append(role_id)
+    if status:
+        sql += " AND status=?"; params.append(status)
+    sql += " ORDER BY id DESC LIMIT 500"
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    now = time.time()
+    items = []
+    for r in rows:
+        items.append({
+            "id": r["id"], "session_id": r["session_id"], "role_id": r["role_id"],
+            "content": r["content"], "when": r["when_text"], "where": r["where_text"],
+            "status": r["status"], "created_at": r["created_at"],
+            "expires_in_h": round((r["delete_after"] - now) / 3600, 1) if r["delete_after"] else None,
+        })
+    return {"items": items, "count": len(items)}
+
+@app.post("/api/admin/appointments")
+async def admin_add_appointment(request: Request):
+    """管理员手动新增一条约定。"""
+    _, err = _require_admin(request)
+    if err:
+        return err
+    body = await request.json()
+    role_id = body.get("role_id", "nianqi")
+    content = (body.get("content") or "").strip()
+    if not content:
+        return JSONResponse({"error": "content required"}, status_code=400)
+    now = time.time()
+    conn = _get_schedule_db()
+    cur = conn.execute(
+        "INSERT INTO character_appointments (session_id, role_id, user_id, content, when_text, where_text, event_at, status, created_at, delete_after) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (body.get("session_id", "manual"), role_id, body.get("user_id", ""),
+         content, body.get("when", ""), body.get("where", ""), now,
+         "pending", now, now + 7 * 86400))
+    conn.commit(); new_id = cur.lastrowid; conn.close()
+    return {"ok": True, "id": new_id}
+
+@app.put("/api/admin/appointments/{appt_id}")
+async def admin_update_appointment(appt_id: int, request: Request):
+    """改内容/时间/地点/状态。"""
+    _, err = _require_admin(request)
+    if err:
+        return err
+    body = await request.json()
+    conn = _get_schedule_db()
+    row = conn.execute("SELECT * FROM character_appointments WHERE id=?", (appt_id,)).fetchone()
+    if not row:
+        conn.close(); return JSONResponse({"error": "not found"}, status_code=404)
+    content = body.get("content", row["content"])
+    when = body.get("when", row["when_text"])
+    where = body.get("where", row["where_text"])
+    status = body.get("status", row["status"])
+    conn.execute(
+        "UPDATE character_appointments SET content=?, when_text=?, where_text=?, status=? WHERE id=?",
+        (content, when, where, status, appt_id))
+    conn.commit(); conn.close()
+    return {"ok": True}
+
+@app.delete("/api/admin/appointments/{appt_id}")
+async def admin_delete_appointment(appt_id: int, request: Request):
+    """删除一条约定。"""
+    _, err = _require_admin(request)
+    if err:
+        return err
+    conn = _get_schedule_db()
+    conn.execute("DELETE FROM character_appointments WHERE id=?", (appt_id,))
+    conn.commit(); conn.close()
+    return {"ok": True}
+
 
 if __name__ == "__main__":
     import uvicorn
