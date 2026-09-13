@@ -49,58 +49,19 @@ ALIYUN_NLS_ACCESS_KEY_SECRET = os.getenv("ALIYUN_NLS_ACCESS_KEY_SECRET", "")
 ALIYUN_NLS_APP_KEY = os.getenv("ALIYUN_NLS_APP_KEY", "")
 ALIYUN_NLS_REGION = os.getenv("ALIYUN_NLS_REGION", "cn-shanghai")  # cn-shanghai / cn-beijing / cn-shenzhen
 
-# ---- 火山引擎豆包语音 V3 双向流式 TTS 配置 ----
-# 统一走 wss://openspeech.bytedance.com/api/v3/tts/bidirection
-# 鉴权优先用新版 API Key（控制台>API Key），同时兼容旧版 APP_ID + Access Token
+# ---- 火山引擎流式 TTS 配置 ----
 VOLCENGINE_TTS_APP_ID = os.getenv("VOLCENGINE_TTS_APP_ID", "")
 VOLCENGINE_TTS_ACCESS_TOKEN = os.getenv("VOLCENGINE_TTS_ACCESS_TOKEN", "")
-VOLCENGINE_TTS_API_KEY = os.getenv("VOLCENGINE_TTS_API_KEY", "")
-VOLCENGINE_TTS_ENDPOINT = os.getenv(
-    "VOLCENGINE_TTS_ENDPOINT", "wss://openspeech.bytedance.com/api/v3/tts/bidirection"
-)
-# 各代资源 ID（一般不用改，代码按音色代号自动选择）
-VOLC_TTS_RES_2 = os.getenv("VOLCENGINE_TTS_RESOURCE_2", "seed-tts-2.0")
-VOLC_TTS_RES_1 = os.getenv("VOLCENGINE_TTS_RESOURCE_1", "seed-tts-1.0")
-VOLC_TTS_RES_ICL = os.getenv("VOLCENGINE_TTS_RESOURCE_ICL", "seed-icl-2.0")
+VOLCENGINE_TTS_CLUSTER = os.getenv("VOLCENGINE_TTS_CLUSTER", "volcano_tts")
+VOLCENGINE_TTS_VOICE = os.getenv("VOLCENGINE_TTS_VOICE", "BV001_streaming")
 
 # ---- 角色音色映射 ----
-# voice: 豆包音色 ID；speed: 语速倍率（1.0 正常，内部换算为 V3 的 speech_rate）
-# tone: 仅 2.0 / 复刻2.0 音色支持的语气指令（context_texts），1.0 音色自动忽略
 ROLE_VOICES = {
-    "nianqi": {
-        "voice": "ICL_uranus_zh_female_tianmeijiaoqiao_tob",  # 甜美娇俏（声音复刻2.0）
-        "speed": 0.95, "name": "念琦",
-        "tone": "用温柔清甜、带着亲近和一点撒娇的语气说，语速柔和",
-    },
-    "qinghe": {
-        "voice": "zh_female_sophie_uranus_bigtts",            # Sophie（语音合成2.0）
-        "speed": 1.0, "name": "清禾",
-        "tone": "用表面淡淡的、其实嘴硬心软的语气说，克制但藏着在意",
-    },
-    "jingwen": {
-        "voice": "zh_female_yuanqinvyou_moon_bigtts",         # 元气女友（语音合成1.0，moon 代）
-        "speed": 1.05, "name": "璟雯",
-        "tone": "",  # 1.0 音色不支持 context_texts，留空
-    },
+    "nianqi":  {"voice": "BV001_streaming", "speed": 0.9, "name": "念琦"},
+    "qinghe":  {"voice": "BV002_streaming", "speed": 0.95, "name": "清禾"},
+    "jingwen": {"voice": "BV003_streaming", "speed": 1.05, "name": "璟雯"},
 }
-DEFAULT_VOICE = {
-    "voice": os.getenv("VOLCENGINE_TTS_VOICE", "zh_female_sophie_uranus_bigtts"),
-    "speed": 1.0, "name": "默认", "tone": "",
-}
-
-
-def volc_resource_for_voice(voice: str) -> str:
-    """按音色代号判断所属资源（连接头 X-Api-Resource-Id）。
-
-    ICL_/saturn_ 前缀 → 声音复刻2.0；_moon_/_jupiter_ 老代号 → 语音合成1.0；
-    其余（_uranus_ 等）→ 语音合成2.0。
-    """
-    v = (voice or "").lower()
-    if v.startswith("icl_") or v.startswith("saturn_"):
-        return VOLC_TTS_RES_ICL
-    if "_moon_" in v or "_jupiter_" in v:
-        return VOLC_TTS_RES_1
-    return VOLC_TTS_RES_2
+DEFAULT_VOICE = {"voice": "BV001_streaming", "speed": 1.0, "name": "默认"}
 
 # 音频配置
 ASR_SAMPLE_RATE = 16000
@@ -199,114 +160,65 @@ async def get_cached_aliyun_token() -> str:
 
 
 # ============================================================
-# 火山引擎豆包语音 V3 双向流式 TTS WebSocket 二进制协议
-# 端点 /api/v3/tts/bidirection：4 字节定长头 + 可选事件/会话 + payload
+# 火山引擎流式 TTS WebSocket 二进制协议
 # ============================================================
-# 消息类型（byte1 高 4 位）
-V3_MSG_FULL_CLIENT = 0b0001    # 完整客户端请求
-V3_MSG_AUDIO_CLIENT = 0b0010   # 仅音频客户端请求
-V3_MSG_FULL_SERVER = 0b1001    # 完整服务端响应（JSON 控制帧）
-V3_MSG_AUDIO_SERVER = 0b1011   # 服务端音频帧
-V3_MSG_ERROR = 0b1111          # 错误帧
-# 标志位（byte1 低 4 位）
-V3_FLAG_NO_SEQ = 0b0000
-V3_FLAG_WITH_EVENT = 0b0100
-# 序列化 / 压缩（byte2）
-V3_SER_JSON = 0b0001
-V3_COMP_NONE = 0b0000
+# 消息类型
+MSG_TYPE_CLIENT_FULL = 0x00
+MSG_TYPE_CLIENT_AUDIO_ONLY = 0x01
+MSG_TYPE_SERVER_AUDIO = 0x02
+MSG_TYPE_SERVER_CONTROL = 0x03
 
 
-# 事件类型
-class V3Event:
-    START_CONNECTION = 1
-    FINISH_CONNECTION = 2
-    CONNECTION_STARTED = 50
-    CONNECTION_FAILED = 51
-    CONNECTION_FINISHED = 52
-    START_SESSION = 100
-    CANCEL_SESSION = 101
-    FINISH_SESSION = 102
-    SESSION_STARTED = 150
-    SESSION_CANCELED = 151
-    SESSION_FINISHED = 152
-    SESSION_FAILED = 153
-    TASK_REQUEST = 200
-    TTS_SENTENCE_START = 350
-    TTS_SENTENCE_END = 351
-    TTS_RESPONSE = 352
-    TTS_ENDED = 359
+def _volcengine_build_frame(msg_type: int, payload: bytes) -> bytes:
+    """构建火山引擎 TTS WebSocket 二进制帧。"""
+    # 4 bytes size (big-endian) + 1 byte type + payload
+    size = len(payload) + 1
+    return struct.pack(">I", size) + bytes([msg_type]) + payload
 
 
-# 不携带 session_id 的连接级事件
-_V3_CONNECTION_EVENTS = {
-    V3Event.START_CONNECTION, V3Event.FINISH_CONNECTION,
-    V3Event.CONNECTION_STARTED, V3Event.CONNECTION_FAILED, V3Event.CONNECTION_FINISHED,
-}
+def _volcengine_parse_frame(data: bytes) -> Tuple[int, bytes]:
+    """解析火山引擎 TTS WebSocket 二进制帧，返回 (msg_type, payload)。"""
+    if len(data) < 5:
+        return MSG_TYPE_SERVER_CONTROL, b""
+    # size = struct.unpack(">I", data[:4])[0]  # 包含 type 字节
+    msg_type = data[4]
+    payload = data[5:]
+    return msg_type, payload
 
 
-def _v3_build(msg_type: int, event: Optional[int] = None,
-              session_id: str = "", payload: bytes = b"") -> bytes:
-    """构建一个 V3 二进制帧（带事件的完整请求）。"""
-    frame = bytearray()
-    # byte0: 高 4 位 version=1，低 4 位 header_size=1（即 4 字节）
-    frame.append((1 << 4) | 1)
-    # byte1: 消息类型(高4位) + 标志(低4位)，有事件用 WithEvent
-    flag = V3_FLAG_WITH_EVENT if event is not None else V3_FLAG_NO_SEQ
-    frame.append((msg_type << 4) | flag)
-    # byte2: JSON 序列化 + 不压缩；byte3 保留
-    frame.append((V3_SER_JSON << 4) | V3_COMP_NONE)
-    frame.append(0x00)
-
-    if event is not None:
-        frame.extend(struct.pack(">i", event))
-        if event not in _V3_CONNECTION_EVENTS:
-            sid = (session_id or "").encode("utf-8")
-            frame.extend(struct.pack(">I", len(sid)))
-            if sid:
-                frame.extend(sid)
-
-    frame.extend(struct.pack(">I", len(payload)))
-    if payload:
-        frame.extend(payload)
-    return bytes(frame)
-
-
-def _v3_parse(data: bytes) -> Dict:
-    """解析服务端 V3 帧：{type,event,session_id,payload,error_code}。"""
-    out = {"type": 0, "event": 0, "session_id": "", "payload": b"", "error_code": 0}
-    if len(data) < 4:
-        return out
-    header_size = (data[0] & 0x0F) * 4
-    out["type"] = data[1] >> 4
-    flag = data[1] & 0x0F
-    pos = header_size
-
-    if flag == V3_FLAG_WITH_EVENT and len(data) >= pos + 4:
-        out["event"] = struct.unpack(">i", data[pos:pos + 4])[0]
-        pos += 4
-        if out["event"] not in _V3_CONNECTION_EVENTS and len(data) >= pos + 4:
-            sid_len = struct.unpack(">I", data[pos:pos + 4])[0]
-            pos += 4
-            if sid_len and len(data) >= pos + sid_len:
-                out["session_id"] = data[pos:pos + sid_len].decode("utf-8", "replace")
-                pos += sid_len
-
-    if out["type"] == V3_MSG_ERROR and len(data) >= pos + 4:
-        out["error_code"] = struct.unpack(">I", data[pos:pos + 4])[0]
-        pos += 4
-
-    if len(data) >= pos + 4:
-        plen = struct.unpack(">I", data[pos:pos + 4])[0]
-        pos += 4
-        if plen:
-            out["payload"] = data[pos:pos + plen]
-    return out
+def _volcengine_build_full_request(
+    text: str,
+    voice: str,
+    speed: float = 1.0,
+    reqid: Optional[str] = None,
+) -> bytes:
+    """构建完整的客户端请求（首次连接时发送）。"""
+    payload = {
+        "app": {
+            "appid": VOLCENGINE_TTS_APP_ID,
+            "token": VOLCENGINE_TTS_ACCESS_TOKEN,
+            "cluster": VOLCENGINE_TTS_CLUSTER,
+        },
+        "user": {"uid": "airi_call"},
+        "audio": {
+            "voice_type": voice,
+            "encoding": "pcm",
+            "rate": 24000,  # 显式固定输出 16bit/单声道/24kHz PCM，前端播放端按此采样率解码
+            "speed_ratio": speed,
+            "text": text,
+        },
+        "request": {
+            "reqid": reqid or uuid.uuid4().hex,
+            "operation": "submit",
+        },
+    }
+    return _volcengine_build_frame(MSG_TYPE_CLIENT_FULL, json.dumps(payload, ensure_ascii=False).encode())
 
 
-def _speed_ratio_to_speech_rate(ratio: float) -> int:
-    """语速倍率（1.0 正常）换算为 V3 speech_rate 整数，范围 [-50,100]。"""
-    rate = round((float(ratio) - 1.0) * 100)
-    return max(-50, min(100, rate))
+def _volcengine_build_audio_only_request(text: str) -> bytes:
+    """构建仅包含文本的追加请求（同一会话后续句子）。"""
+    payload = {"audio": {"text": text}}
+    return _volcengine_build_frame(MSG_TYPE_CLIENT_AUDIO_ONLY, json.dumps(payload, ensure_ascii=False).encode())
 
 
 # ============================================================
@@ -364,8 +276,6 @@ class CallSession:
         self.voice = voice_cfg["voice"]
         self.speed = voice_cfg["speed"]
         self.role_name = voice_cfg["name"]
-        # 一通电话共用一个 TTS section_id，让 2.0/复刻2.0 音色多句之间语气连贯
-        self.tts_section_id = str(uuid.uuid4())
 
     # ---- 状态转换 ----
     async def set_state(self, new_state: str):
@@ -567,9 +477,8 @@ class CallSession:
     # ---- TTS: 火山引擎流式 ----
     async def speak(self, text: str):
         """
-        使用豆包语音 V3 双向流式 TTS 合成并播放。
-        建立连接→创建会话→发文本→边收音频边转发前端，支持随时打断。
-        输出固定 16bit/单声道/24kHz PCM，前端播放端按此采样率解码。
+        使用火山引擎流式 TTS 合成并播放语音。
+        边接收音频分片边转发给前端播放。
         """
         if self._closed:
             return
@@ -577,136 +486,84 @@ class CallSession:
         await self.set_state(CallState.SPEAKING)
         self._interrupt_event.clear()
 
-        # 按音色自动选择资源（合成2.0 / 合成1.0 / 复刻2.0）
-        resource_id = volc_resource_for_voice(self.voice)
-        supports_instruction = resource_id in (VOLC_TTS_RES_2, VOLC_TTS_RES_ICL)
-        speech_rate = _speed_ratio_to_speech_rate(self.speed)
-        tts_session = str(uuid.uuid4())
-        # 固定 PCM / 24k
-        audio_params = {"format": "pcm", "sample_rate": 24000, "speech_rate": speech_rate}
-
-        def _session_payload(event: int, with_text: bool = False) -> bytes:
-            req_params: Dict = {"speaker": self.voice, "audio_params": dict(audio_params)}
-            # 仅 2.0 / 复刻2.0 支持 context_texts 语气指令
-            if supports_instruction:
-                tone = ROLE_VOICES.get(self.role_id, {}).get("tone", "")
-                if tone:
-                    req_params["context_texts"] = [tone]
-            if with_text:
-                req_params["text"] = text
-            body: Dict = {
-                "user": {"uid": "airi_call"},
-                "namespace": "BidirectionalTTS",
-                "event": event,
-                "req_params": req_params,
-            }
-            # section_id 同样仅 2.0 / 复刻2.0 支持，整通电话保持一致
-            if supports_instruction:
-                body["section_id"] = self.tts_section_id
-            return json.dumps(body, ensure_ascii=False).encode("utf-8")
-
         try:
             import websockets
 
-            # 鉴权头：优先新版 X-Api-Key，同时带旧版 APP_ID / Access Token 兜底
-            headers = {
-                "X-Api-Resource-Id": resource_id,
-                "X-Api-Connect-Id": str(uuid.uuid4()),
-            }
-            if VOLCENGINE_TTS_API_KEY:
-                headers["X-Api-Key"] = VOLCENGINE_TTS_API_KEY
-            if VOLCENGINE_TTS_APP_ID:
-                headers["X-Api-App-Id"] = VOLCENGINE_TTS_APP_ID
-            if VOLCENGINE_TTS_ACCESS_TOKEN:
-                headers["X-Api-Access-Key"] = VOLCENGINE_TTS_ACCESS_TOKEN
+            # 连接火山引擎流式 TTS
+            tts_url = "wss://openspeech.bytedance.com/api/v1/tts/ws_binary"
+            headers = [("Authorization", f"Bearer; {VOLCENGINE_TTS_ACCESS_TOKEN}")]
 
             self.tts_ws = await websockets.connect(
-                VOLCENGINE_TTS_ENDPOINT,
+                tts_url,
                 additional_headers=headers,
-                ping_interval=20,
-                ping_timeout=20,
-                max_size=16 * 1024 * 1024,
-            )
-            logger.info(
-                f"[豆包TTS] 连接 resource={resource_id} voice={self.voice} "
-                f"speech_rate={speech_rate} text长度={len(text)}"
+                ping_interval=None,
+                max_size=None,
             )
 
-            async def _send_event(event: int, with_text: bool = False, raw_payload: bytes = b""):
-                if raw_payload:
-                    payload = raw_payload
-                else:
-                    payload = _session_payload(event, with_text)
-                await self.tts_ws.send(
-                    _v3_build(V3_MSG_FULL_CLIENT, event=event,
-                              session_id=tts_session, payload=payload)
-                )
+            # 发送完整请求（首句）
+            reqid = uuid.uuid4().hex
+            full_request = _volcengine_build_full_request(
+                text=text,
+                voice=self.voice,
+                speed=self.speed,
+                reqid=reqid,
+            )
+            await self.tts_ws.send(full_request)
+            logger.info(f"[火山TTS] 已发送合成请求, reqid={reqid}, text长度={len(text)}")
 
-            async def _wait_event(target_events: set):
-                """持续读到目标事件为止；遇到失败事件直接抛错。"""
-                while True:
-                    raw = await self.tts_ws.recv()
-                    m = _v3_parse(raw)
-                    if m["type"] == V3_MSG_ERROR or m["event"] in (
-                        V3Event.CONNECTION_FAILED, V3Event.SESSION_FAILED
-                    ):
-                        detail = m["payload"].decode("utf-8", "replace")
-                        raise RuntimeError(
-                            f"豆包TTS失败 event={m['event']} code={m['error_code']} {detail}"
-                        )
-                    if m["event"] in target_events:
-                        return m
-
-            # 1) 建立连接 → ConnectionStarted
-            await _send_event(V3Event.START_CONNECTION, raw_payload=b"{}")
-            await _wait_event({V3Event.CONNECTION_STARTED})
-
-            # 2) 创建会话 → SessionStarted
-            await _send_event(V3Event.START_SESSION)
-            await _wait_event({V3Event.SESSION_STARTED})
-
-            # 3) 发送文本 TaskRequest，随后立即 FinishSession 告知没有后续文本
-            await _send_event(V3Event.TASK_REQUEST, with_text=True)
-            await _send_event(V3Event.FINISH_SESSION, raw_payload=b"{}")
-
-            # 4) 接收音频流，直到 SessionFinished / TTSEnded / 取消
+            # 接收音频流
             session_finished = False
             async for message in self.tts_ws:
                 if self._closed or self._interrupt_event.is_set():
                     break
-                m = _v3_parse(message)
-                if m["type"] == V3_MSG_AUDIO_SERVER and m["payload"]:
-                    # 音频帧 → 直接转发前端播放
-                    await self._send_audio(m["payload"])
-                elif m["type"] == V3_MSG_FULL_SERVER:
-                    ev = m["event"]
-                    if ev in (V3Event.SESSION_FINISHED, V3Event.TTS_ENDED, V3Event.SESSION_CANCELED):
-                        session_finished = (ev == V3Event.SESSION_FINISHED)
-                        logger.info(f"[豆包TTS] 合成结束 event={ev}")
+
+                msg_type, payload = _volcengine_parse_frame(message)
+
+                if msg_type == MSG_TYPE_SERVER_AUDIO:
+                    # 音频帧 → 直接转发给前端播放
+                    if payload:
+                        await self._send_audio(payload)
+
+                elif msg_type == MSG_TYPE_SERVER_CONTROL:
+                    try:
+                        ctrl = json.loads(payload.decode())
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+
+                    event = ctrl.get("event", "")
+                    code = ctrl.get("code", -1)
+
+                    if event == "session_started":
+                        self.tts_session_id = ctrl.get("session_id", "")
+                        logger.info(f"[火山TTS] session_started, session_id={self.tts_session_id}")
+
+                    elif event == "sentence_start":
+                        logger.debug("[火山TTS] sentence_start")
+
+                    elif event == "sentence_end":
+                        logger.debug("[火山TTS] sentence_end")
+
+                    elif event == "session_finished":
+                        session_finished = True
+                        logger.info("[火山TTS] session_finished")
                         break
-                    # 句子开始/结束、进度帧等忽略
-                elif m["type"] == V3_MSG_ERROR:
-                    detail = m["payload"].decode("utf-8", "replace")
-                    raise RuntimeError(f"豆包TTS错误 code={m['error_code']} {detail}")
+
+                    elif event == "error":
+                        logger.error(f"[火山TTS] error: code={code}, message={ctrl.get('message', '')}")
+                        break
 
             # 播放完成（或被打断）
             if not self._interrupt_event.is_set() and session_finished:
-                logger.info("[豆包TTS] 播放完成，回到聆听状态")
+                logger.info("[火山TTS] 播放完成，回到聆听状态")
             else:
-                logger.info("[豆包TTS] 播放被打断或提前结束")
+                logger.info("[火山TTS] 播放被打断")
 
         except Exception as e:
-            logger.error(f"[豆包TTS] 合成失败: {e}", exc_info=True)
+            logger.error(f"[火山TTS] 合成失败: {e}", exc_info=True)
             await self._send_json({"type": "error", "message": f"TTS失败: {e}"})
         finally:
-            # 通知服务端结束连接并关闭 TTS 连接
+            # 关闭 TTS 连接
             if self.tts_ws:
-                try:
-                    await self.tts_ws.send(
-                        _v3_build(V3_MSG_FULL_CLIENT, event=V3Event.FINISH_CONNECTION, payload=b"{}")
-                    )
-                except Exception:
-                    pass
                 try:
                     await self.tts_ws.close()
                 except Exception:
@@ -827,12 +684,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"  人格后端: {PERSONALITY_SERVER_URL}")
     logger.info(f"  记忆后端: {VECTOR_SERVER_URL}")
     logger.info(f"  ASR: 阿里云 NLS (region={ALIYUN_NLS_REGION}) {'已配置' if ALIYUN_NLS_APP_KEY else '⚠️ 未配置APP_KEY!'}")
-    _tts_ok = bool(VOLCENGINE_TTS_API_KEY or (VOLCENGINE_TTS_APP_ID and VOLCENGINE_TTS_ACCESS_TOKEN))
-    logger.info(f"  TTS: 豆包语音V3双向流式 {'已配置' if _tts_ok else '⚠️ 未配置 API Key / APP凭证!'}")
-    for _rid, _cfg in ROLE_VOICES.items():
-        logger.info(
-            f"    - {_cfg['name']}({_rid}): {_cfg['voice']} → {volc_resource_for_voice(_cfg['voice'])}"
-        )
+    logger.info(f"  TTS: 火山引擎流式 (voice={VOLCENGINE_TTS_VOICE}) {'已配置' if VOLCENGINE_TTS_APP_ID else '⚠️ 未配置APP_ID!'}")
     yield
     logger.info("语音后端关闭")
 
@@ -962,14 +814,9 @@ async def health():
             "configured": bool(ALIYUN_NLS_APP_KEY and ALIYUN_NLS_ACCESS_KEY_ID),
         },
         "tts": {
-            "provider": "volcengine_doubao_v3_bidirection",
-            "voices": {
-                k: {"voice": v["voice"], "resource": volc_resource_for_voice(v["voice"])}
-                for k, v in ROLE_VOICES.items()
-            },
-            "configured": bool(
-                VOLCENGINE_TTS_API_KEY or (VOLCENGINE_TTS_APP_ID and VOLCENGINE_TTS_ACCESS_TOKEN)
-            ),
+            "provider": "volcengine_streaming",
+            "voice": VOLCENGINE_TTS_VOICE,
+            "configured": bool(VOLCENGINE_TTS_APP_ID and VOLCENGINE_TTS_ACCESS_TOKEN),
         },
         "personality_url": PERSONALITY_SERVER_URL,
         "memory_url": VECTOR_SERVER_URL,
