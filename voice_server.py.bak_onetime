@@ -19,9 +19,7 @@ import hmac
 import json
 import logging
 import os
-import shutil
 import struct
-import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -821,266 +819,6 @@ class CallSession:
 
 
 # ============================================================
-# 一次性语音消息（网页“按住说话”）：解码 → ASR → 人格 → TTS(wav)
-# 与实时通话 /ws/call 相互独立，不共享状态
-# ============================================================
-def _pcm_to_wav(pcm: bytes, sample_rate: int = 24000, channels: int = 1, bits: int = 16) -> bytes:
-    """给裸 PCM（小端 16bit）加标准 WAV 头，浏览器 <audio> 可直接播放。"""
-    import io
-    byte_rate = sample_rate * channels * bits // 8
-    block_align = channels * bits // 8
-    buf = io.BytesIO()
-    buf.write(b"RIFF")
-    buf.write(struct.pack("<I", 36 + len(pcm)))
-    buf.write(b"WAVE")
-    buf.write(b"fmt ")
-    buf.write(struct.pack("<I", 16))
-    buf.write(struct.pack("<HHIIHH", 1, channels, sample_rate, byte_rate, block_align, bits))
-    buf.write(b"data")
-    buf.write(struct.pack("<I", len(pcm)))
-    buf.write(pcm)
-    return buf.getvalue()
-
-
-async def _decode_to_pcm16(audio_b64: str, audio_format: str) -> bytes:
-    """浏览器录音(webm/ogg/wav/m4a) → 16kHz/单声道/16bit 小端 PCM，供阿里云 NLS。"""
-    raw = base64.b64decode(audio_b64)
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("服务器未安装 ffmpeg，无法解码语音")
-    fmt = (audio_format or "webm").lower().replace("mpeg", "mp3")
-    if fmt not in ("webm", "ogg", "wav", "mp3", "m4a", "mp4", "opus"):
-        fmt = "webm"
-    tmpdir = tempfile.mkdtemp(prefix="voice_once_")
-    try:
-        in_path = os.path.join(tmpdir, f"input.{fmt}")
-        out_path = os.path.join(tmpdir, "out.pcm")
-        with open(in_path, "wb") as f:
-            f.write(raw)
-        proc = await asyncio.create_subprocess_exec(
-            ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", in_path,
-            "-ar", str(ASR_SAMPLE_RATE), "-ac", "1", "-f", "s16le", "-acodec", "pcm_s16le",
-            out_path,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(f"ffmpeg转码失败: {stderr[-300:].decode('utf-8', 'replace')}")
-        with open(out_path, "rb") as f:
-            return f.read()
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-async def transcribe_once(pcm_bytes: bytes) -> str:
-    """一次性整段识别：连阿里云 NLS、发完全部 PCM 后停止，返回拼接文本。"""
-    import websockets
-    if not ALIYUN_NLS_APP_KEY:
-        raise RuntimeError("阿里云 NLS 未配置 APP_KEY")
-    token = await get_cached_aliyun_token()
-    ws_url = f"{_aliyun_nls_ws_endpoint(ALIYUN_NLS_REGION)}?token={token}"
-    task_id = uuid.uuid4().hex
-
-    def _mid():
-        return uuid.uuid4().hex.replace("-", "")
-
-    async with websockets.connect(ws_url, ping_interval=None, max_size=16 * 1024 * 1024) as ws:
-        await ws.send(json.dumps({
-            "header": {
-                "appkey": ALIYUN_NLS_APP_KEY, "message_id": _mid(), "task_id": task_id,
-                "namespace": "SpeechTranscriber", "name": "StartTranscription",
-            },
-            "payload": {
-                "format": "pcm", "sample_rate": ASR_SAMPLE_RATE,
-                "enable_intermediate_result": True,
-                "enable_punctuation_prediction": True,
-                "enable_inverse_text_normalization": True,
-            },
-        }, ensure_ascii=False))
-        # 等到识别通道真正开始，再发音频
-        started = False
-        while not started:
-            d = json.loads(await ws.recv())
-            name = d.get("header", {}).get("name", "")
-            if name == "TranscriptionStarted":
-                started = True
-            elif name == "TaskFailed":
-                raise RuntimeError(f"ASR启动失败: {d.get('payload')}")
-
-        sentences: List[str] = []
-        last_partial = ""
-        finished = asyncio.Event()
-
-        async def _reader():
-            nonlocal last_partial
-            try:
-                async for m in ws:
-                    dd = json.loads(m)
-                    nm = dd.get("header", {}).get("name", "")
-                    pl = dd.get("payload", {})
-                    if nm == "ResultChanged":
-                        if pl.get("result"):
-                            last_partial = pl["result"]
-                    elif nm == "SentenceEnd":
-                        t = (pl.get("result", "") or "").strip()
-                        if t:
-                            sentences.append(t)
-                    elif nm == "TranscriptionCompleted":
-                        break
-                    elif nm == "TaskFailed":
-                        logger.error(f"[一次性ASR] TaskFailed: {pl}")
-                        break
-            finally:
-                finished.set()
-
-        reader_task = asyncio.create_task(_reader())
-        # 每片约 100ms（16k/16bit/mono = 3200 字节），稍微让步避免瞬间灌爆
-        step = 3200
-        for i in range(0, len(pcm_bytes), step):
-            await ws.send(pcm_bytes[i:i + step])
-            await asyncio.sleep(0.005)
-        await ws.send(json.dumps({
-            "header": {
-                "appkey": ALIYUN_NLS_APP_KEY, "message_id": _mid(), "task_id": task_id,
-                "namespace": "SpeechTranscriber", "name": "StopTranscription",
-            },
-        }, ensure_ascii=False))
-        try:
-            await asyncio.wait_for(finished.wait(), timeout=20.0)
-        except asyncio.TimeoutError:
-            reader_task.cancel()
-        text = "".join(sentences).strip()
-        if not text:
-            text = (last_partial or "").strip()
-        return text
-
-
-async def _personality_once(role_id: str, user_text: str, session_id: Optional[str] = None,
-                            chat_history: Optional[List[Dict]] = None,
-                            intimacy_map: Optional[Dict] = None) -> Tuple[str, Optional[str]]:
-    """调人格后端 /api/generate 做一次性生成，返回 (reply, session_id)。"""
-    payload = {
-        "mode": "single",
-        "role_ids": [role_id],
-        "user_message": user_text,
-        "memory_context": "",
-        "chat_history": chat_history or [],
-        "temperature": 0.9,
-        "max_tokens": 500,
-        "return_debug": False,
-        "enable_memory_analysis": True,
-    }
-    if session_id:
-        payload["session_id"] = session_id
-    if intimacy_map:
-        payload["intimacy_map"] = intimacy_map
-    async with httpx.AsyncClient(timeout=PERSONALITY_TIMEOUT) as client:
-        resp = await client.post(f"{PERSONALITY_SERVER_URL}/api/generate", json=payload)
-    if resp.status_code == 429:
-        return "……你说得太快啦，让我喘口气。", session_id
-    if resp.status_code != 200:
-        raise RuntimeError(f"人格后端HTTP{resp.status_code}")
-    d = resp.json()
-    return (d.get("reply", "") or ""), (d.get("session_id") or session_id)
-
-
-async def tts_once(text: str, role_id: str = "nianqi") -> bytes:
-    """豆包语音 V3 双向流式一次性合成整段，收集为 24k/16bit/mono PCM。"""
-    import websockets
-    cfg = ROLE_VOICES.get(role_id, DEFAULT_VOICE)
-    voice, speed = cfg["voice"], cfg["speed"]
-    resource_id = volc_resource_for_voice(voice)
-    supports_instruction = resource_id in (VOLC_TTS_RES_2, VOLC_TTS_RES_ICL)
-    speech_rate = _speed_ratio_to_speech_rate(speed)
-    tts_session = str(uuid.uuid4())
-    section_id = str(uuid.uuid4())
-    audio_params = {"format": "pcm", "sample_rate": 24000, "speech_rate": speech_rate}
-
-    def _payload(event: int, with_text: bool = False) -> bytes:
-        req_params: Dict[str, Any] = {"speaker": voice, "audio_params": dict(audio_params)}
-        if supports_instruction:
-            tone = cfg.get("tone", "")
-            if tone:
-                req_params["context_texts"] = [tone]
-        if with_text:
-            req_params["text"] = text
-        body: Dict[str, Any] = {
-            "user": {"uid": "airi_once"},
-            "namespace": "BidirectionalTTS",
-            "event": event,
-            "req_params": req_params,
-        }
-        if supports_instruction:
-            body["section_id"] = section_id
-        return json.dumps(body, ensure_ascii=False).encode("utf-8")
-
-    headers = {
-        "X-Api-Resource-Id": resource_id,
-        "X-Api-Connect-Id": str(uuid.uuid4()),
-    }
-    if VOLCENGINE_TTS_API_KEY:
-        headers["X-Api-Key"] = VOLCENGINE_TTS_API_KEY
-    if VOLCENGINE_TTS_APP_ID:
-        headers["X-Api-App-Id"] = VOLCENGINE_TTS_APP_ID
-    if VOLCENGINE_TTS_ACCESS_TOKEN:
-        headers["X-Api-Access-Key"] = VOLCENGINE_TTS_ACCESS_TOKEN
-
-    ws = await websockets.connect(
-        VOLCENGINE_TTS_ENDPOINT, additional_headers=headers,
-        ping_interval=20, ping_timeout=20, max_size=16 * 1024 * 1024,
-    )
-    pcm = bytearray()
-    try:
-        async def _send(event: int, with_text: bool = False, raw: bytes = b""):
-            p = raw if raw else _payload(event, with_text)
-            await ws.send(_v3_build(V3_MSG_FULL_CLIENT, event=event,
-                                    session_id=tts_session, payload=p))
-
-        async def _wait(targets: set):
-            while True:
-                m = _v3_parse(await ws.recv())
-                if m["type"] == V3_MSG_ERROR or m["event"] in (
-                    V3Event.CONNECTION_FAILED, V3Event.SESSION_FAILED
-                ):
-                    raise RuntimeError(
-                        f"豆包TTS失败 event={m['event']} code={m['error_code']} "
-                        f"{m['payload'].decode('utf-8', 'replace')}"
-                    )
-                if m["event"] in targets:
-                    return m
-
-        await _send(V3Event.START_CONNECTION, raw=b"{}")
-        await _wait({V3Event.CONNECTION_STARTED})
-        await _send(V3Event.START_SESSION)
-        await _wait({V3Event.SESSION_STARTED})
-        await _send(V3Event.TASK_REQUEST, with_text=True)
-        await _send(V3Event.FINISH_SESSION, raw=b"{}")
-        async for message in ws:
-            m = _v3_parse(message)
-            if m["type"] == V3_MSG_AUDIO_SERVER and m["payload"]:
-                pcm.extend(m["payload"])
-            elif m["type"] == V3_MSG_FULL_SERVER:
-                if m["event"] in (V3Event.SESSION_FINISHED, V3Event.TTS_ENDED,
-                                  V3Event.SESSION_CANCELED):
-                    break
-            elif m["type"] == V3_MSG_ERROR:
-                raise RuntimeError(
-                    f"豆包TTS错误 code={m['error_code']} {m['payload'].decode('utf-8', 'replace')}"
-                )
-        return bytes(pcm)
-    finally:
-        try:
-            await ws.send(_v3_build(V3_MSG_FULL_CLIENT, event=V3Event.FINISH_CONNECTION,
-                                    payload=b"{}"))
-        except Exception:
-            pass
-        try:
-            await ws.close()
-        except Exception:
-            pass
-
-
-# ============================================================
 # FastAPI 应用
 # ============================================================
 @asynccontextmanager
@@ -1239,84 +977,32 @@ async def health():
 
 
 # ============================================================
-# 一次性语音消息接口（网页“按住说话”：ASR→人格→TTS，返回文字+wav）
+# 兼容 v1 接口（保留原有一次性语音聊天，不破坏现有功能）
 # ============================================================
 @app.post("/api/voice/chat")
-async def voice_chat_once(request: Request):
+async def voice_chat_v1_compat(request: Request):
+    """
+    兼容 v1 的一次性语音聊天接口。
+    内部仍然走 v2 的 ASR→人格→TTS 流程，但不是流式。
+    """
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"success": False, "error": "无效的JSON"}, status_code=400)
 
-    audio_b64 = body.get("audio_base64", "")
-    role_ids = body.get("role_ids") or ["nianqi"]
-    role_id = role_ids[0] if role_ids else "nianqi"
+    audio_base64 = body.get("audio_base64", "")
+    role_ids = body.get("role_ids", ["nianqi"])
     session_id = body.get("session_id")
-    chat_history = body.get("chat_history") or []
-    intimacy_map = body.get("intimacy_map")
-    audio_format = (body.get("audio_format") or "webm").lower()
 
-    if not audio_b64:
+    if not audio_base64:
         return JSONResponse({"success": False, "error": "缺少audio_base64"}, status_code=400)
 
-    def _empty(reply_text, err="", code=200):
-        return JSONResponse({
-            "success": False, "error": err, "asr_text": "", "reply": reply_text,
-            "audio_base64": "", "audio_format": "wav", "session_id": session_id,
-        }, status_code=code)
-
-    # 1) 录音 → 16k PCM
-    try:
-        pcm16 = await _decode_to_pcm16(audio_b64, audio_format)
-    except Exception as e:
-        logger.error(f"[一次性语音] 解码失败: {e}")
-        return _empty("录音解析失败，请重试", str(e))
-    # 短于 0.2 秒视为没说话
-    if len(pcm16) < ASR_SAMPLE_RATE * 2 * 0.2:
-        return _empty("我没听清，能再说一遍吗？", "audio_too_short")
-
-    # 2) 一次性 ASR
-    try:
-        asr_text = await transcribe_once(pcm16)
-    except Exception as e:
-        logger.error(f"[一次性语音] ASR失败: {e}", exc_info=True)
-        return _empty("我没听清，能再说一遍吗？", str(e))
-    logger.info(f"[一次性语音] role={role_id} ASR文本={asr_text[:40]}")
-    if not asr_text:
-        return _empty("我没听清，能再说一遍吗？", "empty_asr")
-
-    # 3) 人格生成
-    try:
-        reply, new_session = await _personality_once(
-            role_id, asr_text, session_id, chat_history, intimacy_map)
-    except Exception as e:
-        logger.error(f"[一次性语音] 人格生成失败: {e}", exc_info=True)
-        return JSONResponse({
-            "success": False, "error": str(e), "asr_text": asr_text,
-            "reply": "我一时没反应过来，等一下再试试好吗？",
-            "audio_base64": "", "audio_format": "wav", "session_id": session_id,
-        })
-    if not reply:
-        reply = "……"
-
-    # 4) TTS 整段合成 → wav（合成失败也保留文字回复）
-    audio_out = ""
-    try:
-        pcm24 = await tts_once(reply, role_id)
-        if pcm24:
-            audio_out = base64.b64encode(_pcm_to_wav(pcm24, 24000)).decode()
-    except Exception as e:
-        logger.error(f"[一次性语音] TTS失败(仅返回文字): {e}", exc_info=True)
-
-    logger.info(f"[一次性语音] 完成 回复长度={len(reply)} 音频={'有' if audio_out else '无'}")
+    # 注意：v1 兼容接口暂时返回提示，引导使用 v2 流式通话
     return JSONResponse({
-        "success": True,
-        "asr_text": asr_text,
-        "reply": reply,
-        "audio_base64": audio_out,
-        "audio_format": "wav",
-        "session_id": new_session or session_id,
-    }, ensure_ascii=False)
+        "success": False,
+        "error": "v1 一次性语音接口已升级为 v2 全双工流式通话，请使用 WebSocket /ws/call 端点",
+        "v2_endpoint": "/ws/call",
+    })
 
 
 if __name__ == "__main__":

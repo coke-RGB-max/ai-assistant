@@ -57,6 +57,10 @@ class KnowledgeRouter:
         "冷不冷","热不热","多少度","几度","穿衣指数","紫外线",
     ]
 
+    # v16.0：唱歌/要歌词请求——必须联网取真实歌词，禁止凭印象瞎编
+    SONG_KEYWORDS = ["歌词","唱一首","唱首","唱个","唱一下","唱一段","唱段","唱给我听","唱给",
+        "唱唱","唱那首","唱那","来一首","来首","来段","来一"]
+
     # v15.0：地点强相关词——这类问题搜索时必须带城市，否则结果毫无意义
     # 注意：本集合只在"已经判定需要联网"之后用于决定要不要拼城市，范围可以放宽
     WEATHER_KEYWORDS = ["天气","气温","温度","多少度","几度","下雨","下雪","降雨","降雪",
@@ -74,6 +78,24 @@ class KnowledgeRouter:
         low = msg.lower()
         return any(k.lower() in low for k in self.WEATHER_KEYWORDS)
 
+    def _is_song_request(self, msg: str) -> bool:
+        """是否为'让角色唱歌/要歌词'请求（评价唱得好、问会不会唱歌不算）。"""
+        if "歌词" in msg:
+            return True
+        return any(k in msg for k in self.SONG_KEYWORDS)
+
+    def _build_song_query(self, msg: str) -> str:
+        """把'唱首/来一首xxx'规整为'xxx 歌词'，提升搜中率。"""
+        q = msg
+        for verb in ("唱一首","唱一","唱首","唱个","唱一下","唱一段","唱段","唱给我听","唱给",
+                     "唱唱","唱那首","唱那","来一首","来一","来首","来段","那首","这首",
+                     "吧","呗","呀","啊","呢","吗","？","?","，",",","。","～","~"):
+            q = q.replace(verb, " ")
+        q = " ".join(q.split())
+        if q and "歌词" not in q:
+            q += " 歌词"
+        return q or "热门歌曲 歌词"
+
     def _build_query(self, user_message: str, user_city: str) -> Tuple[str, bool]:
         """
         生成最终搜索词。
@@ -83,6 +105,8 @@ class KnowledgeRouter:
           - 地点强相关但无城市：query=原消息，missing_city=True（调用方应改为反问城市）
         """
         msg = user_message.strip()
+        if self._is_song_request(msg):
+            return self._build_song_query(msg), False
         if not self._is_location_bound(msg):
             return msg, False
         city = (user_city or "").strip()
@@ -120,6 +144,10 @@ class KnowledgeRouter:
         # v15.0：即便不是疑问句，只要命中天气/时效关键词，也直接判联网（防止"明天要带伞吗"这类陈述式提问漏网）
         if self._is_location_bound(msg) or any(k in msg for k in ("新闻","最新","最近","价格","比赛","比分","股价","行情")):
             self.last_decision = {"need_search": True, "reason": "命中天气/时效类关键词", "confidence": 0.7}
+            return self.last_decision
+        # v16.0：要她唱歌/要歌词 → 联网取真实歌词（优先于离线词判断，避免“唱首我喜欢的歌”被当成闲聊）
+        if self._is_song_request(msg):
+            self.last_decision = {"need_search": True, "reason": "唱歌/歌词请求，需联网取真实歌词", "confidence": 0.8}
             return self.last_decision
         if has_offline and not has_online_hint:
             self.last_decision = {"need_search": False, "reason": "包含情感/日常关键词，属于角色对话", "confidence": 0.85}

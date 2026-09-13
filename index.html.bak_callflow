@@ -296,16 +296,6 @@
     }
     .live2d-toggle:hover { color: var(--primary); border-color: var(--primary); }
     .live2d-stage.collapsed { display: none; }
-    /* 平时聊天默认隐藏人物背景（用 visibility 保留尺寸，PIXI 可后台正常渲染，通话瞬间即可呈现） */
-    .live2d-stage.stage-hidden { visibility: hidden; }
-    /* 人物被移入通话卡片时：铺满人物槽、背景透明、隐藏状态点/收起键/占位符 */
-    .live2d-stage.in-call {
-      position: absolute; inset: 0; width: 100%; height: 100%;
-      background: transparent; z-index: 1;
-    }
-    .live2d-stage.in-call .live2d-status,
-    .live2d-stage.in-call .live2d-toggle,
-    .live2d-stage.in-call .live2d-placeholder { display: none !important; }
     .chat-header {
       height: 60px; padding: 0 18px; display: flex; align-items: center; gap: 12px;
       border-bottom: 1px solid var(--border); background: var(--panel);
@@ -420,26 +410,8 @@
       0%, 100% { box-shadow: 0 0 0 0 rgba(22,163,74,0.4); }
       50% { box-shadow: 0 0 0 9px rgba(22,163,74,0); }
     }
-    .call-overlay { position: fixed; inset: 0; z-index: 160; background: rgba(15,23,42,0.78); display: grid; place-items: center; padding: 20px; }
-    .call-card { width: min(440px, 94vw); max-height: 94dvh; overflow-y: auto; background: var(--panel); border-radius: 24px; padding: 22px 24px 22px; box-shadow: var(--shadow-lg); text-align: center; }
-    /* 通话人物槽：接通后 Live2D 画布被搬到这里，居中显示 */
-    .call-live2d-slot {
-      position: relative; width: 100%; height: min(46vh, 420px);
-      border-radius: 18px; overflow: hidden; margin-bottom: 14px;
-      background: linear-gradient(180deg, #e9edf3 0%, #f3f5f8 100%);
-    }
-    .call-live2d-avatar {
-      position: absolute; inset: 0; display: grid; place-items: center;
-    }
-    .call-live2d-avatar.hidden { display: none; }
-    .call-live2d-avatar span {
-      font-size: 92px; line-height: 1; filter: drop-shadow(0 6px 14px rgba(0,0,0,0.12));
-      animation: call-avatar-breath 2.2s ease-in-out infinite;
-    }
-    @keyframes call-avatar-breath {
-      0%, 100% { transform: scale(1); opacity: 0.9; }
-      50% { transform: scale(1.06); opacity: 1; }
-    }
+    .call-overlay { position: fixed; inset: 0; z-index: 160; background: rgba(15,23,42,0.45); display: grid; place-items: center; padding: 20px; }
+    .call-card { width: min(420px, 92vw); background: var(--panel); border-radius: 24px; padding: 26px 24px 22px; box-shadow: var(--shadow-lg); text-align: center; }
     .call-role { font-size: 18px; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: 8px; }
     .call-status-row { margin-top: 10px; display: flex; align-items: center; justify-content: center; gap: 8px; }
     .call-state-dot { width: 10px; height: 10px; border-radius: 50%; background: #94a3b8; flex-shrink: 0; }
@@ -448,8 +420,11 @@
     .call-state-dot.thinking { background: #f59e0b; animation: blink 0.6s infinite; }
     .call-state-dot.speaking { background: #3b82f6; animation: blink 0.8s infinite; }
     .call-state-text, .call-timer { color: var(--text-soft); font-size: 13px; margin: 0; font-variant-numeric: tabular-nums; }
-    /* 微信/QQ 式通话不展示逐句字幕（通话内容仍会同步进会话记录），整块隐藏 */
-    .call-transcript { display: none !important; }
+    .call-transcript {
+      height: 156px; overflow-y: auto; background: var(--bg); border: 1px solid var(--border-soft);
+      border-radius: 14px; padding: 10px 12px; margin: 16px 0 6px; text-align: left;
+      display: flex; flex-direction: column; gap: 8px; font-size: 14px;
+    }
     .call-line { max-width: 86%; padding: 7px 11px; border-radius: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
     .call-line.user { align-self: flex-end; background: var(--primary); color: #fff; border-bottom-right-radius: 4px; }
     .call-line.ai { align-self: flex-start; background: var(--panel-2); color: var(--text); border-bottom-left-radius: 4px; }
@@ -684,7 +659,7 @@
             </div>
           </header>
           <!-- Live2D 形象窗口 -->
-          <div id="live2d-stage" class="live2d-stage stage-hidden">
+          <div id="live2d-stage" class="live2d-stage">
             <div id="live2d-status" class="live2d-status offline">
               <span class="status-dot"></span>
               <span id="live2d-status-text">离线</span>
@@ -712,9 +687,6 @@
           </div>
           <div id="call-overlay" class="call-overlay hidden">
             <div class="call-card">
-              <div class="call-live2d-slot" id="call-live2d-slot">
-                <div class="call-live2d-avatar" id="call-live2d-avatar"><span id="call-live2d-emoji">🤍</span></div>
-              </div>
               <div class="call-role"><span id="call-role-emoji">🤍</span><span id="call-role-name">念琦</span></div>
               <div class="call-status-row">
                 <span id="call-state-dot" class="call-state-dot connecting"></span>
@@ -860,7 +832,6 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     let nicknameForced = false;
     let isTyping = false;
     let streamingAI = null;  // 流式输出时的临时AI气泡
-    let streamTyper = null;  // 流式打字机平滑队列（后端chunk可能瞬间全到，前端逐字平滑呈现）
     let resetTargetUsername = null;
     // 语音录音相关
     let mediaRecorder = null;
@@ -1203,7 +1174,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
           });
         }
       } else if (msg.type === "reply_chunk") {
-        // 真正的流式输出：逻辑全文立即累加，显示层走打字机队列逐字平滑吐出
+        // 真正的流式输出：逐 token 追加到气泡
         removeTypingIndicator();
         setLive2DStatus("idle", "待机中");
         if (conv) {
@@ -1213,14 +1184,22 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
             appendMessageToDOM(streamingAI, conv);
           }
           streamingAI.content = (streamingAI.content || "") + (msg.content || "");
-          streamTyperEnqueue(msg.content || "");
+          if (streamingAI._element) streamingAI._element.textContent = streamingAI.content;
+          scrollToBottom();
         }
       } else if (msg.type === "reply_done") {
         removeTypingIndicator();
         setLive2DStatus("idle", "待机中");
-        if (streamingAI) {
-          // 交给打字机冲尾后再落库；即使 chunk 瞬间全到也会逐字补完
-          markStreamDone(msg.content, msg.imageUrl);
+        if (conv && streamingAI) {
+          if (msg.content) streamingAI.content = msg.content;
+          if (msg.imageUrl) streamingAI.imageUrl = msg.imageUrl;
+          if (streamingAI._element) streamingAI._element.textContent = streamingAI.content || "";
+          conv.messages.push(streamingAI);
+          streamingAI = null;
+          renderConversationList();
+          if (currentUser) saveConversationsToLocal(currentUser.username);
+        } else {
+          streamingAI = null;
         }
         if (msg.intimacy) {
           Object.entries(msg.intimacy).forEach(([rid, score]) => {
@@ -1340,7 +1319,6 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     function switchConversation(convId) {
       const convs = getCurrentConversations();
       if (!convs[convId]) return;
-      resetStreamTyper(); // 切走前停掉上一会话尚未打完的流式气泡
       currentConversationId = convId;
       renderConversationList();
       renderChatHeader();
@@ -1688,28 +1666,19 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       if (!stage) return;
       const stageW = stage.clientWidth || window.innerWidth;
       const stageH = stage.clientHeight || window.innerHeight;
-      const inCall = stage.classList.contains("in-call");
-      // 通话时人物在通话卡片的人物槽内：以槽自身为可视区；平时才需要扣除顶栏与输入框高度
-      let viewTop, viewH, viewW;
-      if (inCall) {
-        viewTop = 0;
-        viewW = stageW;
-        viewH = Math.max(120, stageH);
-      } else {
-        const headerH = $(".chat-header")?.offsetHeight || 60;
-        const composerH = $(".composer")?.offsetHeight || 64;
-        // 可视区域：顶栏下方到输入框上方
-        viewTop = headerH;
-        viewW = stageW;
-        viewH = Math.max(200, stageH - headerH - composerH);
-      }
+      const headerH = $(".chat-header")?.offsetHeight || 60;
+      const composerH = $(".composer")?.offsetHeight || 64;
+      // 可视区域：顶栏下方到输入框上方
+      const viewTop = headerH;
+      const viewH = Math.max(200, stageH - headerH - composerH);
+      const viewW = stageW;
       // 原始模型尺寸：优先 live2d-display 的 originalSize（取自 coreModel 画布，加载后稳定，不随变形抖动）
       const orig = model.internalModel && model.internalModel.originalSize;
       let origW = (orig && orig.width) || model.width || 2048;
       let origH = (orig && orig.height) || model.height || origW;
       if (!origW || !origH) return;
       const roleCfg = (LIVE2D_CONFIG.fit && LIVE2D_CONFIG.fit[live2dCurrentRole]) || { fill: 0.95, liftY: 0 };
-      const fill = inCall ? 0.98 : (roleCfg.fill || 0.95);
+      const fill = roleCfg.fill || 0.95;
       // 重置缩放后按宽高较小者等比缩放，保证全身完整
       model.scale.set(1, 1);
       const s = Math.min((viewW * fill) / origW, (viewH * fill) / origH);
@@ -2295,59 +2264,11 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       // 与聊天 /ws 同一个后端域名，仅路径换成 /ws/call（主后端会反代到 voice_server）
       return CONFIG.WS_URL.replace(/\/ws$/, "") + "/ws/call";
     }
-    // ===== 通话时把 Live2D 人物搬进/搬出通话卡片（平时隐藏，接通后才出现） =====
-    function attachStageToCall() {
-      const stage = $("#live2d-stage");
-      const slot = $("#call-live2d-slot");
-      if (!stage || !slot || stage.parentNode === slot) return;
-      // 记录原父节点与位置锚点（分隔条），挂断时原样搬回
-      stage._originParent = stage.parentNode;
-      stage._originAnchor = $("#stage-splitter");
-      slot.appendChild(stage);
-      stage.classList.add("in-call");
-      stage.classList.remove("stage-hidden", "collapsed");
-      stage.style.height = "";
-      const avatar = $("#call-live2d-avatar");
-      if (avatar) avatar.classList.add("hidden");
-      const _refit = () => {
-        if (live2dApp && stage.classList.contains("in-call")) {
-          live2dApp.renderer.resize(slot.clientWidth, slot.clientHeight);
-          fitLive2DModel();
-        }
-      };
-      requestAnimationFrame(_refit);
-      setTimeout(_refit, 120);
-      setTimeout(_refit, 420);
-    }
-    function detachStageFromCall() {
-      const stage = $("#live2d-stage");
-      if (!stage || !stage.classList.contains("in-call")) return;
-      const anchor = stage._originAnchor;
-      const parent = stage._originParent || (anchor && anchor.parentNode);
-      stage.classList.remove("in-call");
-      if (parent && stage.parentNode !== parent) {
-        if (anchor && anchor.parentNode === parent) parent.insertBefore(stage, anchor);
-        else parent.insertBefore(stage, parent.firstChild);
-      }
-      stage.classList.add("stage-hidden");
-      const avatar = $("#call-live2d-avatar");
-      if (avatar) avatar.classList.remove("hidden");
-      requestAnimationFrame(() => {
-        if (live2dApp) {
-          live2dApp.renderer.resize(stage.clientWidth || 800, stage.clientHeight || 260);
-          fitLive2DModel();
-        }
-      });
-    }
     function setCallUiState(state, text) {
       const dot = $("#call-state-dot"), t = $("#call-state-text");
       if (dot) dot.className = "call-state-dot " + state;
       if (t) t.textContent = text;
-      if (state === "listening") {
-        // 首次进入聆听态 = 对方“接通”，此时人物才出现在通话卡片里
-        setLive2DStatus("listening", "聆听中");
-        attachStageToCall();
-      }
+      if (state === "listening") setLive2DStatus("listening", "聆听中");
       else if (state === "thinking") setLive2DStatus("thinking", "思考中");
       else if (state === "speaking") setLive2DStatus("speaking", "说话中");
     }
@@ -2515,9 +2436,6 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       const role = getRole(roleId) || { name: "念琦", emoji: "🤍" };
       $("#call-role-name").textContent = role.name;
       $("#call-role-emoji").textContent = role.emoji;
-      const _avEmoji = $("#call-live2d-emoji");
-      if (_avEmoji) _avEmoji.textContent = role.emoji;
-      $("#call-live2d-avatar")?.classList.remove("hidden"); // 接通前先显示 emoji 占位
       $("#call-timer").textContent = "00:00";
       $("#call-transcript").innerHTML = "";
       callState.lastUserPartial = null;
@@ -2570,7 +2488,6 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       callState.pcmQueue = []; callState.pendingPcm = null;
       setLive2DMouth(0);
       if (wsConnected) setLive2DStatus("idle", "待机中");
-      detachStageFromCall(); // 人物移出通话卡片并恢复隐藏
       $("#call-btn")?.classList.remove("active");
       $("#call-overlay")?.classList.add("hidden");
     }
@@ -2584,74 +2501,6 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         await delay(speed);
       }
       isTyping = false;
-    }
-
-    // ===== 流式回复打字机：后端 chunk 可能一瞬间全到，这里用 rAF 逐字平滑吐出 =====
-    function streamTyperEnqueue(chunk) {
-      if (!streamingAI || !chunk) return;
-      if (!streamTyper) streamTyper = { pending: "", raf: 0, done: false };
-      streamTyper.pending += chunk;
-      if (!streamTyper.raf) streamTyper.raf = requestAnimationFrame(streamTyperPump);
-    }
-    function streamTyperPump() {
-      if (!streamTyper || !streamingAI) {
-        if (streamTyper) streamTyper.raf = 0;
-        return;
-      }
-      // 积压越多每帧吐得越快：既逐字平滑，又不会越积越多、迟迟打不完
-      let step = 2;
-      if (streamTyper.pending.length > 120) step = 10;
-      else if (streamTyper.pending.length > 40) step = 5;
-      if (streamTyper.done) step = Math.max(step, 6); // 收尾阶段适当加速
-      const take = streamTyper.pending.slice(0, step);
-      streamTyper.pending = streamTyper.pending.slice(step);
-      if (streamingAI._element) streamingAI._element.textContent = (streamingAI._element.textContent || "") + take;
-      scrollToBottom();
-      if (streamTyper.pending.length > 0) {
-        streamTyper.raf = requestAnimationFrame(streamTyperPump);
-      } else {
-        streamTyper.raf = 0;
-        if (streamTyper.done) finalizeStreamMessage();
-      }
-    }
-    function markStreamDone(finalText, imageUrl) {
-      if (!streamingAI) return;
-      if (finalText) streamingAI.content = finalText;
-      if (imageUrl) streamingAI.imageUrl = imageUrl;
-      if (!streamTyper) streamTyper = { pending: "", raf: 0, done: false };
-      streamTyper.done = true;
-      // 以最终全文为基准，算出“还没显示出来”的部分继续平滑补完，杜绝漏字
-      const full = streamingAI.content || "";
-      const shown = streamingAI._element ? (streamingAI._element.textContent || "") : "";
-      if (full.startsWith(shown)) {
-        streamTyper.pending = full.slice(shown.length);
-      } else {
-        // 后端最终文本与逐字内容不一致（如做了润色），直接以最终文本为准
-        streamTyper.pending = "";
-        if (streamingAI._element) streamingAI._element.textContent = full;
-      }
-      if (streamTyper.pending.length === 0) finalizeStreamMessage();
-      else if (!streamTyper.raf) streamTyper.raf = requestAnimationFrame(streamTyperPump);
-    }
-    function finalizeStreamMessage() {
-      if (streamTyper) { if (streamTyper.raf) cancelAnimationFrame(streamTyper.raf); streamTyper = null; }
-      if (!streamingAI) return;
-      const conv = getCurrentConversation();
-      // 最终全量校正一次，保证落库与显示都和后端完全一致
-      if (streamingAI._element) streamingAI._element.textContent = streamingAI.content || "";
-      if (conv) {
-        conv.messages.push(streamingAI);
-        renderConversationList();
-        if (currentUser) saveConversationsToLocal(currentUser.username);
-      }
-      streamingAI = null;
-    }
-    function resetStreamTyper() {
-      // 切换会话/登出时中止正在进行的打字机，避免半截气泡串到别的会话
-      if (streamTyper && streamTyper.raf) cancelAnimationFrame(streamTyper.raf);
-      streamTyper = null;
-      if (streamingAI && streamingAI._element) streamingAI._element.remove();
-      streamingAI = null;
     }
 
     // ===== 昵称 =====
@@ -2983,7 +2832,6 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       } catch (e) {}
       if (ws) { ws.onclose = null; ws.close(); }
       ws = null;
-      resetStreamTyper();
       currentUser = null;
       clearAuth();
       currentConversationId = null;
