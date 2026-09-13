@@ -792,26 +792,22 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     let currentAudio = null;  // 当前播放的语音
     // ===== Live2D 形象配置 =====
     const LIVE2D_CONFIG = {
-      // 每个角色的模型路径（R2 上的 model3.json 入口）
-      // 念琦→Dua(白发软萌)  清禾→Haru(知性学姐)  璟雯→Epsilon(活泼傲娇)
+      // 每个角色的模型路径（相对 index.html 的路径）
+      // 念琦→Hiyori(温柔)  清禾→Haru(知性学姐)  璟雯→Epsilon(活泼傲娇)
       models: {
-        nianqi:  "https://r2.jinwen.online/nianqi/nianqi.model3.json",
+        nianqi:  "https://r2.jinwen.online/hiyori/hiyori_free/runtime/hiyori_free_t08.model3.json",
         qinghe:  "https://r2.jinwen.online/haru/runtime/haru.model3.json",
         jingwen: "https://r2.jinwen.online/epsilon/epsilon_free/runtime/Epsilon_free.model3.json",
       },
-      // 每角色居中自适应微调：fill=人物占可视区域比例(0~1)；liftY=垂直微调(正上移/负下移，单位为可视高占比)
-      fit: {
-        nianqi:  { fill: 0.98, liftY: 0.0 },
-        qinghe:  { fill: 0.94, liftY: 0.0 },
-        jingwen: { fill: 0.94, liftY: 0.0 },
-      },
+      // 模型显示缩放（三个模型尺寸不同，可分别调整，统一用一个值先跑通）
+      scale: 0.15,
+      // 模型垂直偏移（正数向下）
+      yOffset: 50,
       // 自动眨眼间隔范围（毫秒）
       blinkIntervalMin: 2500,
       blinkIntervalMax: 6000,
       // 眨眼持续时间（毫秒）
       blinkDuration: 150,
-      // 摸头/触碰互动冷却（毫秒），防止连点刷表情
-      interactCooldown: 700,
     };
     // Live2D 运行时状态
     let live2dApp = null;        // PIXI 应用
@@ -826,10 +822,6 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     let live2dLipsyncRAF = null;  // 口型同步的 requestAnimationFrame ID
     let live2dAudioCtx = null;     // 口型同步用的 AudioContext
     let live2dAnalyser = null;     // 口型同步用的 AnalyserNode
-    let live2dPointer = { x: 0, y: 0, inside: false }; // 指针归一化坐标(-1~1)，驱动视线/头部跟随
-    let live2dReact = { angleX: 0, angleY: 0, angleZ: 0, until: 0 }; // 被摸后的临时头部反应
-    let live2dHeadSmooth = { x: 0, y: 0, z: 0 };      // 头部角度平滑值
-    let live2dLastInteract = 0;    // 上次互动时间戳（冷却用）
 
     const $ = (s) => document.querySelector(s);
     const $$ = (s) => Array.from(document.querySelectorAll(s));
@@ -1588,12 +1580,6 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         live2dApp.stage.addChild(model);
         live2dModel = model;
         live2dCurrentRole = roleId;
-        // 模型的物理/布局要若干帧才稳定，连续多次校正缩放，避免加载瞬间原始尺寸没算好导致偏小或裁切
-        const refit = () => fitLive2DModel(model);
-        requestAnimationFrame(() => requestAnimationFrame(refit));
-        setTimeout(refit, 120);
-        setTimeout(refit, 400);
-        setTimeout(refit, 900);
         // 隐藏占位符
         if (ph) ph.style.display = "none";
         console.log(`[Live2D] 模型加载成功: ${roleId}`);
@@ -1606,7 +1592,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         }
       }
     }
-    // 按当前窗口自适应：人物在顶栏与输入框之间的可视区正中央，等比缩放、完整不裁切，电脑/手机通用
+    // 按当前窗口大小自适应：人物填满中间可视区、水平居中、不被顶栏/输入框遮挡
     function fitLive2DModel(model) {
       model = model || live2dModel;
       if (!model) return;
@@ -1616,50 +1602,21 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       const stageH = stage.clientHeight || window.innerHeight;
       const headerH = $(".chat-header")?.offsetHeight || 60;
       const composerH = $(".composer")?.offsetHeight || 64;
-      // 可视区域：顶栏下方到输入框上方
-      const viewTop = headerH;
-      const viewH = Math.max(200, stageH - headerH - composerH);
-      const viewW = stageW;
-      // 原始模型尺寸：优先 live2d-display 的 originalSize（取自 coreModel 画布，加载后稳定，不随变形抖动）
-      const orig = model.internalModel && model.internalModel.originalSize;
-      let origW = (orig && orig.width) || model.width || 2048;
-      let origH = (orig && orig.height) || model.height || origW;
-      if (!origW || !origH) return;
-      const roleCfg = (LIVE2D_CONFIG.fit && LIVE2D_CONFIG.fit[live2dCurrentRole]) || { fill: 0.95, liftY: 0 };
-      const fill = roleCfg.fill || 0.95;
-      // 重置缩放后按宽高较小者等比缩放，保证全身完整
+      // 中间可用高度（顶栏与输入框之间）
+      const availH = Math.max(200, stageH - headerH - composerH);
+      const availW = stageW;
+      // 先把缩放重置为 1，实测模型真实像素包围盒（各模型 SDK 属性不一致，实测最稳）
       model.scale.set(1, 1);
-      const s = Math.min((viewW * fill) / origW, (viewH * fill) / origH);
+      const origH = model.height || 2048;
+      const origW = model.width || origH;
+      // 手机窄屏按宽度缩、电脑宽屏按高度缩，取较小者保证全身完整不裁切
+      const sByH = (availH * 0.92) / origH;
+      const sByW = (availW * 0.86) / origW;
+      const s = Math.min(sByH, sByW);
       model.scale.set(s, s);
-      // 中心锚点，落到可视区几何中心（水平居中、垂直居中）
-      model.anchor.set(0.5, 0.5);
-      model.x = viewW / 2;
-      model.y = viewTop + viewH / 2 + (roleCfg.liftY || 0) * viewH;
-    }
-    // 取当前角色亲密度（0~100），摸头反应分档用
-    function getCurrentRoleIntimacy() {
-      const conv = (typeof getCurrentConversation === "function") && getCurrentConversation();
-      const rid = live2dCurrentRole || (conv && (conv.roleId || (conv.roleIds && conv.roleIds[0]))) || "nianqi";
-      let v = conv && conv.intimacy;
-      if ((v === undefined || v === null) && currentUser && currentUser.intimacy) v = currentUser.intimacy[rid];
-      v = Number(v);
-      if (!isFinite(v)) v = 50;
-      return Math.max(0, Math.min(100, v));
-    }
-    function pickRandom(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
-    // 播放一个在 model3.json 里注册好的表情，持续 ms 后回到默认（这些表情是开关型，reset 即关闭）
-    function playLive2DExpression(name, ms) {
-      const model = live2dModel;
-      if (!model || !name) return;
-      try {
-        const em = model.internalModel && model.internalModel.motionManager && model.internalModel.motionManager.expressionManager;
-        const has = em && em.definitions && em.definitions.some(d => d.Name === name);
-        if (!has) return; // 该模型没有这个表情就静默跳过，保证三角色兼容
-        model.expression(name);
-        if (ms) {
-          setTimeout(() => { try { em.resetExpression(); } catch (_) {} }, ms);
-        }
-      } catch (_) {}
+      model.anchor.set(0.5, 1);
+      model.x = stageW / 2;
+      model.y = stageH - composerH - 6; // 脚尖停在输入框上沿上方，留一点余量
     }
     function setupLive2DModel(model) {
       // 自适应缩放与居中
@@ -1670,76 +1627,18 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       // 眼睛睁开
       setLive2DParameter(model, "ParamEyeLOpen", 1);
       setLive2DParameter(model, "ParamEyeROpen", 1);
-      // 指针在形象区移动：记录归一化坐标，动画循环据此做视线/头部跟随（兼容触摸）
-      const stage = $("#live2d-stage");
-      if (stage && !stage._live2dPointerBound) {
-        stage._live2dPointerBound = true;
-        stage.addEventListener("pointermove", (ev) => {
-          const rect = stage.getBoundingClientRect();
-          if (!rect.width || !rect.height) return;
-          const cx = (ev.clientX - rect.left) / rect.width;
-          const cy = (ev.clientY - rect.top) / rect.height;
-          live2dPointer.x = Math.max(-1, Math.min(1, (cx - 0.5) * 2));
-          live2dPointer.y = Math.max(-1, Math.min(1, (cy - 0.5) * 2));
-          live2dPointer.inside = true;
-        });
-        stage.addEventListener("pointerleave", () => { live2dPointer.inside = false; });
-      }
-      // 点击/触摸模型：按部位 + 亲密度给出 抗拒/害羞/享受 反应
+      // 点击模型触发随机表情
       model.interactive = true;
-      model.on("pointerdown", (ev) => {
-        const now = performance.now();
-        if (now - live2dLastInteract < LIVE2D_CONFIG.interactCooldown) return;
-        live2dLastInteract = now;
-        handlePetInteraction(model, ev);
+      model.on("pointerdown", () => {
+        const expressions = ["ParamBrowLY", "ParamBrowRY"];
+        expressions.forEach(p => {
+          const cur = getLive2DParameter(model, p) || 0;
+          setLive2DParameter(model, p, cur + (Math.random() - 0.5) * 0.5);
+        });
+        setTimeout(() => {
+          expressions.forEach(p => setLive2DParameter(model, p, 0));
+        }, 500);
       });
-    }
-    // 摸头/触碰反应：区分头部与身体，按亲密度三档（<35 生疏抗拒 / 35~70 害羞 / >=70 享受）
-    function handlePetInteraction(model, ev) {
-      const intimacy = getCurrentRoleIntimacy();
-      const reactMs = 1400;
-      // 判断点击的是头还是身体：把点击点换算到模型本地坐标，按纵向比例分区
-      let zone = "body";
-      try {
-        const g = ev.global || (ev.data && ev.data.global);
-        if (g) {
-          const local = model.toLocal(g);
-          const orig = (model.internalModel && model.internalModel.originalSize) || { width: model.width, height: model.height };
-          const ny = (local.y + orig.height / 2) / orig.height; // 0=头顶 1=脚底
-          if (ny >= 0 && ny <= 0.34) zone = "head";
-        }
-      } catch (_) {}
-      live2dReact.until = performance.now() + reactMs;
-      const resetEyeSmile = () => setTimeout(() => {
-        setLive2DParameter(live2dModel, "ParamEyeLSmile", 0);
-        setLive2DParameter(live2dModel, "ParamEyeRSmile", 0);
-      }, reactMs);
-      if (zone === "head") {
-        if (intimacy < 35) {                 // 生疏：偏头躲开、不高兴
-          live2dReact.angleX = -0.2; live2dReact.angleY = 0.0; live2dReact.angleZ = 0.35;
-          playLive2DExpression(pickRandom(["angry", "dark_face"]), reactMs);
-        } else if (intimacy < 70) {          // 熟悉：害羞低头、脸红
-          live2dReact.angleX = 0.0; live2dReact.angleY = 0.12; live2dReact.angleZ = -0.12;
-          playLive2DExpression(pickRandom(["blush", "sweat", "blush"]), reactMs);
-        } else {                             // 亲密：开心享受、爱心/星星眼+笑眼
-          live2dReact.angleX = 0.0; live2dReact.angleY = -0.1; live2dReact.angleZ = 0.08;
-          playLive2DExpression(pickRandom(["heart_eyes", "star_eyes", "sparkle_eyes", "blush"]), reactMs);
-          setLive2DParameter(model, "ParamEyeLSmile", 1);
-          setLive2DParameter(model, "ParamEyeRSmile", 1);
-          resetEyeSmile();
-        }
-      } else {
-        if (intimacy < 35) {                 // 碰身体：回避
-          live2dReact.angleX = 0.25; live2dReact.angleY = 0; live2dReact.angleZ = 0;
-          playLive2DExpression("dark_face", reactMs);
-        } else if (intimacy < 70) {
-          live2dReact.angleX = 0; live2dReact.angleY = 0.1; live2dReact.angleZ = 0;
-          playLive2DExpression("blush", reactMs);
-        } else {                             // 亲密：比心/挥手
-          live2dReact.angleX = 0; live2dReact.angleY = 0; live2dReact.angleZ = -0.1;
-          playLive2DExpression(pickRandom(["finger_heart", "wave_hand", "heart", "blush"]), reactMs);
-        }
-      }
     }
     // 参数名别名解析：同时支持驼峰(ParamMouthOpenY)和大写下划线(PARAM_MOUTH_OPEN_Y)
     function getParamAliases(paramId) {
@@ -1801,50 +1700,34 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     function startLive2DAnimationLoop() {
       if (!live2dApp) return;
       let time = 0;
-      const lerp = (a, b, k) => a + (b - a) * k;
       live2dApp.ticker.add(() => {
         time += 1 / 60;
         if (!live2dModel) return;
-        const model = live2dModel;
         // 呼吸（身体轻微起伏）
         const breath = Math.sin(time * 1.2) * 0.015;
-        setLive2DParameter(model, "ParamBreath", breath + 0.5);
-        // 指针在画面内时头/眼跟随鼠标，离开时回正并保留更明显的自然摆动
-        const px = live2dPointer.inside ? live2dPointer.x : 0;
-        const py = live2dPointer.inside ? live2dPointer.y : 0;
-        const swayAmp = live2dPointer.inside ? 0.03 : 0.08;
-        const idleX = Math.sin(time * 0.7) * swayAmp;
-        const idleY = Math.sin(time * 0.5 + 1) * (live2dPointer.inside ? 0.02 : 0.04);
-        // 摸头反应偏移：生效期内叠加，过期后快速衰减归零
-        if (performance.now() >= live2dReact.until) {
-          live2dReact.angleX *= 0.85; live2dReact.angleY *= 0.85; live2dReact.angleZ *= 0.85;
-        }
-        const targetHeadX = px * 0.35 + idleX + live2dReact.angleX;
-        const targetHeadY = -py * 0.25 + idleY + live2dReact.angleY;
-        const targetHeadZ = live2dReact.angleZ + Math.sin(time * 0.4) * 0.02;
-        // 头部角度平滑，避免抖动
-        live2dHeadSmooth.x = lerp(live2dHeadSmooth.x, targetHeadX, 0.18);
-        live2dHeadSmooth.y = lerp(live2dHeadSmooth.y, targetHeadY, 0.18);
-        live2dHeadSmooth.z = lerp(live2dHeadSmooth.z, targetHeadZ, 0.18);
-        setLive2DParameter(model, "ParamAngleX", live2dHeadSmooth.x);
-        setLive2DParameter(model, "ParamAngleY", live2dHeadSmooth.y);
-        setLive2DParameter(model, "ParamAngleZ", live2dHeadSmooth.z);
-        // 身体只保留极轻的自然摆动（与头部解耦，更自然）
-        setLive2DParameter(model, "ParamBodyAngleX", Math.sin(time * 0.6) * 0.04);
-        setLive2DParameter(model, "ParamBodyAngleY", Math.sin(time * 0.45 + 1) * 0.02);
-        // 眼球跟随指针（幅度比头部大），叠加轻微漂移
-        setLive2DParameter(model, "ParamEyeBallX", px * 0.6 + Math.sin(time * 0.9) * 0.06);
-        setLive2DParameter(model, "ParamEyeBallY", -py * 0.5 + Math.sin(time * 0.6 + 2) * 0.04);
+        setLive2DParameter(live2dModel, "ParamBreath", breath + 0.5);
+        // 头部轻微左右摆动
+        const headX = Math.sin(time * 0.7) * 0.08;
+        setLive2DParameter(live2dModel, "ParamBodyAngleX", headX);
+        // 头部轻微上下
+        const headY = Math.sin(time * 0.5 + 1) * 0.04;
+        setLive2DParameter(live2dModel, "ParamBodyAngleY", headY);
+        // 视线微动
+        const eyeX = Math.sin(time * 0.9) * 0.15;
+        const eyeY = Math.sin(time * 0.6 + 2) * 0.1;
+        setLive2DParameter(live2dModel, "ParamEyeBallX", eyeX);
+        setLive2DParameter(live2dModel, "ParamEyeBallY", eyeY);
         // 眨眼处理
         updateBlink();
         // 嘴部平滑（口型同步）
         const targetMouth = live2dMouthValue;
-        const curMouth = getLive2DParameter(model, "ParamMouthOpenY") || 0;
+        const curMouth = getLive2DParameter(live2dModel, "ParamMouthOpenY") || 0;
         const smoothMouth = curMouth + (targetMouth - curMouth) * 0.3;
-        setLive2DParameter(model, "ParamMouthOpenY", smoothMouth);
-        // 说话时头部轻微点动
+        setLive2DParameter(live2dModel, "ParamMouthOpenY", smoothMouth);
+        // 说话时轻微摇头
         if (live2dMouthValue > 0.1) {
-          setLive2DParameter(model, "ParamAngleX", live2dHeadSmooth.x + Math.sin(time * 8) * 0.03);
+          const talkHead = Math.sin(time * 8) * 0.03;
+          setLive2DParameter(live2dModel, "ParamBodyAngleX", headX + talkHead);
         }
       });
     }
@@ -2603,7 +2486,8 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
             stage.style.height = newH + "px";
             if (live2dApp && live2dModel) {
               live2dApp.renderer.resize(stage.clientWidth, stage.clientHeight);
-              fitLive2DModel();
+              live2dModel.x = stage.clientWidth / 2;
+              live2dModel.y = stage.clientHeight - LIVE2D_CONFIG.yOffset;
             }
           };
           const onUp = (ev) => {
