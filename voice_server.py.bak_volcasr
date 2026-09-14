@@ -4,7 +4,7 @@
 
 v1.0: 一次性 ASR→LLM→TTS（SiliconFlow SenseVoice + edge-tts）
 v2.0: 全双工实时通话
-  - ASR: 火山引擎豆包大模型语音识别（WebSocket，一次性 nostream + 实时双向流式）
+  - ASR: 阿里云 NLS 实时语音识别（WebSocket 流式，低延迟）
   - TTS: 火山引擎流式 TTS（WebSocket 双向流式，边生成边播放）
   - 全双工: 用户说话时可打断 AI，AI 说话时抑制回声
   - 对接: 人格后端 /api/generate（保持会话上下文）
@@ -45,7 +45,7 @@ PERSONALITY_SERVER_URL = os.getenv("PERSONALITY_SERVER_URL", "http://127.0.0.1:8
 VECTOR_SERVER_URL = os.getenv("VECTOR_SERVER_URL", "http://127.0.0.1:8001")
 VECTOR_API_TOKEN = os.getenv("VECTOR_API_TOKEN", "change_me_strong_secret_key_123456")
 
-# ---- 阿里云 NLS 实时 ASR 配置（已弃用：ASR 已切换为火山豆包，以下仅保留以便回退）----
+# ---- 阿里云 NLS 实时 ASR 配置 ----
 ALIYUN_NLS_ACCESS_KEY_ID = os.getenv("ALIYUN_NLS_ACCESS_KEY_ID", "")
 ALIYUN_NLS_ACCESS_KEY_SECRET = os.getenv("ALIYUN_NLS_ACCESS_KEY_SECRET", "")
 ALIYUN_NLS_APP_KEY = os.getenv("ALIYUN_NLS_APP_KEY", "")
@@ -64,21 +64,6 @@ VOLCENGINE_TTS_ENDPOINT = os.getenv(
 VOLC_TTS_RES_2 = os.getenv("VOLCENGINE_TTS_RESOURCE_2", "seed-tts-2.0")
 VOLC_TTS_RES_1 = os.getenv("VOLCENGINE_TTS_RESOURCE_1", "seed-tts-1.0")
 VOLC_TTS_RES_ICL = os.getenv("VOLCENGINE_TTS_RESOURCE_ICL", "seed-icl-2.0")
-
-# ---- 火山引擎豆包「大模型语音识别 ASR」配置（替代阿里云 NLS）----
-# 凭证默认复用上面 TTS 的同一把火山 API Key（同一应用在控制台开通“语音识别”即可），
-# 也可用 VOLCENGINE_ASR_* 单独覆盖。
-VOLCENGINE_ASR_API_KEY = os.getenv("VOLCENGINE_ASR_API_KEY", "") or VOLCENGINE_TTS_API_KEY
-VOLCENGINE_ASR_APP_ID = os.getenv("VOLCENGINE_ASR_APP_ID", "") or VOLCENGINE_TTS_APP_ID
-VOLCENGINE_ASR_ACCESS_TOKEN = os.getenv("VOLCENGINE_ASR_ACCESS_TOKEN", "") or VOLCENGINE_TTS_ACCESS_TOKEN
-# 1.0 小时版 volc.bigasr.sauc.duration（按量后付费）；2.0 为 volc.seedasr.sauc.duration
-VOLCENGINE_ASR_RESOURCE = os.getenv("VOLCENGINE_ASR_RESOURCE", "volc.bigasr.sauc.duration")
-VOLCENGINE_ASR_STREAM_ENDPOINT = os.getenv(
-    "VOLCENGINE_ASR_STREAM_ENDPOINT", "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel"
-)
-VOLCENGINE_ASR_NOSTREAM_ENDPOINT = os.getenv(
-    "VOLCENGINE_ASR_NOSTREAM_ENDPOINT", "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream"
-)
 
 # ---- 角色音色映射 ----
 # voice: 豆包音色 ID；speed: 语速倍率（1.0 正常，内部换算为 V3 的 speech_rate）
@@ -216,139 +201,6 @@ async def get_cached_aliyun_token() -> str:
 
 
 # ============================================================
-# 火山引擎豆包「大模型语音识别 ASR」二进制协议（替代阿里云 NLS）
-# 双向流式:  /api/v3/sauc/bigmodel        （实时通话，边说边出字）
-# 流式输入:  /api/v3/sauc/bigmodel_nostream（一次性整段，发完负包出最终结果）
-# 帧 = 4B 定长头(大端) [+4B sequence(按flags)] + 4B payload size(大端) + payload
-# 不启用 gzip，payload 直接为 JSON 或裸 PCM，最稳。
-# ============================================================
-_ASR_MSG_FULL_CLIENT = 0b0001    # 端上：请求参数（JSON）
-_ASR_MSG_AUDIO_CLIENT = 0b0010   # 端上：音频数据
-_ASR_MSG_FULL_SERVER = 0b1001    # 服务端：识别结果
-_ASR_MSG_ERROR = 0b1111          # 服务端：错误
-_ASR_FLAG_LAST = 0b0010          # 最后一包（负包，不带 sequence）
-_ASR_SER_JSON = 0b0001
-_ASR_SER_RAW = 0b0000
-_ASR_COMP_NONE = 0b0000
-
-
-def _asr_configured() -> bool:
-    """新版 X-Api-Key 或旧版 APP_ID+Access Token 任一可用即视为已配置。"""
-    return bool(VOLCENGINE_ASR_API_KEY or (VOLCENGINE_ASR_APP_ID and VOLCENGINE_ASR_ACCESS_TOKEN))
-
-
-def _asr_frame(msg_type: int, payload: bytes, flags: int = 0, serialization: int = _ASR_SER_RAW) -> bytes:
-    """组装一个火山 ASR 二进制帧（不压缩、大端、不带 sequence）。"""
-    header = bytes([
-        0x11,  # protocol version=1，header size=1（实际 1*4=4 字节）
-        ((msg_type & 0x0F) << 4) | (flags & 0x0F),
-        ((serialization & 0x0F) << 4) | _ASR_COMP_NONE,
-        0x00,
-    ])
-    return header + struct.pack(">I", len(payload)) + payload
-
-
-def _asr_full_request(result_type: str = "full") -> bytes:
-    """第一包 full client request：声明音频参数与识别选项。"""
-    payload_obj = {
-        "user": {"uid": "flexichrono"},
-        "audio": {
-            "format": "pcm", "codec": "raw",
-            "rate": ASR_SAMPLE_RATE, "bits": 16, "channel": 1,
-            "model_name": "bigmodel",
-        },
-        "request": {
-            "model_name": "bigmodel",
-            "enable_itn": True,      # 数字/日期等书面化
-            "enable_punc": True,     # 自动标点
-            "enable_ddc": False,
-            "show_utterances": True, # 输出分句，便于实时上屏与定版触发
-            "result_type": result_type,
-            "end_window_size": 800,  # 静音 800ms 判停分句
-        },
-    }
-    body = json.dumps(payload_obj, ensure_ascii=False).encode("utf-8")
-    return _asr_frame(_ASR_MSG_FULL_CLIENT, body, serialization=_ASR_SER_JSON)
-
-
-def _asr_audio_frame(pcm: bytes, last: bool = False) -> bytes:
-    """音频包（裸 16k/16bit/mono PCM）；last=True 即最后一包（负包）。"""
-    flags = _ASR_FLAG_LAST if last else 0b0000
-    return _asr_frame(_ASR_MSG_AUDIO_CLIENT, pcm, flags=flags, serialization=_ASR_SER_RAW)
-
-
-def _asr_handshake_headers() -> Dict[str, str]:
-    """WebSocket 握手鉴权头：新版 X-Api-Key 优先，同时兼容旧版 APP_ID/Access Token。"""
-    headers = {
-        "X-Api-Resource-Id": VOLCENGINE_ASR_RESOURCE,
-        "X-Api-Request-Id": str(uuid.uuid4()),
-        "X-Api-Sequence": "-1",
-    }
-    if VOLCENGINE_ASR_API_KEY:
-        headers["X-Api-Key"] = VOLCENGINE_ASR_API_KEY
-    if VOLCENGINE_ASR_APP_ID:
-        headers["X-Api-App-Key"] = VOLCENGINE_ASR_APP_ID
-    if VOLCENGINE_ASR_ACCESS_TOKEN:
-        headers["X-Api-Access-Key"] = VOLCENGINE_ASR_ACCESS_TOKEN
-    return headers
-
-
-def _asr_parse_frame(data: bytes) -> Tuple[int, int, Optional[Dict[str, Any]]]:
-    """解析服务端帧 → (msg_type, flags, payload_json 或 None)。按 flags 处理可选 sequence。"""
-    if not data or len(data) < 8:
-        raise ValueError(f"火山ASR帧过短: {len(data) if data else 0} 字节")
-    b1, b2 = data[1], data[2]
-    msg_type = (b1 >> 4) & 0x0F
-    flags = b1 & 0x0F
-    serialization = (b2 >> 4) & 0x0F
-    compression = b2 & 0x0F
-    idx = 4
-    if flags in (0b0001, 0b0011):  # 这两种 flags 下，header 后带 4 字节 sequence
-        idx += 4
-    (size,) = struct.unpack(">I", data[idx:idx + 4])
-    idx += 4
-    payload = data[idx:idx + size]
-    if compression == 0b0001:
-        import gzip
-        payload = gzip.decompress(payload)
-    # 只有 JSON 序列化的帧（服务端结果/错误）才解析；裸音频等返回 None
-    if not payload or serialization != _ASR_SER_JSON:
-        return msg_type, flags, None
-    return msg_type, flags, json.loads(payload.decode("utf-8"))
-
-
-def _asr_one_text(node: Any) -> str:
-    if not isinstance(node, dict):
-        return ""
-    if node.get("text"):
-        return node["text"]
-    return "".join((u.get("text", "") or "") for u in (node.get("utterances") or []))
-
-
-def _asr_extract_text(obj: Dict[str, Any]) -> str:
-    """从一帧结果取整段文本，兼容 result 为 dict 或 list。"""
-    result = obj.get("result")
-    if isinstance(result, dict):
-        return _asr_one_text(result)
-    if isinstance(result, list):
-        return "".join(_asr_one_text(r) for r in result)
-    return ""
-
-
-def _asr_split_utterances(obj: Dict[str, Any]) -> Tuple[str, List[str]]:
-    """供实时通话：返回 (进行中未定版文本, 本次定版 definite 分句文本列表)。"""
-    result = obj.get("result")
-    if not isinstance(result, dict):
-        return "", []
-    utts = result.get("utterances") or []
-    ongoing = "".join((u.get("text", "") or "") for u in utts if not u.get("definite"))
-    finals = [t.strip() for u in utts for t in [(u.get("text", "") or "").strip()] if u.get("definite") and t]
-    if not utts and result.get("text"):
-        ongoing = result["text"]
-    return ongoing, finals
-
-
-# ============================================================
 # 火山引擎豆包语音 V3 双向流式 TTS WebSocket 二进制协议
 # 端点 /api/v3/tts/bidirection：4 字节定长头 + 可选事件/会话 + payload
 # ============================================================
@@ -472,7 +324,7 @@ class CallState:
 class CallSession:
     """
     单个通话会话的完整状态管理。
-    负责协调：客户端 WS ↔ 火山豆包 ASR ↔ 人格后端 ↔ 火山引擎 TTS
+    负责协调：客户端 WS ↔ 阿里云 NLS ASR ↔ 人格后端 ↔ 火山引擎 TTS
     """
 
     def __init__(
@@ -492,7 +344,7 @@ class CallSession:
         self.transcript: List[Dict[str, str]] = []  # [{role, content, timestamp}]
 
         # ASR 相关
-        self.asr_ws = None  # 火山 ASR WebSocket
+        self.asr_ws = None  # 阿里云 NLS WebSocket
         self.asr_task_id = None
         self.asr_ready = False
         self.asr_partial_text = ""  # 中间识别结果
@@ -540,86 +392,116 @@ class CallSession:
         except Exception as e:
             logger.debug(f"[通话] 发送音频失败: {e}")
 
-    # ---- ASR: 火山引擎豆包大模型语音识别（双向流式）----
+    # ---- ASR: 阿里云 NLS ----
     async def start_asr(self):
-        """连接火山 ASR 双向流式接口并启动实时识别。"""
+        """连接阿里云 NLS 并启动实时识别。"""
         try:
-            if not _asr_configured():
-                raise RuntimeError("火山 ASR 未配置 API Key / APP 凭证")
+            token = await get_cached_aliyun_token()
+            ws_url = f"{_aliyun_nls_ws_endpoint(ALIYUN_NLS_REGION)}?token={token}"
+
+            # 使用 websockets 库连接阿里云 NLS
             import websockets
-            headers = _asr_handshake_headers()
-            # 实时通话用双向流式，single 增量返回（每次只给新分句）
-            self.asr_ws = await websockets.connect(
-                VOLCENGINE_ASR_STREAM_ENDPOINT, additional_headers=headers,
-                ping_interval=None, max_size=16 * 1024 * 1024,
-            )
-            # 第一包：请求参数；发完即可持续推音频
-            await self.asr_ws.send(_asr_full_request(result_type="single"))
-            self.asr_ready = True
+            self.asr_ws = await websockets.connect(ws_url, ping_interval=None)
+
+            self.asr_task_id = uuid.uuid4().hex.replace("-", "")
+
+            # 发送 StartTranscription
+            start_msg = {
+                "header": {
+                    "appkey": ALIYUN_NLS_APP_KEY,
+                    "message_id": uuid.uuid4().hex.replace("-", ""),
+                    "task_id": self.asr_task_id,
+                    "namespace": "SpeechTranscriber",
+                    "name": "StartTranscription",
+                },
+                "payload": {
+                    "format": "pcm",
+                    "sample_rate": ASR_SAMPLE_RATE,
+                    "enable_intermediate_result": True,
+                    "enable_punctuation_prediction": True,
+                    "enable_inverse_text_normalization": True,
+                    "enable_words": True,
+                },
+            }
+            await self.asr_ws.send(json.dumps(start_msg, ensure_ascii=False))
+            logger.info(f"[阿里云NLS] 已发送 StartTranscription, task_id={self.asr_task_id}")
+
+            # 启动 ASR 接收协程
             task = asyncio.create_task(self._asr_receive_loop())
             self._tasks.append(task)
-            logger.info("[火山ASR] 双向流式识别已启动")
-            await self.set_state(CallState.LISTENING)
             return True
         except Exception as e:
-            logger.error(f"[火山ASR] 启动失败: {e}", exc_info=True)
+            logger.error(f"[阿里云NLS] 启动失败: {e}", exc_info=True)
             await self._send_json({"type": "error", "message": f"ASR启动失败: {e}"})
             return False
 
     async def _asr_receive_loop(self):
-        """持续接收火山 ASR 识别结果（进行中上屏 + definite 定版触发回复）。"""
+        """持续接收阿里云 NLS 的识别结果。"""
         try:
             async for message in self.asr_ws:
                 if self._closed:
                     break
-                if not isinstance(message, (bytes, bytearray)):
-                    continue
                 try:
-                    msg_type, _flags, obj = _asr_parse_frame(bytes(message))
-                except Exception as pe:
-                    logger.debug(f"[火山ASR] 帧解析失败: {pe}")
+                    data = json.loads(message)
+                except json.JSONDecodeError:
                     continue
 
-                if msg_type == _ASR_MSG_ERROR:
-                    logger.error(f"[火山ASR] 错误帧: {obj}")
-                    continue
-                if msg_type != _ASR_MSG_FULL_SERVER or not obj:
-                    continue
+                header = data.get("header", {})
+                name = header.get("name", "")
+                payload = data.get("payload", {})
 
-                ongoing, finals = _asr_split_utterances(obj)
+                if name == "TranscriptionStarted":
+                    self.asr_ready = True
+                    logger.info("[阿里云NLS] TranscriptionStarted，开始接收音频")
+                    await self.set_state(CallState.LISTENING)
 
-                # 进行中文本：实时上屏；若 AI 正在说话则检测到用户开口 → 打断(barge-in)
-                if ongoing:
+                elif name == "SentenceBegin":
+                    # 用户开始说话
                     if self.state == CallState.SPEAKING:
+                        # AI 正在说话时用户开口 → 打断
                         await self.interrupt_tts()
-                    if self.state != CallState.LISTENING:
-                        await self.set_state(CallState.LISTENING)
-                    self.asr_partial_text = ongoing
-                    await self._send_json({"type": "asr_partial", "text": ongoing})
+                    await self.set_state(CallState.LISTENING)
 
-                # definite 定版分句：作为最终识别结果并触发 AI 回复
-                for text in finals:
-                    logger.info(f"[火山ASR] 定版识别: {text}")
-                    self.transcript.append({
-                        "role": "user",
-                        "content": text,
-                        "timestamp": time.strftime("%H:%M:%S"),
-                    })
-                    await self._send_json({"type": "asr_final", "text": text})
+                elif name == "ResultChanged":
+                    # 中间结果（实时显示）
+                    text = payload.get("result", "")
+                    self.asr_partial_text = text
+                    await self._send_json({"type": "asr_partial", "text": text})
+
+                elif name == "SentenceEnd":
+                    # 一句话结束（最终结果）
+                    text = payload.get("result", "")
+                    if text and text.strip():
+                        logger.info(f"[阿里云NLS] 最终识别: {text}")
+                        self.transcript.append({
+                            "role": "user",
+                            "content": text,
+                            "timestamp": time.strftime("%H:%M:%S"),
+                        })
+                        await self._send_json({"type": "asr_final", "text": text})
+                        # 触发 AI 回复
+                        asyncio.create_task(self._generate_reply(text))
                     self.asr_partial_text = ""
-                    asyncio.create_task(self._generate_reply(text))
+
+                elif name == "TranscriptionCompleted":
+                    logger.info("[阿里云NLS] TranscriptionCompleted")
+
+                elif name == "TaskFailed":
+                    status = payload.get("status", 0)
+                    msg = payload.get("message", "")
+                    logger.error(f"[阿里云NLS] TaskFailed: status={status}, message={msg}")
 
         except Exception as e:
             if not self._closed:
-                logger.error(f"[火山ASR] 接收循环异常: {e}", exc_info=True)
+                logger.error(f"[阿里云NLS] 接收循环异常: {e}", exc_info=True)
 
     async def send_audio_to_asr(self, audio_bytes: bytes):
-        """将前端采集的 16k PCM 帧用火山二进制音频帧包裹后转发。"""
+        """将前端采集的音频帧转发给阿里云 NLS。"""
         if self.asr_ws and self.asr_ready and not self._closed:
             try:
-                await self.asr_ws.send(_asr_audio_frame(audio_bytes, last=False))
+                await self.asr_ws.send(audio_bytes)
             except Exception as e:
-                logger.debug(f"[火山ASR] 发送音频失败: {e}")
+                logger.debug(f"[阿里云NLS] 发送音频失败: {e}")
 
     # ---- 人格后端调用 ----
     async def _generate_reply(self, user_text: str):
@@ -864,13 +746,19 @@ class CallSession:
         for task in self._tasks:
             task.cancel()
 
-        # 关闭 ASR（发最后一包负包后关闭连接）
+        # 关闭 ASR
         if self.asr_ws:
             try:
-                await self.asr_ws.send(_asr_audio_frame(b"", last=True))
-            except Exception:
-                pass
-            try:
+                stop_msg = {
+                    "header": {
+                        "appkey": ALIYUN_NLS_APP_KEY,
+                        "message_id": uuid.uuid4().hex.replace("-", ""),
+                        "task_id": self.asr_task_id or "",
+                        "namespace": "SpeechTranscriber",
+                        "name": "StopTranscription",
+                    },
+                }
+                await self.asr_ws.send(json.dumps(stop_msg))
                 await self.asr_ws.close()
             except Exception:
                 pass
@@ -955,7 +843,7 @@ def _pcm_to_wav(pcm: bytes, sample_rate: int = 24000, channels: int = 1, bits: i
 
 
 async def _decode_to_pcm16(audio_b64: str, audio_format: str) -> bytes:
-    """浏览器录音(webm/ogg/wav/m4a) → 16kHz/单声道/16bit 小端 PCM，供火山 ASR。"""
+    """浏览器录音(webm/ogg/wav/m4a) → 16kHz/单声道/16bit 小端 PCM，供阿里云 NLS。"""
     raw = base64.b64decode(audio_b64)
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -985,54 +873,86 @@ async def _decode_to_pcm16(audio_b64: str, audio_format: str) -> bytes:
 
 
 async def transcribe_once(pcm_bytes: bytes) -> str:
-    """一次性整段识别（火山 bigmodel_nostream）：发完全部 PCM 与负包后，取最终文本。"""
+    """一次性整段识别：连阿里云 NLS、发完全部 PCM 后停止，返回拼接文本。"""
     import websockets
-    if not _asr_configured():
-        raise RuntimeError("火山 ASR 未配置 API Key / APP 凭证")
-    if not pcm_bytes:
-        return ""
+    if not ALIYUN_NLS_APP_KEY:
+        raise RuntimeError("阿里云 NLS 未配置 APP_KEY")
+    token = await get_cached_aliyun_token()
+    ws_url = f"{_aliyun_nls_ws_endpoint(ALIYUN_NLS_REGION)}?token={token}"
+    task_id = uuid.uuid4().hex
 
-    headers = _asr_handshake_headers()
-    final_text = ""
+    def _mid():
+        return uuid.uuid4().hex.replace("-", "")
 
-    async with websockets.connect(
-        VOLCENGINE_ASR_NOSTREAM_ENDPOINT, additional_headers=headers,
-        ping_interval=None, max_size=16 * 1024 * 1024,
-    ) as ws:
-        # 第一包：请求参数（整段识别用 full，每次返回全量结果）
-        await ws.send(_asr_full_request(result_type="full"))
+    async with websockets.connect(ws_url, ping_interval=None, max_size=16 * 1024 * 1024) as ws:
+        await ws.send(json.dumps({
+            "header": {
+                "appkey": ALIYUN_NLS_APP_KEY, "message_id": _mid(), "task_id": task_id,
+                "namespace": "SpeechTranscriber", "name": "StartTranscription",
+            },
+            "payload": {
+                "format": "pcm", "sample_rate": ASR_SAMPLE_RATE,
+                "enable_intermediate_result": True,
+                "enable_punctuation_prediction": True,
+                "enable_inverse_text_normalization": True,
+            },
+        }, ensure_ascii=False))
+        # 等到识别通道真正开始，再发音频
+        started = False
+        while not started:
+            d = json.loads(await ws.recv())
+            name = d.get("header", {}).get("name", "")
+            if name == "TranscriptionStarted":
+                started = True
+            elif name == "TaskFailed":
+                raise RuntimeError(f"ASR启动失败: {d.get('payload')}")
 
-        # 按 100ms（16k/16bit/mono = 3200 字节）分片，最后一片打负包标记
+        sentences: List[str] = []
+        last_partial = ""
+        finished = asyncio.Event()
+
+        async def _reader():
+            nonlocal last_partial
+            try:
+                async for m in ws:
+                    dd = json.loads(m)
+                    nm = dd.get("header", {}).get("name", "")
+                    pl = dd.get("payload", {})
+                    if nm == "ResultChanged":
+                        if pl.get("result"):
+                            last_partial = pl["result"]
+                    elif nm == "SentenceEnd":
+                        t = (pl.get("result", "") or "").strip()
+                        if t:
+                            sentences.append(t)
+                    elif nm == "TranscriptionCompleted":
+                        break
+                    elif nm == "TaskFailed":
+                        logger.error(f"[一次性ASR] TaskFailed: {pl}")
+                        break
+            finally:
+                finished.set()
+
+        reader_task = asyncio.create_task(_reader())
+        # 每片约 100ms（16k/16bit/mono = 3200 字节），稍微让步避免瞬间灌爆
         step = 3200
-        total = len(pcm_bytes)
-        pos = 0
-        while pos < total:
-            chunk = pcm_bytes[pos:pos + step]
-            pos += step
-            await ws.send(_asr_audio_frame(chunk, last=(pos >= total)))
-            await asyncio.sleep(0.01)
-
-        async def _collect():
-            nonlocal final_text
-            async for m in ws:
-                if not isinstance(m, (bytes, bytearray)):
-                    continue
-                mt, flags, obj = _asr_parse_frame(bytes(m))
-                if mt == _ASR_MSG_ERROR:
-                    raise RuntimeError(f"火山ASR错误帧: {obj}")
-                if mt == _ASR_MSG_FULL_SERVER and obj:
-                    t = _asr_extract_text(obj)
-                    if t:
-                        final_text = t  # full 模式：后到的全量覆盖
-                    if flags == 0b0011:  # 最后一包结果，定稿
-                        return
-
+        for i in range(0, len(pcm_bytes), step):
+            await ws.send(pcm_bytes[i:i + step])
+            await asyncio.sleep(0.005)
+        await ws.send(json.dumps({
+            "header": {
+                "appkey": ALIYUN_NLS_APP_KEY, "message_id": _mid(), "task_id": task_id,
+                "namespace": "SpeechTranscriber", "name": "StopTranscription",
+            },
+        }, ensure_ascii=False))
         try:
-            await asyncio.wait_for(_collect(), timeout=25.0)
+            await asyncio.wait_for(finished.wait(), timeout=20.0)
         except asyncio.TimeoutError:
-            logger.warning("[火山ASR] 一次性识别等待结果超时，返回已收到的文本")
-
-    return final_text.strip()
+            reader_task.cancel()
+        text = "".join(sentences).strip()
+        if not text:
+            text = (last_partial or "").strip()
+        return text
 
 
 async def _personality_once(role_id: str, user_text: str, session_id: Optional[str] = None,
@@ -1168,7 +1088,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"🎤 语音后端 v2.0 启动 - 端口 {PORT}")
     logger.info(f"  人格后端: {PERSONALITY_SERVER_URL}")
     logger.info(f"  记忆后端: {VECTOR_SERVER_URL}")
-    logger.info(f"  ASR: 火山豆包大模型识别 ({VOLCENGINE_ASR_RESOURCE}) {'已配置' if _asr_configured() else '⚠️ 未配置火山凭证(默认复用TTS Key)!'}")
+    logger.info(f"  ASR: 阿里云 NLS (region={ALIYUN_NLS_REGION}) {'已配置' if ALIYUN_NLS_APP_KEY else '⚠️ 未配置APP_KEY!'}")
     _tts_ok = bool(VOLCENGINE_TTS_API_KEY or (VOLCENGINE_TTS_APP_ID and VOLCENGINE_TTS_ACCESS_TOKEN))
     logger.info(f"  TTS: 豆包语音V3双向流式 {'已配置' if _tts_ok else '⚠️ 未配置 API Key / APP凭证!'}")
     for _rid, _cfg in ROLE_VOICES.items():
@@ -1236,7 +1156,7 @@ async def websocket_call(websocket: WebSocket):
         # 启动 ASR
         asr_ok = await session.start_asr()
         if not asr_ok:
-            await websocket.send_json({"type": "error", "message": "ASR启动失败，请检查火山语音识别是否已开通及凭证配置"})
+            await websocket.send_json({"type": "error", "message": "ASR启动失败，请检查阿里云NLS配置"})
             await websocket.close()
             return
 
@@ -1299,11 +1219,9 @@ async def health():
         "version": "2.0.0",
         "port": str(PORT),
         "asr": {
-            "provider": "volcengine_doubao_bigmodel",
-            "resource": VOLCENGINE_ASR_RESOURCE,
-            "stream_endpoint": VOLCENGINE_ASR_STREAM_ENDPOINT,
-            "nostream_endpoint": VOLCENGINE_ASR_NOSTREAM_ENDPOINT,
-            "configured": _asr_configured(),
+            "provider": "aliyun_nls",
+            "region": ALIYUN_NLS_REGION,
+            "configured": bool(ALIYUN_NLS_APP_KEY and ALIYUN_NLS_ACCESS_KEY_ID),
         },
         "tts": {
             "provider": "volcengine_doubao_v3_bidirection",
