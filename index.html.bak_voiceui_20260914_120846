@@ -461,16 +461,13 @@
     }
     .call-hangup:active { transform: scale(0.92); }
     .call-hint { margin-top: 10px; font-size: 12px; color: var(--muted); }
-    /* 语音消息气泡（微信式：默认只显示语音条，长按/右键才展开转文字） */
+    /* 语音消息气泡 */
     .voice-msg {
-      display: flex; flex-direction: column; align-items: stretch; gap: 8px; cursor: pointer;
-      padding: 10px 14px; min-width: 150px; max-width: min(260px, 72vw);
-      -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+      display: flex; align-items: center; gap: 8px; cursor: pointer;
+      padding: 10px 14px; min-width: 120px;
     }
-    .voice-msg.no-audio { cursor: default; }
-    .voice-msg .voice-bar-row { display: flex; align-items: center; gap: 8px; width: 100%; }
     .voice-msg .voice-icon { font-size: 20px; }
-    .voice-msg .voice-duration { font-size: 12px; color: var(--muted); margin-left: auto; white-space: nowrap; }
+    .voice-msg .voice-duration { font-size: 12px; color: var(--muted); margin-left: auto; }
     .voice-msg.playing .voice-icon { animation: pulse-red 1s infinite; }
     .voice-msg .voice-wave-bar {
       display: flex; gap: 2px; align-items: center;
@@ -478,13 +475,6 @@
     .voice-msg .voice-wave-bar i {
       width: 3px; border-radius: 2px; background: currentColor; opacity: 0.6;
     }
-    .voice-msg .voice-transcript {
-      display: none; width: 100%; padding-top: 8px; border-top: 1px dashed var(--border-soft);
-      font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
-      user-select: text; -webkit-user-select: text;
-    }
-    .voice-msg .voice-transcript.show { display: block; }
-    .voice-msg .voice-transcript-label { font-size: 11px; color: var(--muted); margin-right: 4px; }
 
     /* ===== 弹窗 ===== */
     .modal-mask {
@@ -914,7 +904,6 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     let live2dBlinking = false;  // 是否正在眨眼
     let live2dBlinkStart = 0;    // 眨眼开始时间
     let live2dCollapsed = false; // 形象窗口是否收起
-    let live2dStageRO = null;    // 舞台尺寸观察器：容器（含通话槽）尺寸一变就同步渲染像素并重算居中
     let live2dLipsyncRAF = null;  // 口型同步的 requestAnimationFrame ID
     let live2dAudioCtx = null;     // 口型同步用的 AudioContext
     let live2dAnalyser = null;     // 口型同步用的 AnalyserNode
@@ -1242,12 +1231,10 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         removeTypingIndicator();
         setLive2DStatus("idle", "待机中");
         if (conv) {
+          appendAIMessage(conv, msg.content, msg.role_ids?.[0]);
+          // 如果有语音，在文本气泡后追加语音气泡
           if (msg.audio) {
-            // 微信式：只显示语音条，文字作为“转文字”隐藏，长按/右键才看；不再直接显示文字气泡
-            appendAIVoiceMessage(conv, msg.audio, msg.audio_format || "wav", msg.content || "", msg.role_ids?.[0]);
-          } else {
-            // 没有音频（TTS 失败兜底）才退回普通文字气泡
-            appendAIMessage(conv, msg.content, msg.role_ids?.[0]);
+            appendVoiceMessage(conv, msg.audio, msg.audio_format || "mp3", false, msg.role_ids?.[0]);
           }
         }
         if (msg.intimacy) {
@@ -1336,7 +1323,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         const preview = document.createElement("span");
         preview.className = "conv-preview";
         const last = conv.messages.filter(m => m.role !== "time").slice(-1)[0];
-        preview.textContent = last ? (last.isVoice ? "🎤 语音消息" : last.content) : "暂无消息";
+        preview.textContent = last ? last.content : "暂无消息";
         info.appendChild(name);
         info.appendChild(preview);
         btn.appendChild(av);
@@ -1455,24 +1442,18 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
           }
           row.appendChild(av);
         }
-        let bubble;
-        if (msg.isVoice) {
-          // 语音消息：渲染成语音条（文字默认隐藏，长按/右键转文字）
-          bubble = buildVoiceBubble(msg, msg.role === "user");
-        } else {
-          bubble = document.createElement("div");
-          bubble.className = "bubble";
-          bubble.textContent = msg.content || "";
-          // P4: 支持图片消息（自拍/照片生成）
-          if (msg.imageUrl) {
-            const img = document.createElement("img");
-            img.src = msg.imageUrl;
-            img.alt = "角色照片";
-            img.loading = "lazy";
-            img.style.cssText = "max-width:100%;border-radius:10px;margin-top:8px;display:block;cursor:pointer;";
-            img.addEventListener("click", () => window.open(msg.imageUrl, "_blank"));
-            bubble.appendChild(img);
-          }
+        const bubble = document.createElement("div");
+        bubble.className = "bubble";
+        bubble.textContent = msg.content || "";
+        // P4: 支持图片消息（自拍/照片生成）
+        if (msg.imageUrl) {
+          const img = document.createElement("img");
+          img.src = msg.imageUrl;
+          img.alt = "角色照片";
+          img.loading = "lazy";
+          img.style.cssText = "max-width:100%;border-radius:10px;margin-top:8px;display:block;cursor:pointer;";
+          img.addEventListener("click", () => window.open(msg.imageUrl, "_blank"));
+          bubble.appendChild(img);
         }
         row.appendChild(bubble);
         box.appendChild(row);
@@ -1630,21 +1611,6 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         live2dApp.view.style.width = "100%";
         live2dApp.view.style.height = "100%";
         stage.insertBefore(live2dApp.view, stage.firstChild);
-        // 容器尺寸变化（被搬进/搬出通话卡片、窗口缩放、手机旋转、卡片动画/滚动条）时，
-        // 持续把渲染像素同步成真实容器尺寸并重新等比居中，避免 canvas 被 CSS 非等比拉伸导致人物“变异”
-        if (window.ResizeObserver && !live2dStageRO) {
-          live2dStageRO = new ResizeObserver(() => {
-            if (!live2dApp) return;
-            const el = $("#live2d-stage");
-            if (!el) return;
-            const w = el.clientWidth, h = el.clientHeight;
-            if (w < 2 || h < 2) return; // 收起/隐藏时尺寸为0，跳过
-            const r = live2dApp.renderer;
-            if (Math.abs(r.width - w) > 1 || Math.abs(r.height - h) > 1) r.resize(w, h);
-            fitLive2DModel();
-          });
-          live2dStageRO.observe(stage);
-        }
         // 窗口大小变化时调整渲染尺寸
         window.addEventListener("resize", () => {
           if (live2dApp && !live2dCollapsed) {
@@ -1743,7 +1709,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       let origH = (orig && orig.height) || model.height || origW;
       if (!origW || !origH) return;
       const roleCfg = (LIVE2D_CONFIG.fit && LIVE2D_CONFIG.fit[live2dCurrentRole]) || { fill: 0.95, liftY: 0 };
-      const fill = inCall ? 0.94 : (roleCfg.fill || 0.95);
+      const fill = inCall ? 0.98 : (roleCfg.fill || 0.95);
       // 重置缩放后按宽高较小者等比缩放，保证全身完整
       model.scale.set(1, 1);
       const s = Math.min((viewW * fill) / origW, (viewH * fill) / origH);
@@ -2126,8 +2092,6 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
         const voiceMsg = createMessage("user", `[语音 ${duration.toFixed(1)}秒]`);
         voiceMsg.isVoice = true;
         voiceMsg.voiceDuration = duration;
-        voiceMsg.voiceAudio = base64;   // 自己刚录的，内存中可点回放，不持久化
-        voiceMsg.voiceFormat = fmt;
         conv.messages.push(voiceMsg);
         appendMessageToDOM(voiceMsg, conv);
         renderConversationList();
@@ -2148,18 +2112,23 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       reader.readAsDataURL(blob);
     }
 
-    // 构造一个语音气泡（语音条 + 默认隐藏的转文字区）。AI 语音可播放、可转文字；用户自己发的只显示条
-    function buildVoiceBubble(msg, isUser) {
+    function appendVoiceMessage(conv, audioBase64, audioFormat, isUser, roleId) {
+      const box = $("#messages");
+      const wrap = document.createElement("div");
+      wrap.className = `message ${isUser ? "user" : "ai"}`;
+      if (!isUser && roleId) {
+        const role = getRole(roleId);
+        const av = document.createElement("div");
+        av.className = "avatar ai-avatar";
+        av.textContent = role.emoji;
+        av.style.background = `linear-gradient(135deg, ${role.color}88, ${role.color})`;
+        wrap.appendChild(av);
+      }
       const bubble = document.createElement("div");
       bubble.className = "bubble voice-msg";
-      const hasAudio = !!msg.voiceAudio;
-      if (!hasAudio) bubble.classList.add("no-audio");
-
-      const barRow = document.createElement("div");
-      barRow.className = "voice-bar-row";
       const icon = document.createElement("span");
       icon.className = "voice-icon";
-      icon.textContent = isUser ? "🎤" : "🔊";
+      icon.textContent = "🔊";
       const wave = document.createElement("span");
       wave.className = "voice-wave-bar";
       for (let i = 0; i < 5; i++) {
@@ -2169,66 +2138,14 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       }
       const dur = document.createElement("span");
       dur.className = "voice-duration";
-      dur.textContent = isUser
-        ? (msg.voiceDuration ? `${Number(msg.voiceDuration).toFixed(1)}″` : "语音")
-        : (hasAudio ? "点击播放" : "语音");
-      barRow.appendChild(icon);
-      barRow.appendChild(wave);
-      barRow.appendChild(dur);
-      bubble.appendChild(barRow);
-
-      // 转文字区：仅 AI 语音且有文本时创建，默认隐藏
-      let transcriptEl = null;
-      if (!isUser && msg.content) {
-        transcriptEl = document.createElement("div");
-        transcriptEl.className = "voice-transcript";
-        transcriptEl.textContent = msg.content;
-        bubble.appendChild(transcriptEl);
-      }
-      const toggleTranscript = (e) => {
-        if (!transcriptEl) return;
-        if (e) { e.preventDefault(); e.stopPropagation(); }
-        transcriptEl.classList.toggle("show");
-      };
-
-      // 点击播放（仅有音频时）；长按转文字后的那次合成 click 要抑制，避免误播放
-      if (hasAudio) {
-        bubble.addEventListener("click", (e) => {
-          if (bubble._suppressNextClick) { bubble._suppressNextClick = false; e.preventDefault(); e.stopPropagation(); return; }
-          playVoice(bubble, msg.voiceAudio, msg.voiceFormat || "wav", dur);
-        });
-      }
-      // 电脑端：右键转文字；手机端：长按 500ms 转文字（并抑制长按后系统补触发的 contextmenu/click）
-      if (transcriptEl) {
-        let lastLongPress = 0;
-        let pressTimer = null;
-        bubble.addEventListener("contextmenu", (e) => {
-          if (Date.now() - lastLongPress < 400) { e.preventDefault(); return; }
-          toggleTranscript(e);
-        });
-        const startPress = () => { pressTimer = setTimeout(() => { pressTimer = null; lastLongPress = Date.now(); bubble._suppressNextClick = true; toggleTranscript(); }, 500); };
-        const cancelPress = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
-        bubble.addEventListener("touchstart", startPress, { passive: true });
-        bubble.addEventListener("touchend", cancelPress);
-        bubble.addEventListener("touchmove", cancelPress);
-        bubble.addEventListener("touchcancel", cancelPress);
-        bubble.title = hasAudio ? "点击播放，右键/长按转文字" : "右键/长按转文字";
-      }
-      return bubble;
-    }
-
-    // AI 语音回复：作为一条语音消息入库并渲染（文字只作为“转文字”内容，不直接显示）
-    function appendAIVoiceMessage(conv, audioBase64, audioFormat, transcript, roleId) {
-      const msg = createMessage("ai", transcript || "");
-      msg.isVoice = true;
-      msg.voiceAudio = audioBase64;        // 仅保留在内存，刷新后不持久化音频（避免撑爆 localStorage）
-      msg.voiceFormat = audioFormat || "wav";
-      if (roleId) msg.roleId = roleId;
-      conv.messages.push(msg);
-      appendMessageToDOM(msg, conv);
-      renderConversationList();
-      if (currentUser) saveConversationsToLocal(currentUser.username);
-      return msg;
+      dur.textContent = "点击播放";
+      bubble.appendChild(icon);
+      bubble.appendChild(wave);
+      bubble.appendChild(dur);
+      bubble.addEventListener("click", () => playVoice(bubble, audioBase64, audioFormat, dur));
+      wrap.appendChild(bubble);
+      box.appendChild(wrap);
+      scrollToBottom();
     }
 
     function playVoice(bubbleEl, audioBase64, audioFormat, durEl) {
