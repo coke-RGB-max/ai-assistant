@@ -1754,6 +1754,9 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
                 )
                 logger.info(f"[过往线] 注入 past_story，user={request.user_id} role={role_ids[0]}")
 
+        # 群聊判定（必须在任何 is_group 引用之前完成，否则模糊意图注入处会 UnboundLocalError）
+        is_group = request.mode == ChatMode.GROUP
+
         # v16.0: 模糊意图注入——TA随口提过还没了断的事，让她心里记着（48小时内）
         if not is_group and session_data:
             _pi = session_data.get("pending_intent")
@@ -1777,7 +1780,6 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
         timer.mark("主回复LLM生成")
 
         # v14.0: 承诺检测——回复中说了"下课找你"之类的话，存到session供proactive_server使用
-        is_group = request.mode == ChatMode.GROUP  # 修复：必须在首次引用前正确判定群聊
         if not is_group and request.session_id and session_data is not None:
             promise = detect_promise(reply)
             if promise:

@@ -109,11 +109,19 @@ DEFAULT_VOICE = {
 def volc_resource_for_voice(voice: str) -> str:
     """按音色代号判断所属资源（连接头 X-Api-Resource-Id）。
 
-    ICL_/saturn_ 前缀 → 声音复刻2.0；_moon_/_jupiter_ 老代号 → 语音合成1.0；
-    其余（_uranus_ 等）→ 语音合成2.0。
+    - 真正的“声音复刻克隆音色”才走 seed-icl-2.0：S_ 开头，或克隆查询接口返回的
+      icl_ ID（注意官方预置的 icl_uranus_ / icl_saturn_ 情感指令音色不是克隆音色）；
+    - _moon_/_jupiter_ 老代号 → 语音合成1.0；
+    - 其余（_uranus_/_saturn_ 预置、ICL_uranus_/ICL_saturn_ 指令音色、*_bigtts）→ 语音合成2.0。
+    用错资源会报 55000000 “resource ID is mismatched with speaker related resource”。
     """
     v = (voice or "").lower()
-    if v.startswith("icl_") or v.startswith("saturn_"):
+    is_clone = v.startswith("s_") or (
+        v.startswith("icl_")
+        and not v.startswith("icl_uranus_")
+        and not v.startswith("icl_saturn_")
+    )
+    if is_clone:
         return VOLC_TTS_RES_ICL
     if "_moon_" in v or "_jupiter_" in v:
         return VOLC_TTS_RES_1
@@ -1398,7 +1406,7 @@ async def voice_chat_once(request: Request):
         "audio_base64": audio_out,
         "audio_format": "wav",
         "session_id": new_session or session_id,
-    }, ensure_ascii=False)
+    })
 
 
 if __name__ == "__main__":
