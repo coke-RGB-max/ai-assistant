@@ -262,7 +262,6 @@ tr:hover td { background: rgba(255,255,255,.02); }
           <option value="qinghe">清禾</option>
           <option value="jingwen">璟雯</option>
         </select>
-        <input id="apptSearch" type="text" placeholder="🔍 搜索用户名（模糊），留空看全部" style="flex:1;min-width:180px;padding:8px 10px;border:1px solid var(--dl-color-theme-neutral-light,#ddd);border-radius:8px;background:transparent;">
         <button class="btn btn-primary" id="apptAddBtn">➕ 新增约定</button>
         <button class="btn" id="apptRefreshBtn">🔄 刷新</button>
         <span class="hint" id="apptCount"></span>
@@ -508,13 +507,6 @@ $("userSearch").addEventListener("input", () => renderUsersList(allUsers));
 $("apptRefreshBtn") && $("apptRefreshBtn").addEventListener("click", loadAppointmentsPage);
 $("apptAddBtn") && $("apptAddBtn").addEventListener("click", openAddAppt);
 $("apptRoleFilter") && $("apptRoleFilter").addEventListener("change", loadAppointmentsPage);
-// 用户名模糊搜索：输入时防抖刷新
-(function () {
-  const box = $("apptSearch");
-  if (!box) return;
-  let t = null;
-  box.addEventListener("input", () => { clearTimeout(t); t = setTimeout(loadAppointmentsPage, 300); });
-})();
 
 async function loadUsers() {
   const box = $("usersList");
@@ -824,11 +816,7 @@ const ROLE_NAME = { nianqi: "念琦", qinghe: "清禾", jingwen: "璟雯" };
 async function loadAppointmentsPage() {
   try {
     const role = $("apptRoleFilter").value;
-    const q = ($("apptSearch").value || "").trim();
-    const params = new URLSearchParams();
-    if (role) params.set("role_id", role);
-    if (q) params.set("q", q);
-    const qs = params.toString() ? "?" + params.toString() : "";
+    const qs = role ? `?role_id=${encodeURIComponent(role)}` : "";
     const data = await apiGet(`/api/admin/appointments${qs}`);
     const items = data.items || [];
     $("apptCount").textContent = `共 ${items.length} 条`;
@@ -840,8 +828,7 @@ async function loadAppointmentsPage() {
         const when = a.when ? `🕒 ${a.when}` : "";
         const where = a.where ? `📍 ${a.where}` : "";
         const expire = a.expires_in_h != null ? `剩 ${a.expires_in_h}h 自动清` : "";
-        const who = a.user_id ? `👤 ${a.user_id}` : "";
-        const tags = [who, when, where, expire].filter(Boolean).join(" · ");
+        const tags = [when, where, expire].filter(Boolean).join(" · ");
         return `<div class="card" style="padding:14px;margin-bottom:10px;">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
             <div>

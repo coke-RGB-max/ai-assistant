@@ -1045,8 +1045,8 @@ async def transcribe_once(pcm_bytes: bytes) -> str:
 
 async def _personality_once(role_id: str, user_text: str, session_id: Optional[str] = None,
                             chat_history: Optional[List[Dict]] = None,
-                            intimacy_map: Optional[Dict] = None) -> Tuple[str, Optional[str], Optional[str]]:
-    """调人格后端 /api/generate 做一次性生成，返回 (reply, session_id, emotion)。"""
+                            intimacy_map: Optional[Dict] = None) -> Tuple[str, Optional[str]]:
+    """调人格后端 /api/generate 做一次性生成，返回 (reply, session_id)。"""
     payload = {
         "mode": "single",
         "role_ids": [role_id],
@@ -1055,7 +1055,7 @@ async def _personality_once(role_id: str, user_text: str, session_id: Optional[s
         "chat_history": chat_history or [],
         "temperature": 0.9,
         "max_tokens": 500,
-        "return_debug": True,  # 打开调试，只为取到本次情绪标签喂给 TTS
+        "return_debug": False,
         "enable_memory_analysis": True,
     }
     if session_id:
@@ -1065,41 +1065,14 @@ async def _personality_once(role_id: str, user_text: str, session_id: Optional[s
     async with httpx.AsyncClient(timeout=PERSONALITY_TIMEOUT) as client:
         resp = await client.post(f"{PERSONALITY_SERVER_URL}/api/generate", json=payload)
     if resp.status_code == 429:
-        return "……你说得太快啦，让我喘口气。", session_id, None
+        return "……你说得太快啦，让我喘口气。", session_id
     if resp.status_code != 200:
         raise RuntimeError(f"人格后端HTTP{resp.status_code}")
     d = resp.json()
-    debug = d.get("debug") or {}
-    emotion = debug.get("emotion") if isinstance(debug, dict) else None
-    return (d.get("reply", "") or ""), (d.get("session_id") or session_id), emotion
+    return (d.get("reply", "") or ""), (d.get("session_id") or session_id)
 
 
-# 情绪标签 → 语气指令（喂给语音合成2.0 的 context_texts，让语气随情绪起伏；未命中则回退角色默认 tone）
-_EMOTION_TO_TONE = {
-    "happy": "此刻心情很好，语气轻快上扬，带着笑意",
-    "joy": "此刻心情很好，语气轻快上扬，带着笑意",
-    "excited": "很兴奋，语速稍快，语气上扬",
-    "sad": "现在情绪低落，声音放轻放柔，有点提不起劲",
-    "angry": "此刻在赌气，语气冲一点，别软下来",
-    "annoyed": "有点不耐烦，语气淡淡的，带点敷衍",
-    "love": "在对喜欢的人说话，语气亲昵，尾音放软",
-    "affection": "在对喜欢的人说话，语气亲昵，尾音放软",
-    "jealous": "有点小吃醋，语气里带着别扭和试探",
-    "worried": "在担心对方，语气里带点着急",
-    "shy": "有点害羞，声音小一点，吞吞吐吐",
-    "fear": "有些不安，声音发紧",
-    "surprise": "很意外，语气明显上扬",
-    "disgust": "嫌弃的语气，带点不屑",
-    "calm": "",
-    "neutral": "",
-}
-def emotion_to_tone(emotion: Optional[str]) -> str:
-    if not emotion:
-        return ""
-    return _EMOTION_TO_TONE.get(str(emotion).strip().lower(), "")
-
-
-async def tts_once(text: str, role_id: str = "nianqi", emotion: Optional[str] = None) -> bytes:
+async def tts_once(text: str, role_id: str = "nianqi") -> bytes:
     """豆包语音 V3 双向流式一次性合成整段，收集为 24k/16bit/mono PCM。"""
     import websockets
     cfg = ROLE_VOICES.get(role_id, DEFAULT_VOICE)
@@ -1114,16 +1087,9 @@ async def tts_once(text: str, role_id: str = "nianqi", emotion: Optional[str] = 
     def _payload(event: int, with_text: bool = False) -> bytes:
         req_params: Dict[str, Any] = {"speaker": voice, "audio_params": dict(audio_params)}
         if supports_instruction:
-            # 角色固定基调 + 本次情绪语气，一起作为参考上下文
-            ctx = []
             tone = cfg.get("tone", "")
             if tone:
-                ctx.append(tone)
-            emo_hint = emotion_to_tone(emotion)
-            if emo_hint:
-                ctx.append(emo_hint)
-            if ctx:
-                req_params["context_texts"] = ctx
+                req_params["context_texts"] = [tone]
         if with_text:
             req_params["text"] = text
         body: Dict[str, Any] = {
@@ -1411,7 +1377,7 @@ async def voice_chat_once(request: Request):
 
     # 3) 人格生成
     try:
-        reply, new_session, emotion = await _personality_once(
+        reply, new_session = await _personality_once(
             role_id, asr_text, session_id, chat_history, intimacy_map)
     except Exception as e:
         logger.error(f"[一次性语音] 人格生成失败: {e}", exc_info=True)
@@ -1422,12 +1388,11 @@ async def voice_chat_once(request: Request):
         })
     if not reply:
         reply = "……"
-    logger.info(f"[一次性语音] 本次情绪={emotion or '未识别'}")
 
     # 4) TTS 整段合成 → wav（合成失败也保留文字回复）
     audio_out = ""
     try:
-        pcm24 = await tts_once(reply, role_id, emotion)
+        pcm24 = await tts_once(reply, role_id)
         if pcm24:
             audio_out = base64.b64encode(_pcm_to_wav(pcm24, 24000)).decode()
     except Exception as e:

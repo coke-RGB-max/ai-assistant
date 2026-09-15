@@ -869,10 +869,8 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     let wsConnected = false; // WebSocket是否已连接，用于联动Live2D在线/离线状态
     let nicknameForced = false;
     let isTyping = false;
-    let streamingAI = null;  // 流式输出时的当前AI气泡（逐句出多条）
+    let streamingAI = null;  // 流式输出时的临时AI气泡
     let streamTyper = null;  // 流式打字机平滑队列（后端chunk可能瞬间全到，前端逐字平滑呈现）
-    let streamConv = null;   // 当前流式所属会话
-    let streamRoleId = null; // 当前流式角色ID
     let resetTargetUsername = null;
     // 语音录音相关
     let mediaRecorder = null;
@@ -1216,16 +1214,16 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
           });
         }
       } else if (msg.type === "reply_chunk") {
-        // 真正的流式输出：按句拆成多条气泡，像真人微信一句一句发，句与句之间随机停顿
+        // 真正的流式输出：逻辑全文立即累加，显示层走打字机队列逐字平滑吐出
         removeTypingIndicator();
         setLive2DStatus("idle", "待机中");
         if (conv) {
-          streamConv = conv;
           if (!streamingAI) {
-            maybeAddTimeDivider(conv); // AI 这次开口距上次交互超过阈值，先插一条时间条
-            streamRoleId = msg.role_ids?.[0] || null;
-            startNewStreamBubble();
+            streamingAI = createMessage("ai", "");
+            streamingAI.roleId = msg.role_ids?.[0] || null;
+            appendMessageToDOM(streamingAI, conv);
           }
+          streamingAI.content = (streamingAI.content || "") + (msg.content || "");
           streamTyperEnqueue(msg.content || "");
         }
       } else if (msg.type === "reply_done") {
@@ -1484,7 +1482,6 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
     }
 
     async function appendAIMessage(conv, content, roleId, imageUrl) {
-      maybeAddTimeDivider(conv); // 非流式回复/主动消息开口前，同样按阈值补时间条
       const aiMsg = createMessage("ai", content);
       if (roleId) aiMsg.roleId = roleId;
       if (imageUrl) aiMsg.imageUrl = imageUrl;
@@ -2672,115 +2669,72 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       isTyping = false;
     }
 
-    // ===== 流式回复：逐句拆成多条气泡，像真人微信一句一句发，句与句之间随机停顿约一秒 =====
-    function sentenceGapMs() { return 800 + Math.random() * 800; } // 0.8~1.6 秒
-    // 在一段字符里找第一个句末标点位置，用于在句子说完处断开；无则返回 -1
-    function sentenceEndIndex(s) {
-      return s.search(/[。！？…；!?;；\n]/);
-    }
-    function startNewStreamBubble() {
-      const conv = streamConv || getCurrentConversation();
-      if (!conv) return;
-      const bubble = createMessage("ai", "");
-      bubble.roleId = streamRoleId || null;
-      streamingAI = bubble;
-      appendMessageToDOM(bubble, conv);
-    }
-    // 把当前这条气泡（这句已打完）落库
-    function commitStreamBubble() {
-      const conv = streamConv || getCurrentConversation();
-      if (!conv || !streamingAI) return;
-      conv.messages.push(streamingAI);
-      conv.lastMessageAt = Date.now();
-      renderConversationList();
-      if (currentUser) saveConversationsToLocal(currentUser.username);
-    }
-    function streamTyperSchedule(ms) {
-      if (streamTyper.raf) return;
-      streamTyper.raf = setTimeout(streamTyperPump, ms);
-    }
+    // ===== 流式回复打字机：后端 chunk 可能一瞬间全到，这里用 rAF 逐字平滑吐出 =====
     function streamTyperEnqueue(chunk) {
       if (!streamingAI || !chunk) return;
-      if (!streamTyper) streamTyper = { pending: "", raf: 0, done: false, gapUntil: 0, shownLen: 0 };
+      if (!streamTyper) streamTyper = { pending: "", raf: 0, done: false };
       streamTyper.pending += chunk;
-      streamTyperSchedule(0);
+      if (!streamTyper.raf) streamTyper.raf = requestAnimationFrame(streamTyperPump);
     }
     function streamTyperPump() {
-      streamTyper.raf = 0;
-      if (!streamTyper || !streamingAI) return;
-      // 句间停顿中：等到恢复点再继续出下一句
-      if (streamTyper.gapUntil && Date.now() < streamTyper.gapUntil) {
-        streamTyperSchedule(Math.max(20, streamTyper.gapUntil - Date.now()));
+      if (!streamTyper || !streamingAI) {
+        if (streamTyper) streamTyper.raf = 0;
         return;
       }
-      // 积压越多每步吐得越快：既逐字平滑，又不会越积越多
+      // 积压越多每帧吐得越快：既逐字平滑，又不会越积越多、迟迟打不完
       let step = 2;
       if (streamTyper.pending.length > 120) step = 10;
       else if (streamTyper.pending.length > 40) step = 5;
-      if (streamTyper.done) step = Math.max(step, 6);
-      const takeRaw = streamTyper.pending.slice(0, step);
-      // 在这一步里找句末标点：只吐到句末标点为止，让当前气泡在这句话说完后停住
-      const endIdx = sentenceEndIndex(takeRaw);
-      let take = takeRaw, endedSentence = false;
-      if (endIdx >= 0) { take = takeRaw.slice(0, endIdx + 1); endedSentence = true; }
-      streamTyper.pending = streamTyper.pending.slice(take.length);
-      streamTyper.shownLen = (streamTyper.shownLen || 0) + take.length; // 累计已输出到屏幕的字符数（跨所有气泡）
+      if (streamTyper.done) step = Math.max(step, 6); // 收尾阶段适当加速
+      const take = streamTyper.pending.slice(0, step);
+      streamTyper.pending = streamTyper.pending.slice(step);
       if (streamingAI._element) streamingAI._element.textContent = (streamingAI._element.textContent || "") + take;
-      streamingAI.content = streamingAI._element ? streamingAI._element.textContent : take;
       scrollToBottom();
-      // 这句话说完（且不只是一两个标点单独成泡）：当前气泡落库，停一下再开下一句
-      if (endedSentence && take.trim().length >= 2) {
-        commitStreamBubble();
-        if (streamTyper.pending.length > 0 || !streamTyper.done) {
-          streamTyper.gapUntil = Date.now() + sentenceGapMs();
-          streamTyper.pending = streamTyper.pending.replace(/^\s+/, ""); // 去掉下一句开头空白
-          startNewStreamBubble();
-          streamTyperSchedule(0); // 下次进入会先等够句间停顿
-          return;
-        }
-      }
       if (streamTyper.pending.length > 0) {
-        streamTyperSchedule(16);
-      } else if (streamTyper.done) {
-        finalizeStreamMessage();
+        streamTyper.raf = requestAnimationFrame(streamTyperPump);
+      } else {
+        streamTyper.raf = 0;
+        if (streamTyper.done) finalizeStreamMessage();
       }
     }
     function markStreamDone(finalText, imageUrl) {
       if (!streamingAI) return;
+      if (finalText) streamingAI.content = finalText;
       if (imageUrl) streamingAI.imageUrl = imageUrl;
-      if (!streamTyper) streamTyper = { pending: "", raf: 0, done: false, gapUntil: 0, shownLen: 0 };
+      if (!streamTyper) streamTyper = { pending: "", raf: 0, done: false };
       streamTyper.done = true;
-      // 全文对齐：以累计已输出字符数为准，把还没显示的尾段交给逐句泵（会自动再断句、再停顿）
-      const full = finalText || "";
-      const shownLen = streamTyper.shownLen || 0;
-      streamTyper.pending = (full.length > shownLen) ? full.slice(shownLen) : "";
+      // 以最终全文为基准，算出“还没显示出来”的部分继续平滑补完，杜绝漏字
+      const full = streamingAI.content || "";
+      const shown = streamingAI._element ? (streamingAI._element.textContent || "") : "";
+      if (full.startsWith(shown)) {
+        streamTyper.pending = full.slice(shown.length);
+      } else {
+        // 后端最终文本与逐字内容不一致（如做了润色），直接以最终文本为准
+        streamTyper.pending = "";
+        if (streamingAI._element) streamingAI._element.textContent = full;
+      }
       if (streamTyper.pending.length === 0) finalizeStreamMessage();
-      else streamTyperSchedule(0);
+      else if (!streamTyper.raf) streamTyper.raf = requestAnimationFrame(streamTyperPump);
     }
     function finalizeStreamMessage() {
-      if (streamTyper) { if (streamTyper.raf) clearTimeout(streamTyper.raf); streamTyper = null; }
-      if (!streamingAI) { streamConv = null; streamRoleId = null; return; }
-      const conv = streamConv || getCurrentConversation();
+      if (streamTyper) { if (streamTyper.raf) cancelAnimationFrame(streamTyper.raf); streamTyper = null; }
+      if (!streamingAI) return;
+      const conv = getCurrentConversation();
+      // 最终全量校正一次，保证落库与显示都和后端完全一致
       if (streamingAI._element) streamingAI._element.textContent = streamingAI.content || "";
       if (conv) {
-        // 最后一条气泡（此前句子已逐句 commit）；若上一步 commit 已 push 过则不重复
-        if (conv.messages[conv.messages.length - 1] !== streamingAI) conv.messages.push(streamingAI);
-        conv.lastMessageAt = Date.now();
+        conv.messages.push(streamingAI);
         renderConversationList();
         if (currentUser) saveConversationsToLocal(currentUser.username);
       }
       streamingAI = null;
-      streamConv = null;
-      streamRoleId = null;
     }
     function resetStreamTyper() {
       // 切换会话/登出时中止正在进行的打字机，避免半截气泡串到别的会话
-      if (streamTyper && streamTyper.raf) clearTimeout(streamTyper.raf);
+      if (streamTyper && streamTyper.raf) cancelAnimationFrame(streamTyper.raf);
       streamTyper = null;
       if (streamingAI && streamingAI._element) streamingAI._element.remove();
       streamingAI = null;
-      streamConv = null;
-      streamRoleId = null;
     }
 
     // ===== 昵称 =====

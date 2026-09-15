@@ -4305,8 +4305,8 @@ async def admin_delete_schedule(role_id: str, activity_id: int):
 # v16.0: 约定/待办管理 API（带时间地点，AI 自动写入，管理员可改）
 # ============================================================
 @app.get("/api/admin/appointments")
-async def admin_list_appointments(request: Request, role_id: str = "", status: str = "", q: str = ""):
-    """列出约定/待办，可按角色、状态、用户名(q,模糊匹配 user_id)过滤。"""
+async def admin_list_appointments(request: Request, role_id: str = "", status: str = ""):
+    """列出约定/待办，可按角色、状态过滤。"""
     _, err = _require_admin(request)
     if err:
         return err
@@ -4317,8 +4317,6 @@ async def admin_list_appointments(request: Request, role_id: str = "", status: s
         sql += " AND role_id=?"; params.append(role_id)
     if status:
         sql += " AND status=?"; params.append(status)
-    if q:
-        sql += " AND user_id LIKE ?"; params.append(f"%{q.strip()}%")
     sql += " ORDER BY id DESC LIMIT 500"
     rows = conn.execute(sql, params).fetchall()
     conn.close()
@@ -4327,7 +4325,6 @@ async def admin_list_appointments(request: Request, role_id: str = "", status: s
     for r in rows:
         items.append({
             "id": r["id"], "session_id": r["session_id"], "role_id": r["role_id"],
-            "user_id": r["user_id"],
             "content": r["content"], "when": r["when_text"], "where": r["where_text"],
             "status": r["status"], "created_at": r["created_at"],
             "expires_in_h": round((r["delete_after"] - now) / 3600, 1) if r["delete_after"] else None,
