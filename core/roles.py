@@ -34,6 +34,32 @@ from characters.loader import (
 ROLES_DEFINITION: Dict[str, dict] = load_all_roles()
 
 
+def _load_past_stories():
+    """模式二（过往线/青梅竹马）：把 the_past/ 下不带(2)的完整前史文本
+    挂到对应角色的 past_story 字段。personality_server 检测到 user_id 带 _past
+    后缀时会注入这段。文件名按下面映射到角色 id。"""
+    past_dir = os.path.join(_PROJECT_ROOT, "the_past")
+    file_to_role = {
+        "nianqi.txt": "nianqi",
+        "qinhe.txt": "qinghe",
+        "jinwen.txt": "jingwen",
+    }
+    for fname, rid in file_to_role.items():
+        p = os.path.join(past_dir, fname)
+        try:
+            if os.path.exists(p) and rid in ROLES_DEFINITION:
+                with open(p, "r", encoding="utf-8") as f:
+                    text = f.read().strip()
+                if text:
+                    ROLES_DEFINITION[rid]["past_story"] = text
+                    print(f"[past_story] 已挂载 {fname} -> {rid} ({len(text)}字)")
+        except Exception as e:
+            print(f"[past_story] 加载 {fname} 失败: {e}")
+
+
+_load_past_stories()
+
+
 def get_role_definition(role_id: str) -> dict:
     """获取角色配置（优先走 loader 缓存，支持热重载）。"""
     return _get_role(role_id) or ROLES_DEFINITION.get(role_id, {})

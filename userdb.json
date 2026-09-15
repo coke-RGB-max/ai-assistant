@@ -1,0 +1,12 @@
+{
+  "users": {
+    "admin": {
+      "password": "pbkdf2$7ecd57eeea0ca897224d393392d0e753$tIaSB08RIF8Zo/nEry4nRYmpk/FDe311CJ8Of9cjK5I=",
+      "nickname": "管理员",
+      "is_admin": true,
+      "intimacy": {},
+      "session_id": null
+    }
+  },
+  "qq_bindings": {}
+}

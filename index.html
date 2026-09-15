@@ -689,6 +689,7 @@
               </div>
             </div>
             <div class="header-right">
+              <button id="story-mode-btn" class="ghost-btn" type="button" title="切换时间线：现在 / 小时候的她">回到小时候</button>
               <button id="clear-chat-btn" class="ghost-btn" type="button" title="清空当前会话的本地聊天记录">清空记录</button>
               <button id="header-admin-btn" class="ghost-btn hidden" type="button" title="在新标签页打开独立管理后台">管理后台 ↗</button>
             </div>
@@ -1122,6 +1123,7 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       $("#header-admin-btn").classList.toggle("hidden", currentUser.role !== "admin");
       renderUserCard();
       renderQQBindStatus();
+      if (typeof updateStoryModeBtn === "function") updateStoryModeBtn();
       ensureConversations(currentUser.username);
       switchConversation(`single-${ROLES[0].id}`);
       // 拉取跨端聊天历史（QQ端发的消息网页端也能看到）
@@ -3160,6 +3162,56 @@ CONFIG.HTTP_BASE = CONFIG.BACKEND_URL;
       $("#header-admin-btn").addEventListener("click", () => {
         window.open("admin.html", "_blank");
       });
+
+      // ===== 时间线切换：模式一(现在) / 模式二(小时候·青梅竹马) =====
+      function isPastLine() {
+        return !!(currentUser && currentUser.username && currentUser.username.endsWith("_past"));
+      }
+      function updateStoryModeBtn() {
+        const b = $("#story-mode-btn");
+        if (!b || !currentUser) return;
+        b.textContent = isPastLine() ? "回到现在 ⏪" : "回到小时候 🕰️";
+      }
+      async function switchStoryMode() {
+        if (!currentUser) return;
+        const targetMode = isPastLine() ? "new" : "past";
+        const btn = $("#story-mode-btn");
+        if (btn) { btn.disabled = true; btn.textContent = "切换中…"; }
+        try {
+          const resp = await fetch(`${CONFIG.HTTP_BASE}/api/story_mode/switch`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": "Bearer " + currentUser.token },
+            body: JSON.stringify({ mode: targetMode })
+          });
+          const data = await resp.json();
+          if (!data.success) { showToast(data.error || "切换失败", "error"); return; }
+          // 更新身份为新时间线账号（后端已签发新 token）
+          currentUser.username = data.username;
+          currentUser.nickname = data.nickname;
+          currentUser.role = data.is_admin ? "admin" : "user";
+          currentUser.token = data.token;
+          currentUser.intimacy = data.intimacy || {};
+          saveAuth();
+          // 旧 WS 断开，用新 token 重连
+          try { if (ws) { ws.onclose = null; ws.close(); } } catch (e) {}
+          // 清空界面上的会话，按新身份重建
+          conversationsByUser = {};
+          ensureConversations(currentUser.username);
+          renderUserCard();
+          $("#header-admin-btn").classList.toggle("hidden", currentUser.role !== "admin");
+          switchConversation(`single-${ROLES[0].id}`);
+          connectWebSocket(currentUser.token);
+          updateStoryModeBtn();
+          showToast(data.message || "已切换时间线", "success");
+        } catch (e) {
+          console.error(e);
+          showToast("切换失败：" + (e.message || e), "error");
+        } finally {
+          if (btn) { btn.disabled = false; updateStoryModeBtn(); }
+        }
+      }
+      const _storyBtn = $("#story-mode-btn");
+      if (_storyBtn) _storyBtn.addEventListener("click", switchStoryMode);
 
       $("#send-btn").addEventListener("click", handleSend);
       $("#message-input").addEventListener("keydown", e => {

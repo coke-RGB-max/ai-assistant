@@ -1743,16 +1743,19 @@ async def generate_reply(request: GenerateRequest, request_obj: Request, remaini
             role = ROLES_DEFINITION.get(role_ids[0], {})
             past_story = role.get("past_story", "")
             if past_story:
-                # 截取前2000字，避免prompt过长
-                past_story_short = past_story[:2000] + ("……" if len(past_story) > 2000 else "")
+                # 完整注入前史（约6000字上限，足够覆盖从初遇到现在的关键节点）
+                past_story_short = past_story[:6000] + ("……" if len(past_story) > 6000 else "")
                 system_prompt += (
-                    f"\n\n【重要：你现在处于过往线（青梅竹马继承模式）】\n"
-                    f"你和对方不是新认识的人，你们有共同的过去。以下是你们的故事背景摘要：\n"
-                    f"{past_story_short}\n\n"
-                    f"请基于这个共同过去来回复，你们的关系已经有了深厚的基础，"
-                    f"不需要像刚认识那样小心翼翼，可以自然地提到共同的回忆。"
+                    f"\n\n【重要：你现在处于模式二·过往线（青梅竹马线）】\n"
+                    f"当前对话的对象就是故事里那个从小和你一起长大的人（第二人称'你'）。"
+                    f"你们不是刚认识，而是从童年/少年时就一起长大、彼此熟知的关系。"
+                    f"请严格按下面这份完整的共同过往来扮演：记住你们的初遇、一起经历过的事、"
+                    f"她因为你而产生的小心思和依赖；不要套用'现在线上主线'里她刚认识你时的客气和距离。"
+                    f"用户知道这份过往，可以随时提起其中的人、事、物。现在请自然地以那个阶段的你和他相处。\n\n"
+                    f"===== 你们的完整过往 =====\n{past_story_short}\n"
+                    f"===== 过往结束 =====\n"
                 )
-                logger.info(f"[过往线] 注入 past_story，user={request.user_id} role={role_ids[0]}")
+                logger.info(f"[过往线] 注入 past_story，user={request.user_id} role={role_ids[0]} len={len(past_story_short)}")
 
         # 群聊判定（必须在任何 is_group 引用之前完成，否则模糊意图注入处会 UnboundLocalError）
         is_group = request.mode == ChatMode.GROUP
@@ -2152,13 +2155,14 @@ async def generate_stream(request: StreamGenerateRequest):
             role = ROLES_DEFINITION.get(rid, {})
             past_story = role.get("past_story", "")
             if past_story:
-                past_story_short = past_story[:2000] + ("……" if len(past_story) > 2000 else "")
+                past_story_short = past_story[:6000] + ("……" if len(past_story) > 6000 else "")
                 system_prompt += (
-                    f"\n\n【重要：你现在处于过往线（青梅竹马继承模式）】\n"
-                    f"你和对方不是新认识的人，你们有共同的过去。以下是你们的故事背景摘要：\n"
-                    f"{past_story_short}\n\n"
-                    f"请基于这个共同过去来回复，你们的关系已经有了深厚的基础，"
-                    f"不需要像刚认识那样小心翼翼，可以自然地提到共同的回忆。"
+                    f"\n\n【重要：你现在处于模式二·过往线（青梅竹马线）】\n"
+                    f"当前对话的对象就是故事里那个从小和你一起长大的人（第二人称'你'）。"
+                    f"你们不是刚认识，而是从童年/少年时就一起长大、彼此熟知的关系。"
+                    f"请严格按下面这份完整的共同过往来扮演，不要套用'现在主线'里刚认识时的客气和距离。\n\n"
+                    f"===== 你们的完整过往 =====\n{past_story_short}\n"
+                    f"===== 过往结束 =====\n"
                 )
 
         messages = [{"role":"system","content":system_prompt}]
